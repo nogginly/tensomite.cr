@@ -35,10 +35,11 @@ src/tensomite/dtype.cr      DType
 src/tensomite/view.cr       View: shape, strides, offset
 src/tensomite/device.cr     Buffer and Device interfaces
 src/tensomite/node.cr       Op and Node
-src/tensomite/tensor.cr     Tensor, the public API
+src/tensomite/tensor.cr     Tensor: construction, views, transfers, reading data
+src/tensomite/tensor/       Tensor ops by kind: elementwise, reduce, structural, composite
 src/tensomite/scheduler.cr  realisation
-src/tensomite/devices/      one file per device
-spec/                       specs, one file per type
+src/tensomite/devices/      host.cr (shared host kernels), then one file per device
+spec/                       specs, one file per type or kind of op
 ```
 
 ## Conventions
@@ -47,7 +48,8 @@ spec/                       specs, one file per type
 
 - **Comments document the API and its outcomes:** what a type is, and what a method returns or does. Inside a function, a comment describes the steps of the algorithm, as a numbered list when there are several. Comments never record history or how the code came to be. That belongs in commit messages, and in `PLAN.md` when it affects future contributors.
 - **Check eagerly.** Any shape, dtype or device check that can run when an op is built must run there, not in a kernel. See "Error timing" in `DESIGN.md`.
-- **Raise tensomite errors** (`ShapeError`, `DTypeError`, `DeviceError`, or `Error`) with a message naming the values involved, such as `"cannot expand [3] to [4]"`.
+- **Raise tensomite errors** (`ShapeError`, `DTypeError`, `DeviceError`, `ExecutionError`, or `Error`) with a message naming the values involved, such as `"cannot expand [3] to [4]"`.
+- **Prefer composites to new primitives.** If an op can be built from existing `Op`s at acceptable cost, write it as a `Tensor` method in `tensor/composite.cr`. Every primitive costs a kernel on every device.
 - **Avoid `not_nil!`** (ameba flags it). Use an accessor that raises a meaningful error instead, such as `Node#buffer!`.
 
 ### Crystal gotchas met so far
@@ -55,10 +57,15 @@ spec/                       specs, one file per type
 - **`out` is a reserved word** (used for C out-parameters). Don't use it as a variable name. Kernels use `dst`.
 - **Array literals mixing types become unions.** `[1f32, 2, 3]` is `Array(Float32 | Int32)`, which `Tensor.from` rejects. In specs, use the `f32(1, 2, 3)` helper. Elsewhere, use `[1, 2, 3].map(&.to_f32)`.
 - **`Bytes#unsafe_slice_of(T)`** reinterprets a buffer's bytes as `Slice(T)` without copying.
+- **Class variables are shared with subclasses.** A `class_getter default : CPU` on `CPU` stops a subclass from declaring its own `default` of another type. That is why `CPU` and `SimDiscrete` are siblings under `HostDevice` rather than parent and child.
+- **Generic kernels compile every branch for every dtype.** `Math.exp(x)` on an `Int32` returns `Float64`, which does not fit a `Slice(Int32)`. Wrap results in `T.new(...)` so the code compiles, and reject float-only ops when they are called, so integer kernels never run them.
+- **Methods are type-checked only when called.** A new `Tensor` method with a type error compiles silently until a spec calls it, so every new method needs a spec.
 
 ### Specs
 
 - **Expected values are worked out by hand,** never produced by tensomite itself. Write the intermediate result in a comment above the assertion, for example `# a.T + b = [[11, 24], [32, 45], [53, 66]]`, so a reviewer can check the arithmetic.
+- **Transcendental values come from an independent reference,** Python's `math` module, in float64, and are compared with `expect_close` (tolerance 1e-6 by default). Say so in a comment at the top of the spec file.
+- **Op specs run on every device.** Wrap them in `DEVICES.each do |device| … end` and build inputs with `tensor(device, shape, data)`. Results must be identical on every host device, so the same expectations apply to all of them. Device-specific behaviour, such as transfer counts, goes in `device_spec.cr`.
 - **Each milestone's exit criterion has its own `describe "Mn exit: …"` block.**
 - **Include non-contiguous inputs** (transposed and broadcast views) for any new op. Most indexing bugs hide there.
 - **Test the timing of errors,** as well as the fact that they are raised, when an op adds new checks.
@@ -70,15 +77,15 @@ spec/                       specs, one file per type
 
 ```mermaid
 flowchart LR
-    Op["node.cr: Op member"] --> API["tensor.cr: Tensor method, checks, output shape"]
+    Op["node.cr: Op member"] --> API["tensor/*.cr: Tensor method, checks, output shape"]
     API --> K["devices/*.cr: kernel on every device"]
     K --> Spec["spec: hand-computed values, views"]
     Spec --> Doc["DESIGN.md, if a new concept"]
 ```
 
 1. **Add a member to `Op`** in `node.cr`, with a one-line comment stating what it computes.
-2. **Add the `Tensor` method** in `tensor.cr`. It validates the shapes and dtypes, computes the output shape, and builds the node with `Tensor.lazy(Node.new(...))`. Broadcast or permute the sources there, so the kernel stays simple.
-3. **Implement the kernel on every device.** On the CPU, add a branch to `CPU#execute(T, node, dst)`. The `case` is exhaustive, so a missing branch is a compile error.
+2. **Add the `Tensor` method** in the matching `tensor/*.cr` file. It validates the shapes and dtypes (`check_compatible`, `check_float`), computes the output shape, and builds the node with `Tensor.lazy(Node.new(...))`. Broadcast or permute the sources there, so the kernel stays simple.
+3. **Implement the kernel on every device.** For host devices, add a branch to `HostDevice#execute(T, node, dst)`. The `case` is exhaustive, so a missing branch is a compile error.
 4. **Write specs** with hand-computed values over contiguous, transposed and broadcast inputs.
 5. **Update `DESIGN.md`** if the op adds a concept, such as a new node field or a new kind of view.
 
@@ -91,9 +98,9 @@ flowchart LR
 
 ### Adding a device
 
-1. **Subclass `Device` and `Buffer`** under `src/tensomite/devices/`, and require the file from `src/tensomite.cr`.
-2. **Implement every abstract method.** `map` returns `nil` if the device's memory isn't host-visible.
-3. **Run the full op suite** on the new device, comparing results against the CPU device.
+1. **Subclass `Device` and `Buffer`** under `src/tensomite/devices/`, and require the file from `src/tensomite.cr`. A device whose kernels run on the host subclasses `HostDevice` instead and gets every kernel for free.
+2. **Implement every abstract method.** `map` returns `nil` if the device's memory isn't host-visible. Buffers record their device, and every method rejects a buffer from another device with `DeviceError`.
+3. **Run the full op suite** on the new device. Host devices join the `DEVICES` list in `spec/spec_helper.cr`. Other devices compare against the CPU, with tolerances where their order of arithmetic differs.
 
 ## Debugging
 
@@ -112,6 +119,19 @@ flowchart TD
 - **Inspect before realising.** An unrealised tensor's graph is all there: `t.node.op`, `t.node.srcs`, `t.node.shape`, and each source's `view`.
 - **Check the view first** when a result is wrong for transposed or broadcast inputs but right for contiguous ones. `View#offset_of(i)` shows where element `i` is read from.
 - **`node.realized?`** shows whether work has run. A realised node has no sources left to inspect, so inspect before realising.
+- **Passes on `CPU`, fails on `SimDiscrete`?** Something read a buffer directly instead of through `map` or `download`, or mixed buffers between devices. `SimDiscrete#uploads` and `#downloads` show how much data moved.
+
+## Documents
+
+- **Tables** have no outer pipes, with columns padded to equal width:
+
+  ```
+  Type   |File      |Role
+  -------|----------|----------------
+  `View` |`view.cr` |Shape and strides
+  ```
+
+- **Diagrams** are Mermaid, embedded where they explain the design better than prose. Decision nodes use the hexagon `{{"question?"}}`, not the diamond. Emphasis uses a coloured border only (`stroke`), never a fill.
 
 ## Workflow
 

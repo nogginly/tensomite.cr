@@ -51,6 +51,15 @@ describe View do
     View.broadcast_shape([] of Int32, [2, 2]).should eq [2, 2]
   end
 
+  it "slices along an axis by moving the offset" do
+    v = View.contiguous([2, 3]).slice(1, 1, 3)
+    v.shape.should eq [2, 2]
+    v.strides.should eq [3, 1]
+    v.offset.should eq 1
+    v.offset_of(2).should eq 4
+    expect_raises(ShapeError) { View.contiguous([2, 3]).slice(0, 1, 3) }
+  end
+
   it "reshapes contiguous views and refuses others" do
     View.contiguous([2, 3]).reshape([3, 2]).try(&.strides).should eq [2, 1]
     View.contiguous([2, 3]).transpose.reshape([6]).should be_nil

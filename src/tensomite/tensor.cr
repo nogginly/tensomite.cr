@@ -28,6 +28,18 @@ module Tensomite
       new(Node.new(buffer, shape, dtype, device), View.contiguous(shape))
     end
 
+    # Returns a realised rank-0 tensor holding *value* converted to *dtype*.
+    #
+    # Raises `DTypeError` when *value* has a fractional part and *dtype* is an integer type.
+    def self.scalar(value : Number, dtype : DType, device : Device = CPU.default) : Tensor
+      case dtype
+      in .f32? then from([value.to_f32], [] of Int32, device)
+      in .i32?
+        raise DTypeError.new("#{value} is not an integer") unless value.to_i32 == value
+        from([value.to_i32], [] of Int32, device)
+      end
+    end
+
     def shape : Array(Int32)
       view.shape
     end
@@ -48,27 +60,6 @@ module Tensomite
       node.device
     end
 
-    # Returns the elementwise sum, broadcasting both operands to a common shape.
-    def +(other : Tensor) : Tensor
-      binary(Op::Add, other)
-    end
-
-    # Returns the elementwise product, broadcasting both operands to a common shape.
-    def *(other : Tensor) : Tensor
-      binary(Op::Mul, other)
-    end
-
-    # Returns the sum of all elements as a rank-0 tensor, or the sum over *axis*
-    # with that dimension removed.
-    def sum(axis : Int32? = nil) : Tensor
-      shape = [] of Int32
-      if axis
-        axis = view.normalize_axis(axis)
-        shape = self.shape.dup.tap(&.delete_at(axis))
-      end
-      Tensor.lazy(Node.new(Op::Sum, [self], shape, dtype, device, axis))
-    end
-
     # Returns a tensor with dimensions reordered; see `View#permute`.
     def permute(axes : Array(Int32)) : Tensor
       Tensor.new(node, view.permute(axes))
@@ -82,6 +73,11 @@ module Tensomite
     # Returns a tensor broadcast to *shape* without copying.
     def expand(shape : Array(Int32)) : Tensor
       Tensor.new(node, view.expand(shape))
+    end
+
+    # Returns the indices `start...stop` along *axis* without copying.
+    def slice(axis : Int32, start : Int32, stop : Int32) : Tensor
+      Tensor.new(node, view.slice(axis, start, stop))
     end
 
     # Returns a tensor with a new shape and the same elements, copying only when
@@ -113,26 +109,48 @@ module Tensomite
       unless DType.of(T) == dtype
         raise DTypeError.new("cannot read #{dtype} tensor as #{T}")
       end
-      realize
-      buffer = node.buffer!
-      bytes = device.map(buffer) || Bytes.new(buffer.bytesize).tap { |host| device.download(buffer, host) }
-      xs = bytes.unsafe_slice_of(T)
+      xs = realize.host_bytes.unsafe_slice_of(T)
       Array(T).new(size) { |i| xs[view.offset_of(i)] }
+    end
+
+    # Returns a realised copy of this tensor on *device*, or `self` when it is already there.
+    #
+    # The copy goes through host memory: download, or map, from the source device,
+    # then upload to *device*.
+    def to(device : Device) : Tensor
+      return self if device.same?(self.device)
+      src = contiguous.realize
+      bytes = src.host_bytes[0, src.size * dtype.bytesize]
+      buffer = device.alloc(bytes.size)
+      device.upload(buffer, bytes)
+      Tensor.new(Node.new(buffer, shape, dtype, device), View.contiguous(shape))
     end
 
     protected def self.lazy(node : Node) : Tensor
       new(node, View.contiguous(node.shape))
     end
 
-    private def binary(op : Op, other : Tensor) : Tensor
-      unless dtype == other.dtype
-        raise DTypeError.new("#{op} of #{dtype} and #{other.dtype}")
+    # Returns the realised node's bytes in host memory, mapped when the device allows it.
+    protected def host_bytes : Bytes
+      buffer = node.buffer!
+      device.map(buffer) || Bytes.new(buffer.bytesize).tap { |host| device.download(buffer, host) }
+    end
+
+    # Raises unless *others* share this tensor's dtype and device.
+    protected def check_compatible(name : String, others : Enumerable(Tensor)) : Nil
+      others.each do |other|
+        unless dtype == other.dtype
+          raise DTypeError.new("#{name} of #{dtype} and #{other.dtype}")
+        end
+        unless device.same?(other.device)
+          raise DeviceError.new("#{name} of tensors on different devices")
+        end
       end
-      unless device.same?(other.device)
-        raise DeviceError.new("#{op} of tensors on different devices")
-      end
-      target = View.broadcast_shape(shape, other.shape)
-      Tensor.lazy(Node.new(op, [expand(target), other.expand(target)], target, dtype, device))
+    end
+
+    # Raises `DTypeError` unless the dtype is a float type.
+    protected def check_float(name : String) : Nil
+      raise DTypeError.new("#{name} needs a float dtype, not #{dtype}") unless dtype.float?
     end
   end
 end

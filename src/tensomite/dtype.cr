@@ -11,6 +11,11 @@ module Tensomite
       end
     end
 
+    # Returns true for floating-point types.
+    def float? : Bool
+      f32?
+    end
+
     # Returns the `DType` matching a Crystal type, e.g. `DType.of(Float32) # => DType::F32`.
     def self.of(type : Float32.class) : DType
       F32

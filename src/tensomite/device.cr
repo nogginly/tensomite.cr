@@ -1,9 +1,10 @@
 module Tensomite
   # An allocation owned by a device. Only its device can read or write it.
   abstract class Buffer
+    getter device : Device
     getter bytesize : Int32
 
-    def initialize(@bytesize)
+    def initialize(@device, @bytesize)
     end
   end
 
