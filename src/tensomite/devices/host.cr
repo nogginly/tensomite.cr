@@ -37,6 +37,11 @@ module Tensomite
     def sync : Nil
     end
 
+    # Host kernels add in index order whatever the shape.
+    def shape_invariant? : Bool
+      true
+    end
+
     # Returns *buffer* as a `HostBuffer` of this device; raises `DeviceError` otherwise.
     protected def own(buffer : Buffer) : HostBuffer
       if buffer.device.same?(self) && (host = buffer.as?(HostBuffer))
