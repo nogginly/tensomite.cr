@@ -89,6 +89,17 @@ module Tensomite
       View.new(target, new_strides, offset)
     end
 
+    # Returns a view of indices `start...stop` along *axis*, sharing the same elements.
+    def slice(axis : Int32, start : Int32, stop : Int32) : View
+      axis = normalize_axis(axis)
+      unless 0 <= start <= stop <= shape[axis]
+        raise ShapeError.new("slice #{start}...#{stop} out of range for axis #{axis} of #{shape}")
+      end
+      new_shape = shape.dup
+      new_shape[axis] = stop - start
+      View.new(new_shape, strides, offset + start * strides[axis])
+    end
+
     # Returns a view of the same elements with a new shape, or `nil` when the view
     # is not contiguous and the data must be copied first.
     def reshape(target : Array(Int32)) : View?

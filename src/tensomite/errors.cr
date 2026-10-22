@@ -10,4 +10,7 @@ module Tensomite
 
   # Raised when an operation mixes tensors on different devices.
   class DeviceError < Error; end
+
+  # Raised during `Tensor#realize` when a kernel meets invalid data, such as an index out of range.
+  class ExecutionError < Error; end
 end
