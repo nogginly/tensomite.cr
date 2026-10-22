@@ -56,7 +56,9 @@ spec/                       specs, one file per type or kind of op
 
 - **`out` is a reserved word** (used for C out-parameters). Don't use it as a variable name. Kernels use `dst`.
 - **Array literals mixing types become unions.** `[1f32, 2, 3]` is `Array(Float32 | Int32)`, which `Tensor.from` rejects. In specs, use the `f32(1, 2, 3)` helper. Elsewhere, use `[1, 2, 3].map(&.to_f32)`.
-- **`Bytes#unsafe_slice_of(T)`** reinterprets a buffer's bytes as `Slice(T)` without copying.
+- **`Bytes#unsafe_slice_of(T)`** reinterprets a buffer's bytes as `Slice(T)` without copying. It works for structs too: a packed block struct of 18 bytes reads straight out of a buffer.
+- **Kernels loop over `Slice`, never `Array`.** LLVM vectorises loops over a `Slice` but not over an `Array`, whose size and pointer it must re-read after every store. Float sums don't vectorise either way, because that would reorder additions. See "No portable SIMD" in `PLAN.md`.
+- **Crystal has no `Float16`.** Half-precision values need tensomite's own `UInt16`-backed type (Decision N).
 - **Class variables are shared with subclasses.** A `class_getter default : CPU` on `CPU` stops a subclass from declaring its own `default` of another type. That is why `CPU` and `SimDiscrete` are siblings under `HostDevice` rather than parent and child.
 - **Generic kernels compile every branch for every dtype.** `Math.exp(x)` on an `Int32` returns `Float64`, which does not fit a `Slice(Int32)`. Wrap results in `T.new(...)` so the code compiles, and reject float-only ops when they are called, so integer kernels never run them.
 - **Methods are type-checked only when called.** A new `Tensor` method with a type error compiles silently until a spec calls it, so every new method needs a spec.
@@ -91,7 +93,7 @@ flowchart LR
 
 ### Adding a dtype
 
-1. **Add the member to `DType`** and its `bytesize`.
+1. **Add the member to `DType`** and its `bytes_for`. A block format returns the bytes for whole blocks.
 2. **Add a `DType.of` overload** for the Crystal type.
 3. **Add a dispatch branch** to each device's `execute(node, output)`.
 4. **Add specs** that run existing ops in the new dtype.

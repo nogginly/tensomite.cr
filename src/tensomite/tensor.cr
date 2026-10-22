@@ -23,7 +23,7 @@ module Tensomite
         raise ShapeError.new("#{data.size} elements do not fill shape #{shape}")
       end
       dtype = DType.of(T)
-      buffer = device.alloc(data.size * dtype.bytesize)
+      buffer = device.alloc(dtype.bytes_for(data.size))
       device.upload(buffer, Slice.new(data.to_unsafe, data.size).to_unsafe_bytes)
       new(Node.new(buffer, shape, dtype, device), View.contiguous(shape))
     end
@@ -120,7 +120,7 @@ module Tensomite
     def to(device : Device) : Tensor
       return self if device.same?(self.device)
       src = contiguous.realize
-      bytes = src.host_bytes[0, src.size * dtype.bytesize]
+      bytes = src.host_bytes[0, dtype.bytes_for(src.size)]
       buffer = device.alloc(bytes.size)
       device.upload(buffer, bytes)
       Tensor.new(Node.new(buffer, shape, dtype, device), View.contiguous(shape))

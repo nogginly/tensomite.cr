@@ -40,7 +40,7 @@ flowchart TD
 
 ### Core types
 
-- **`DType`:** a runtime enum (`F32`, `F16`, `BF16`, `I32`, `U8`, then block formats `Q8_0`, `Q4_0`). Block formats have a block size and bytes per block rather than an element size.
+- **`DType`:** a runtime enum (`F32`, `F16`, `BF16`, `I32`, `U8`, then block formats `Q8_0`, `Q4_0`). Block formats have a block size and bytes per block rather than an element size, so every byte size comes from `DType#bytes_for(count)` (Decision N).
 - **`Buffer`:** an opaque, device-owned allocation with a byte size. Only its device can read it. `Buffer#map` returns a host `Bytes` view when the device has unified memory, and `nil` otherwise.
 - **`View`:** shape, strides and offset. It is pure metadata, so reshape, transpose, slice and broadcast never touch data.
 - **`Node`:** a graph vertex producing one contiguous array, with a shape, `DType` and `Device`. It holds an op and its source tensors until realised, then only its `Buffer`.
@@ -92,10 +92,19 @@ Each milestone is done when its exit criterion passes.
    - Exit: dispatch count per GPT-2 token falls measurably, tokens/s rises, macro kernels match their hand-written CPU oracles, and macro gradients pass finite-difference checks.
 8. **Vulkan backend.** Bind Vulkan compute, and port the hand-written kernels to GLSL compiled at build time. Kernel macros already emit GLSL, so fused kernels come for free.
    - Exit: the full op suite matches the oracle on a Linux discrete GPU, and GPT-2 runs there.
-9. **Quantisation.** Add block dtypes, a GGUF loader, and Q8_0/Q4_0 dequant-matmul kernels for CPU, Metal and Vulkan.
+9. **Quantisation.** Add `F16`, block dtypes, a GGUF loader, and Q8_0/Q4_0 matmul kernels for CPU, Metal and Vulkan.
+   - `F16` and `BF16` are tensomite's own `UInt16`-backed structs with conversions to and from `Float32`, because Crystal has no half-precision float. GGUF block scales are `F16`, so M9 needs them at the latest.
+   - Host kernels read blocks as `Slice` of a block struct (`BlockQ4_0` is 18 bytes: an `F16` scale and 16 bytes of packed weights).
+   - Block tensors follow the rules of Decision N: leaves only, sliced by whole rows, and consumed only by `MatMul` (as the weight) and `Gather` (as the table).
+   - The CPU kernel quantises activations to Q8 per block, takes the Q4 × Q8 dot product in integers, then applies both scales once per block. This is the oracle version, naive and exact within each block.
    - Exit: a quantised GPT-2 stays within a perplexity budget of f32.
 10. **Llama-family model.** Add RoPE, RMSNorm, SwiGLU and grouped-query attention.
     - Exit: TinyLlama runs from GGUF on macOS and Linux, and matches reference fixtures.
+11. **Fast quantised CPU kernels (Decision M).** Add a CPU device whose kernels are built for speed, tested against the oracle.
+    - Contiguous fast paths loop directly over `Slice`s, so LLVM can vectorise them.
+    - Float reductions use a fixed number of accumulators combined in a fixed order, so they vectorise and stay shape-invariant.
+    - Quantised matmul uses the integer Q4 × Q8 block dot product.
+    - Exit: a quantised small model runs on the CPU faster than with f32 weights, its results match the oracle within tolerance, and prefill and decode logits stay bit-identical.
 
 ## Decisions
 
@@ -115,10 +124,22 @@ Each milestone is done when its exit criterion passes.
   3. Across devices: never promised. Comparisons use tolerances.
 - **Decision L, level 2 on CPU:** devices report `shape_invariant?` (decided, lands in M3). BLAS reports false, and features that need level 2 fall back to tensomite's own matmul or warn. A cache-blocked CPU matmul in Crystal, shape-invariant by construction, is an optional later milestone if CPU inference matters.
 
+- **Decision M, a fast CPU path:** own quantised CPU kernels after M9 (decided), as milestone 11. Quantised small models make the CPU worth running fast, and BLAS cannot help with them: `sgemm` takes `f32` only. The oracle stays naive.
+- **Decision N, modelling dtypes for quantisation:** settled early so M9 adds code rather than refactoring it (decided).
+  1. Byte sizes come only from `DType#bytes_for(count)`, never from a per-element size.
+  2. Each op declares the dtype combinations it accepts. Today every op requires one dtype for all sources. From M9, `MatMul` accepts a block-format weight with `F32` activations and output, and `Gather` a block-format table. Host kernels then dispatch on the source dtypes as well as the output dtype.
+  3. Block-format tensors are leaves loaded from files, stored row by row, sliced only by whole rows, and never produced by an op. `View` stays in logical elements.
+  4. `F16` and `BF16` are tensomite's own types, stored as `UInt16` and computed in `Float32`.
+
 ## Risks
 
 - **Lazy debugging.** Shape and dtype errors are raised as soon as a node is built. Only execution errors (NaN, out of memory, kernel failures) surface at `realize`, far from their cause. Mitigate by recording the call site on each node and adding an eager debug mode that realises after every op.
-- **No portable SIMD in Crystal.** CPU speed relies on LLVM auto-vectorisation under `--release`, which is weak for quantised dot products. The fallback is a small C file of SIMD kernels. That would be a third seam, so it needs a benchmark to justify it.
+- **No portable SIMD in Crystal.** CPU speed relies on LLVM auto-vectorisation under `--release`. Measured on x86-64 with Crystal 1.22:
+  - Loops over a `Slice` vectorise. Loops over an `Array` do not, because its size and data pointer live in memory that LLVM cannot prove the loop leaves alone. Taking a `Slice` or pointer before the loop fixes it.
+  - Float sums do not vectorise, because that would reorder additions. Integer sums do.
+  - A Q4 × Q8 block dot product vectorises, because its inner sums are integers, but LLVM emits generic 4-lane code rather than dedicated dot-product instructions (`vpdpbusd`, `sdot`).
+
+  The fallback is a small C file of SIMD kernels. That would be a third seam, so it needs a benchmark to justify it.
 - **`objc_msgSend` signatures.** A mistyped selector signature crashes without a useful error. Mitigate by binding each selector once and covering each with a spec.
 - **Vulkan surface.** Vulkan compute needs far more ceremony than Metal (descriptor sets, pipeline layouts, fences, memory types). Keep it behind one file per concern and port only after the Metal path has settled the device interface.
 - **Kernel drift.** Hand-written and generated kernels can diverge from the oracle silently. Mitigate by running every op on every available device against the CPU in specs.
