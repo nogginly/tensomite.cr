@@ -6,11 +6,11 @@ Oct 22, 2026
 
 The aim is a minimal Crystal shard for tensor maths, inference and training on macOS and Linux, written almost entirely in Crystal. It must be fast by design, not fast later by rewrite. So the hard parts of a production runtime (lazy execution, device-owned memory, runtime dtypes) come first, in small steps.
 
-- **Lazy by default.** Ops build a graph and `realize` executes it. This gives one place to schedule, fuse, plan memory and differentiate.
+- **Lazy by default.** Ops build a graph and `realize` executes it. This gives one place to schedule, plan memory and differentiate.
 - **Memory belongs to devices.** A tensor never assumes it can read its own bytes. Unified memory (Apple Silicon) is an optimisation of the discrete case, not the default.
 - **Narrow FFI waist.** Native calls go through two seams only: CPU BLAS and a GPU driver. Adding an op never adds an FFI binding.
-- **Kernels live in Crystal.** GPU kernel source is written or generated in Crystal. MSL is compiled by the Metal driver at runtime, and GLSL is compiled to SPIR-V at build time.
-- **CPU backend is the oracle.** Every other backend is tested against the naive pure-Crystal implementation.
+- **Kernels live in Crystal.** GPU kernel source is written in Crystal, or generated from Crystal expressions by kernel macros at compile time. MSL is compiled by the Metal driver at runtime, and GLSL is compiled to SPIR-V at build time.
+- **CPU backend is the oracle.** Every other backend is tested against the naive pure-Crystal implementation. Library ops keep a hand-written CPU version, so a mistake in a kernel macro's expression cannot pass its own parity test.
 - **Always runnable.** Each milestone ends with something that runs end to end and has a measurable exit.
 
 ## Architecture
@@ -19,7 +19,8 @@ The aim is a minimal Crystal shard for tensor maths, inference and training on m
 flowchart TD
     App["Models, training loops, sampling"] --> NN["NN layer: modules, optimisers, loaders, tokeniser"]
     NN --> Lazy["Tensor (lazy): shape, dtype, device, graph node"]
-    Lazy --> Passes["Graph passes: autograd, fusion, memory planning"]
+    Macros["Kernel macros (compile time): one expression to CPU, MSL, GLSL"] --> Lazy
+    Lazy --> Passes["Graph passes: autograd, memory planning"]
     Passes --> Sched["Scheduler: topo order, kernel selection, transfers"]
     Sched --> Iface{"Device interface: buffers, transfer, run kernel, sync"}
     Iface --> CPU["CPU: pure Crystal (oracle)"]
@@ -52,14 +53,13 @@ flowchart LR
     Op["a.matmul(b) + c"] --> Node["Graph nodes (no work done)"]
     Node --> Realize["realize / to_a"]
     Realize --> Topo["Topological order"]
-    Topo --> Fuse["Fusion pass (from M6)"]
-    Fuse --> Plan["Allocate / reuse buffers"]
+    Topo --> Plan["Allocate / reuse buffers"]
     Plan --> Xfer["Insert transfers where devices differ"]
     Xfer --> Run["Dispatch kernels"]
     Run --> Sync["Sync, return buffer"]
 ```
 
-Before M6 the fusion pass is the identity, so each node becomes one kernel.
+Fusion happens before the graph exists. A kernel macro turns a whole expression into one node, and `realize` dispatches one kernel per node.
 
 ### Memory model
 
@@ -87,9 +87,9 @@ Each milestone is done when its exit criterion passes.
    - Exit: gradients pass finite-difference checks, and a char-level Shakespeare model reaches a validation loss below 1.6 nats/char.
 6. **Metal backend.** Bind the driver through `objc_msgSend` (one declaration per selector signature) with autorelease pools around dispatch. Add a pipeline cache, then hand-written MSL kernels, ported one op at a time.
    - Exit: every op matches the CPU oracle, and GPT-2 tokens/s beats BLAS.
-7. **Fusion and memory planning.** Elementwise and reduction chains are fused into one generated MSL kernel per group, and buffers are reused across the graph. Matmul and attention stay hand-written.
-   - Exit: dispatch count per GPT-2 token falls measurably, tokens/s rises, and fused results match the oracle.
-8. **Vulkan backend.** Bind Vulkan compute, and port the hand-written kernels to GLSL compiled at build time. Then settle Decision I.
+7. **Kernel macros and memory planning.** `Tensomite.kernel` takes an expression block and generates, at compile time, a CPU loop, an MSL kernel and a GLSL kernel, plus a backward kernel by symbolic differentiation. Matmul gains bias and activation epilogues. Buffers are reused across the graph. GPT-2's elementwise chains (GELU, residual adds) move onto macros.
+   - Exit: dispatch count per GPT-2 token falls measurably, tokens/s rises, macro kernels match their hand-written CPU oracles, and macro gradients pass finite-difference checks.
+8. **Vulkan backend.** Bind Vulkan compute, and port the hand-written kernels to GLSL compiled at build time. Kernel macros already emit GLSL, so fused kernels come for free.
    - Exit: the full op suite matches the oracle on a Linux discrete GPU, and GPT-2 runs there.
 9. **Quantisation.** Add block dtypes, a GGUF loader, and Q8_0/Q4_0 dequant-matmul kernels for CPU, Metal and Vulkan.
    - Exit: a quantised GPT-2 stays within a perplexity budget of f32.
@@ -102,18 +102,20 @@ Each milestone is done when its exit criterion passes.
 - **Decision B, Linux GPU:** Vulkan (decided). It covers AMD, Intel and NVIDIA. CUDA can follow later through the same device interface.
 - **Decision C, first model:** GPT-2 small, then TinyLlama (decided).
 - **Decision D, CPU parallelism:** `-Dpreview_mt` or execution contexts. Defer until profiling shows the CPU path matters.
-- **Decision E, execution model:** lazy graph with `realize` (proposed, confirm).
-- **Decision F, tensor typing:** non-generic `Tensor` with a runtime `DType` (proposed, confirm).
-- **Decision G, Metal plus Vulkan, or Vulkan everywhere via MoltenVK:** native Metal (proposed). Revisit after M8, when keeping two codegen emitters has a known cost.
-- **Decision H, Vulkan shader compilation:** compile at build time (decided). A Crystal macro runs `glslc` during `crystal build` and embeds the SPIR-V, so users need no compiler and there is no shaderc seam. Fused kernels on Vulkan are deferred to Decision I.
-- **Decision I, fused kernels on Vulkan:** decide at the end of M8, using the fusion gain measured on Metal in M7. The options are no fusion on Vulkan, hand-written fused kernels for common patterns (compiled at build time), shaderc at runtime for fused kernels only, or a small SPIR-V emitter in Crystal.
+- **Decision E, execution model:** lazy graph with `realize` (decided).
+- **Decision F, tensor typing:** non-generic `Tensor` with a runtime `DType` (decided).
+- **Decision G, Metal plus Vulkan, or Vulkan everywhere via MoltenVK:** native Metal (decided). Revisit after M8, when keeping two codegen emitters has a known cost.
+- **Decision H, Vulkan shader compilation:** compile at build time (decided). A Crystal macro runs `glslc` during `crystal build` and embeds the SPIR-V, so users need no compiler and there is no shaderc seam.
+- **Decision I, fused kernels on Vulkan:** settled by Decision J. Macro kernels emit GLSL at compile time.
+- **Decision J, how kernels are fused:** compile-time kernel macros (decided). Fusion is explicit: only what is written inside one macro is fused. Runtime auto-fusion over the graph is added only if measurements after M8 show a need for it. That would bring back the shader-compiler question for Vulkan (shaderc or a SPIR-V emitter in Crystal).
 
 ## Risks
 
 - **Lazy debugging.** Shape and dtype errors are raised as soon as a node is built. Only execution errors (NaN, out of memory, kernel failures) surface at `realize`, far from their cause. Mitigate by recording the call site on each node and adding an eager debug mode that realises after every op.
-- **No portable SIMD in Crystal.** CPU speed relies on LLVM auto-vectorisation under `--release`, which is weak for quantised dot products. The fallback is a small C file of SIMD kernels. That would be a fourth seam, so it needs a benchmark to justify it.
+- **No portable SIMD in Crystal.** CPU speed relies on LLVM auto-vectorisation under `--release`, which is weak for quantised dot products. The fallback is a small C file of SIMD kernels. That would be a third seam, so it needs a benchmark to justify it.
 - **`objc_msgSend` signatures.** A mistyped selector signature crashes without a useful error. Mitigate by binding each selector once and covering each with a spec.
 - **Vulkan surface.** Vulkan compute needs far more ceremony than Metal (descriptor sets, pipeline layouts, fences, memory types). Keep it behind one file per concern and port only after the Metal path has settled the device interface.
 - **Kernel drift.** Hand-written and generated kernels can diverge from the oracle silently. Mitigate by running every op on every available device against the CPU in specs.
+- **Macro limits.** Crystal's macro language is small. Kernel generation that outgrows it moves into a compile-time helper program called with `{{ run(...) }}`, at some cost to build time.
 - **GPU CI.** It is unverified whether hosted macOS runners give usable Metal compute, and hosted Linux runners have no GPU. CI runs CPU and `SimDiscrete` on every push. GPU specs run locally, or on a self-hosted runner if one appears.
 - **Scope creep.** Multi-GPU, CUDA and new architectures stay out until M10 passes.
