@@ -8,8 +8,8 @@ The aim is a minimal Crystal shard for tensor maths, inference and training on m
 
 - **Lazy by default.** Ops build a graph and `realize` executes it. This gives one place to schedule, fuse, plan memory and differentiate.
 - **Memory belongs to devices.** A tensor never assumes it can read its own bytes. Unified memory (Apple Silicon) is an optimisation of the discrete case, not the default.
-- **Narrow FFI waist.** Native calls go through three seams only: CPU BLAS, a GPU driver and, for Vulkan, a shader compiler. Adding an op never adds an FFI binding.
-- **Kernels are Crystal strings.** GPU kernel source is either written or generated in Crystal and compiled at runtime.
+- **Narrow FFI waist.** Native calls go through two seams only: CPU BLAS and a GPU driver. Adding an op never adds an FFI binding.
+- **Kernels live in Crystal.** GPU kernel source is written or generated in Crystal. MSL is compiled by the Metal driver at runtime, and GLSL is compiled to SPIR-V at build time.
 - **CPU backend is the oracle.** Every other backend is tested against the naive pure-Crystal implementation.
 - **Always runnable.** Each milestone ends with something that runs end to end and has a measurable exit.
 
@@ -30,11 +30,10 @@ flowchart TD
     BLAS -. "FFI: cblas_sgemm" .-> LibBLAS["Accelerate / OpenBLAS"]
     Metal -. "FFI: ~17 calls via objc_msgSend" .-> MetalFw["Metal.framework"]
     Vk -. "FFI: ~40 calls + structs" .-> VkLib["libvulkan"]
-    Vk -. "FFI: ~6 calls" .-> Shaderc["shaderc (GLSL to SPIR-V)"]
+    Vk --> Spv["SPIR-V compiled at build time (glslc)"]
     style LibBLAS stroke:#d9480f,stroke-width:3px
     style MetalFw stroke:#d9480f,stroke-width:3px
     style VkLib stroke:#d9480f,stroke-width:3px
-    style Shaderc stroke:#d9480f,stroke-width:3px
     style CPU stroke:#2b8a3e,stroke-width:3px
 ```
 
@@ -90,7 +89,7 @@ Each milestone is done when its exit criterion passes.
    - Exit: every op matches the CPU oracle, and GPT-2 tokens/s beats BLAS.
 7. **Fusion and memory planning.** Elementwise and reduction chains are fused into one generated MSL kernel per group, and buffers are reused across the graph. Matmul and attention stay hand-written.
    - Exit: dispatch count per GPT-2 token falls measurably, tokens/s rises, and fused results match the oracle.
-8. **Vulkan backend.** Bind Vulkan compute and shaderc. The fusion codegen gains a GLSL emitter, and hand-written kernels are ported.
+8. **Vulkan backend.** Bind Vulkan compute, and port the hand-written kernels to GLSL compiled at build time. Then settle Decision I.
    - Exit: the full op suite matches the oracle on a Linux discrete GPU, and GPT-2 runs there.
 9. **Quantisation.** Add block dtypes, a GGUF loader, and Q8_0/Q4_0 dequant-matmul kernels for CPU, Metal and Vulkan.
    - Exit: a quantised GPT-2 stays within a perplexity budget of f32.
@@ -106,11 +105,12 @@ Each milestone is done when its exit criterion passes.
 - **Decision E, execution model:** lazy graph with `realize` (proposed, confirm).
 - **Decision F, tensor typing:** non-generic `Tensor` with a runtime `DType` (proposed, confirm).
 - **Decision G, Metal plus Vulkan, or Vulkan everywhere via MoltenVK:** native Metal (proposed). Revisit after M8, when keeping two codegen emitters has a known cost.
-- **Decision H, Vulkan shader compilation:** shaderc at runtime (proposed). Build-time `glslc` would avoid the third seam but rules out runtime fusion codegen.
+- **Decision H, Vulkan shader compilation:** compile at build time (decided). A Crystal macro runs `glslc` during `crystal build` and embeds the SPIR-V, so users need no compiler and there is no shaderc seam. Fused kernels on Vulkan are deferred to Decision I.
+- **Decision I, fused kernels on Vulkan:** decide at the end of M8, using the fusion gain measured on Metal in M7. The options are no fusion on Vulkan, shaderc at runtime for fused kernels only, or a small SPIR-V emitter in Crystal.
 
 ## Risks
 
-- **Lazy debugging.** Errors surface at `realize`, far from the op that caused them. Mitigate by recording the call site on each node and adding an eager debug mode that realises after every op.
+- **Lazy debugging.** Shape and dtype errors are raised as soon as a node is built. Only execution errors (NaN, out of memory, kernel failures) surface at `realize`, far from their cause. Mitigate by recording the call site on each node and adding an eager debug mode that realises after every op.
 - **No portable SIMD in Crystal.** CPU speed relies on LLVM auto-vectorisation under `--release`, which is weak for quantised dot products. The fallback is a small C file of SIMD kernels. That would be a fourth seam, so it needs a benchmark to justify it.
 - **`objc_msgSend` signatures.** A mistyped selector signature crashes without a useful error. Mitigate by binding each selector once and covering each with a spec.
 - **Vulkan surface.** Vulkan compute needs far more ceremony than Metal (descriptor sets, pipeline layouts, fences, memory types). Keep it behind one file per concern and port only after the Metal path has settled the device interface.
