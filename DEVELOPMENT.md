@@ -57,9 +57,36 @@ src/tensomite/tensor/       Tensor ops by kind: elementwise, reduce, structural,
 src/tensomite/scheduler.cr  realisation
 src/tensomite/devices/      host.cr (shared host kernels), then one file per pure-Crystal device
 src/tensomite/blas.cr       opt-in BLAS binding and device; not required by src/tensomite.cr
+src/tensomite/mapped_file.cr, safetensors.cr   weight loading
+src/tensomite/bpe.cr, sampler.cr               tokeniser and sampling
+src/tensomite/models/       one file per model architecture
 spec/                       specs, one file per type or kind of op
+spec/fixtures/              reference outputs and small reference files (see below)
+scripts/                    fixture generation and model download
 bench/                      benchmarks, run with --release
+models/                     downloaded weights (git-ignored)
 ```
+
+## Reference fixtures
+
+Model specs compare tensomite against Hugging Face `transformers` and PyTorch on the same files. The fixtures are generated once by `scripts/make_fixtures.py` and committed, so specs and CI need no Python.
+
+Fixture     |Contents                                                                                       |Needs                        
+------------|-----------------------------------------------------------------------------------------------|-----------------------------
+`tiny_gpt2/`|a small trained byte-level BPE vocabulary, a random 2-layer GPT-2 (160 KB), and `expected.json`|PyPI packages only           
+`gpt2/`     |`expected.json` only; the weights are downloaded, not committed                                |GPT-2 small from Hugging Face
+
+`expected.json` holds a Unicode tokeniser corpus and its ids, a prompt and its ids, reference logits, and the greedy continuation. The tiny tokeniser's ids are checked against both Hugging Face's Rust tokeniser and transformers' Python port of GPT-2's original one before they are written.
+
+To regenerate:
+
+1. **Create a Python environment:** `python3 -m venv .venv && .venv/bin/pip install torch transformers tokenizers safetensors`.
+2. **Tiny fixtures:** `.venv/bin/python scripts/make_fixtures.py tiny`.
+3. **GPT-2 small fixtures:** `scripts/fetch_gpt2.sh models/gpt2`, then `.venv/bin/python scripts/make_fixtures.py gpt2 models/gpt2`.
+
+The GPT-2 small specs (the M4 exit) run only when `TENSOMITE_GPT2_DIR` names a directory holding the downloaded files and `spec/fixtures/gpt2/expected.json` exists; otherwise they are pending. CI downloads GPT-2 small, cached, once that fixture is committed.
+
+Benchmarks of model speed depend only on shapes, so `bench/gpt2.cr` can run on any weights with GPT-2 small's shapes, such as a randomly initialised `GPT2LMHeadModel(GPT2Config())` saved with `save_pretrained`.
 
 ## Conventions
 
@@ -79,6 +106,10 @@ bench/                      benchmarks, run with --release
 - **`Bytes#unsafe_slice_of(T)`** reinterprets a buffer's bytes as `Slice(T)` without copying. It works for structs too: a packed block struct of 18 bytes reads straight out of a buffer.
 - **Kernels loop over `Slice`, never `Array`.** LLVM vectorises loops over a `Slice` but not over an `Array`, whose size and pointer it must re-read after every store. Float sums don't vectorise either way, because that would reorder additions. See "No portable SIMD" in `PLAN.md`.
 - **Crystal has no `Float16`.** Half-precision values need tensomite's own `UInt16`-backed type (Decision N).
+- **Instance variables assigned inside a block are not seen as initialised.** `File.open(path) do |file| @size = … end` leaves `@size` nilable. Open the file without a block and close it explicitly, or assign outside the block.
+- **`Reference` cannot be used in a union.** `@owner : Reference?` does not compile; name a concrete class, as `HostBuffer` does with `MappedFile?`.
+- **Unicode-aware regexes need `Regex::Options::UCP`.** Without it `\s`, `\w` and `\d` match ASCII only, while `\p{L}` and `\p{N}` work either way.
+- **Crystal cannot `require` an absolute path.** Scripts outside the repo cannot load it by path. Put a temporary script inside the repo, relative to `src/`, and delete it afterwards.
 - **Class variables are shared with subclasses.** A `class_getter default : CPU` on `CPU` stops a subclass from declaring its own `default` of another type. That is why `CPU` and `SimDiscrete` are siblings under `HostDevice` rather than parent and child.
 - **Generic kernels compile every branch for every dtype.** `Math.exp(x)` on an `Int32` returns `Float64`, which does not fit a `Slice(Int32)`. Wrap results in `T.new(...)` so the code compiles, and reject float-only ops when they are called, so integer kernels never run them.
 - **Methods are type-checked only when called.** A new `Tensor` method with a type error compiles silently until a spec calls it, so every new method needs a spec.

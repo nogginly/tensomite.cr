@@ -2,10 +2,16 @@ module Tensomite
   # A buffer held in host memory by a `HostDevice`.
   class HostBuffer < Buffer
     getter bytes : Bytes
+    @owner : MappedFile? = nil
 
     def initialize(device : Device, bytesize : Int32)
       super
       @bytes = Bytes.new(bytesize)
+    end
+
+    # Wraps part of a file mapping without copying; the buffer keeps *owner* alive.
+    def initialize(device : Device, @bytes : Bytes, @owner : MappedFile)
+      super(device, @bytes.size)
     end
   end
 
@@ -40,6 +46,11 @@ module Tensomite
     # Host kernels add in index order whatever the shape.
     def shape_invariant? : Bool
       true
+    end
+
+    # Returns a buffer over *bytes* without copying; see `HostBuffer`.
+    def adopt(bytes : Bytes, owner : MappedFile) : Buffer
+      HostBuffer.new(self, bytes, owner)
     end
 
     # Returns *buffer* as a `HostBuffer` of this device; raises `DeviceError` otherwise.
@@ -147,19 +158,30 @@ module Tensomite
     end
 
     # Computes each output as a dot product over `k`, added in index order.
+    #
+    # 1. Finds where each batch matrix of both sources starts, once per batch.
+    # 2. Walks rows, columns and `k` with the sources' strides directly, so the
+    #    order of additions, and so every result bit, is the same as indexing
+    #    each element through its view.
     private def matmul(type : T.class, node : Node, dst : Slice(T)) : Nil forall T
       a, b = node.srcs
       m, k = a.shape[-2], a.shape[-1]
       n = b.shape[-1]
+      return if dst.empty?
       xs, ys = elements(T, a), elements(T, b)
-      dst.size.times do |i|
-        batch, rem = i.divmod(m * n)
-        row, col = rem.divmod(n)
-        acc = T.zero
-        k.times do |step|
-          acc += xs[a.view.offset_of((batch * m + row) * k + step)] * ys[b.view.offset_of((batch * k + step) * n + col)]
+      a_row, a_k = a.view.strides[-2], a.view.strides[-1]
+      b_k, b_col = b.view.strides[-2], b.view.strides[-1]
+      (dst.size // (m * n)).times do |batch|
+        a_base = a.view.offset_of(batch * m * k)
+        b_base = b.view.offset_of(batch * k * n)
+        m.times do |row|
+          n.times do |col|
+            pa, pb = a_base + row * a_row, b_base + col * b_col
+            acc = T.zero
+            k.times { |step| acc += xs[pa + step * a_k] * ys[pb + step * b_k] }
+            dst[(batch * m + row) * n + col] = acc
+          end
         end
-        dst[i] = acc
       end
     end
 
