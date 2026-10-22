@@ -78,7 +78,7 @@ Each milestone is done when its exit criterion passes.
    - Reductions: sum, max, mean over an axis.
    - Composite ops: softmax, layernorm, embedding gather, causal mask, slice/concat, and naive matmul.
    - Exit: specs pass against hand-computed values, and the same suite passes unchanged on `SimDiscrete`.
-3. **BLAS seam.** Bind `cblas_sgemm` for Accelerate and OpenBLAS. Non-contiguous inputs are made contiguous first.
+3. **BLAS seam.** Bind `cblas_sgemm` for Accelerate and OpenBLAS. Non-contiguous inputs are made contiguous first. Devices gain `shape_invariant?` (Decision L).
    - Exit: results are within a relative error of 1e-5 of the naive matmul, and the speedup is benchmarked.
 4. **GPT-2 inference.** Write a safetensors loader (mmap as a CPU `Buffer`), a byte-level BPE tokeniser, and the GPT-2 small forward pass with a KV cache and sampling.
    - Fixtures (logits and tokens) are generated once from a PyTorch reference and committed, so CI needs no Python.
@@ -112,6 +112,7 @@ Each milestone is done when its exit criterion passes.
   1. Run to run: the same inputs, shapes and device give the same bits. Guaranteed everywhere, including parallel CPU code, which splits work independently of thread count.
   2. Shape invariance: a position's logits do not depend on batch size or prompt chunking. A goal for tensomite's own inference kernels, tested by exact comparison of prefill and decode. It makes prefix caching and chunked prefill reproducible: a cache hit gives the same bits as recomputing. The BLAS backend is exempt, because vendor libraries choose strategies by shape.
   3. Across devices: never promised. Comparisons use tolerances.
+- **Decision L, level 2 on CPU:** devices report `shape_invariant?` (decided, lands in M3). BLAS reports false, and features that need level 2 fall back to tensomite's own matmul or warn. A cache-blocked CPU matmul in Crystal, shape-invariant by construction, is an optional later milestone if CPU inference matters.
 
 ## Risks
 
