@@ -26,6 +26,19 @@ Everything before a PR|all three of the above                |`ops test` (specs 
 
 All three must be clean before a PR.
 
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push to `main` and on every pull request, whatever its base, so stacked PRs are checked too. It runs on Linux and macOS:
+
+Step                  |Linux|macOS
+----------------------|-----|-----
+`crystal spec`        |yes  |yes  
+Formatting check      |yes  |     
+`bin/ameba src/ spec/`|yes  |     
+
+- **Crystal is pinned** in the job matrix (currently 1.22.0). Bump it there, together with `crystal:` in `shard.yml` when the minimum changes.
+- **The cache** holds `lib/`, `shard.lock` and `bin/ameba`. Its key combines the OS, the Crystal version and a hash of `shard.yml`. `shard.lock` is not committed (this is a library), so `shard.yml` stands in for it. The Crystal version is in the key because `bin/ameba` is compiled with it.
+
 ## Layout
 
 ```
