@@ -56,10 +56,12 @@ jobs:
         if: ${{ hashFiles('spec/fixtures/gpt2/expected.json') != '' }}
         run: scripts/fetch_gpt2.sh models/gpt2
 
+      # Release mode keeps bounds and overflow checks, and runs GPT-2 small's
+      # exit specs about five times faster than a debug build.
       - name: Run specs
         env:
           TENSOMITE_GPT2_DIR: models/gpt2
-        run: crystal spec
+        run: crystal spec --release
 
       - name: Type-check benchmarks
         run: for f in bench/*.cr; do crystal build --no-codegen "$f"; done

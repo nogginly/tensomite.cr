@@ -3,9 +3,10 @@ require "json"
 module Tensomite
   # Reads tensors from a [safetensors](https://github.com/huggingface/safetensors) file.
   #
-  # The file is memory-mapped once. On a `HostDevice` each tensor is a realised leaf
-  # over its slice of the mapping, so nothing is copied or read until used; on
-  # other devices it is uploaded.
+  # The file is memory-mapped once. On a `HostDevice` each tensor whose data is
+  # 4-byte aligned is a realised leaf over its slice of the mapping, so nothing is
+  # copied or read until used. Other tensors are copied into a new buffer: older
+  # writers do not pad the header, which leaves every tensor unaligned.
   #
   # ```
   # weights = SafeTensors.open("model.safetensors")
@@ -57,7 +58,7 @@ module Tensomite
       raise Error.new("#{name}: #{length} bytes is over the 2 GiB limit for one tensor") if length > Int32::MAX
       bytes = @mapping.bytes(@data_start + entry.start, length.to_i32)
       buffer =
-        if device.is_a?(HostDevice)
+        if device.is_a?(HostDevice) && bytes.to_unsafe.address % 4 == 0
           device.adopt(bytes, @mapping)
         else
           device.alloc(bytes.size).tap { |buf| device.upload(buf, bytes) }
@@ -69,7 +70,7 @@ module Tensomite
     #
     # 1. Maps each safetensors dtype name onto a `DType`.
     # 2. Checks that each byte range fits the data section, holds exactly the bytes
-    #    its shape needs, and starts aligned to its element size.
+    #    its shape needs.
     private def parse_header(json : String) : Hash(String, Entry)
       data_size = @mapping.size - @data_start
       result = {} of String => Entry
@@ -85,7 +86,6 @@ module Tensomite
         unless 0 <= start <= stop <= data_size && stop - start == dtype.bytes_for(shape.product(1)).to_i64
           raise Error.new("#{name}: byte range #{start}...#{stop} does not hold #{dtype} #{shape}")
         end
-        raise Error.new("#{name}: data is not aligned") unless (@data_start + start) % 4 == 0
         result[name] = Entry.new(dtype, shape, start, stop)
       end
       result

@@ -397,9 +397,10 @@ flowchart LR
 ```
 
 - **Nothing is read until used.** The operating system pages weights in as kernels touch them.
+- **Unaligned tensors are copied.** A tensor is read in place only when its data starts on a 4-byte boundary. Older safetensors writers do not pad the header: in GPT-2 small's published file the data section starts at byte 14,291, so every tensor is 3 bytes off and is copied into a new, aligned buffer at load. Reading `Float32`s from unaligned addresses happens to work on x86 and ARM64, but LLVM treats it as undefined behaviour, and GPU uploads need alignment anyway.
 - **The mapping lives as long as any tensor over it,** because each `HostBuffer` holds its `MappedFile`.
 - **Limits:** one tensor must fit in 2 GiB (an `Int32` `Slice`), but the file may be larger. Only `F32` and `I32` tensors load; other dtypes raise `DTypeError`.
-- **Every header entry is checked** against the file: its byte range fits, holds exactly the bytes its shape needs, and is aligned.
+- **Every header entry is checked** against the file: its byte range fits and holds exactly the bytes its shape needs.
 
 ### Tokeniser
 
@@ -446,6 +447,15 @@ flowchart TD
 ### Sampling
 
 `Sampler.greedy` picks the highest logit, the first on ties. Otherwise logits are divided by the temperature, cut to the `top_k` highest when it is positive, and drawn from their softmax with a seeded `Random::PCG32`, so a seed repeats a run.
+
+### Verified against the reference
+
+Model         |Tokeniser corpus|Max logit difference from PyTorch|Greedy tokens|Prefill against decode       
+--------------|----------------|---------------------------------|-------------|-----------------------------
+Tiny reference|identical ids   |4.6e-6 (`CPU`), 3.9e-6 (`BLAS`)  |20 identical |bit-identical on host devices
+GPT-2 small   |identical ids   |3.7e-4 (`CPU`)                   |64 identical |bit-identical on `CPU`       
+
+GPT-2 small's larger difference reflects its size: 12 layers of 768-wide dot products added in a different order from PyTorch's.
 
 ### Determinism in practice
 

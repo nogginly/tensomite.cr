@@ -2,8 +2,9 @@ require "./spec_helper"
 require "json"
 
 # Writes a safetensors file holding *tensors* (name to dtype, shape and raw bytes)
-# and returns its path.
-private def write_safetensors(tensors : Hash(String, {String, Array(Int32), Bytes})) : String
+# and returns its path. With *pad* false the header is padded so that the data
+# section starts 3 bytes past a 4-byte boundary, as some older writers leave it.
+private def write_safetensors(tensors : Hash(String, {String, Array(Int32), Bytes}), pad : Bool = true) : String
   offset = 0
   meta = tensors.transform_values do |(dtype, shape, bytes)|
     entry = {"dtype" => JSON::Any.new(dtype), "shape" => JSON::Any.new(shape.map { |dim| JSON::Any.new(dim.to_i64) }),
@@ -12,7 +13,7 @@ private def write_safetensors(tensors : Hash(String, {String, Array(Int32), Byte
     JSON::Any.new(entry)
   end
   json = meta.to_json
-  json += " " * ((8 - json.bytesize % 8) % 8)
+  json += " " * (pad ? (8 - json.bytesize % 8) % 8 : (3 - json.bytesize % 4) % 4)
   path = File.tempname("tensomite", ".safetensors")
   File.open(path, "w") do |file|
     file.write_bytes(json.bytesize.to_u64, IO::ByteFormat::LittleEndian)
@@ -52,6 +53,13 @@ describe SafeTensors do
     first = CPU.default.map(a.node.buffer!).not_nil!("CPU memory is host-visible")
     second = CPU.default.map(weights["a"].node.buffer!).not_nil!("CPU memory is host-visible")
     first.to_unsafe.should eq second.to_unsafe
+  end
+
+  it "copies tensors whose data is not 4-byte aligned" do
+    unaligned = SafeTensors.open(write_safetensors({"a" => {"F32", [2, 2], f32_bytes(1, 2, 3, 4)}}, pad: false))
+    a = unaligned["a"]
+    (CPU.default.map(a.node.buffer!).not_nil!("CPU memory is host-visible").to_unsafe.address % 4).should eq 0
+    a.to_a(Float32).should eq f32(1, 2, 3, 4)
   end
 
   it "raises for a missing tensor" do

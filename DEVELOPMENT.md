@@ -35,7 +35,7 @@ Benchmarks live in `bench/` and run in release mode, for example `crystal run --
 
 Step                         |Linux|macOS
 -----------------------------|-----|-----
-`crystal spec`               |yes  |yes  
+`crystal spec --release`     |yes  |yes  
 Type-check `bench/`          |yes  |yes  
 Formatting check             |yes  |     
 `bin/ameba src/ spec/ bench/`|yes  |     
@@ -84,7 +84,12 @@ To regenerate:
 2. **Tiny fixtures:** `.venv/bin/python scripts/make_fixtures.py tiny`.
 3. **GPT-2 small fixtures:** `scripts/fetch_gpt2.sh models/gpt2`, then `.venv/bin/python scripts/make_fixtures.py gpt2 models/gpt2`.
 
-The GPT-2 small specs (the M4 exit) run only when `TENSOMITE_GPT2_DIR` names a directory holding the downloaded files and `spec/fixtures/gpt2/expected.json` exists; otherwise they are pending. CI downloads GPT-2 small, cached, once that fixture is committed.
+The GPT-2 small specs (the M4 exit) run only when `TENSOMITE_GPT2_DIR` names a directory holding the downloaded files and `spec/fixtures/gpt2/expected.json` exists; otherwise they are pending. CI downloads GPT-2 small, cached. Run them with `--release`: a debug build takes about 6 minutes, and a release build about 1 minute plus compilation.
+
+```sh
+scripts/fetch_gpt2.sh models/gpt2
+TENSOMITE_GPT2_DIR=models/gpt2 crystal spec --release
+```
 
 Benchmarks of model speed depend only on shapes, so `bench/gpt2.cr` can run on any weights with GPT-2 small's shapes, such as a randomly initialised `GPT2LMHeadModel(GPT2Config())` saved with `save_pretrained`.
 
