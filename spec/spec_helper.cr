@@ -1,10 +1,11 @@
 require "spec"
 require "../src/tensomite"
+require "../src/tensomite/blas"
 
 include Tensomite
 
 # Devices every op spec runs on; results must agree exactly.
-DEVICES = [CPU.default, SimDiscrete.default] of Device
+DEVICES = [CPU.default, SimDiscrete.default, BLAS.default] of Device
 
 def f32(*values : Number) : Array(Float32)
   values.map(&.to_f32).to_a

@@ -1,6 +1,6 @@
 # Tensomite: design
 
-This document describes the design as it is built today, currently through milestone 2. `PLAN.md` holds where the design is going and why. `DEVELOPMENT.md` covers how to work on the code.
+This document describes the design as it is built today, currently through milestone 3. `PLAN.md` holds where the design is going and why. `DEVELOPMENT.md` covers how to work on the code.
 
 ## Overview
 
@@ -17,7 +17,10 @@ flowchart TD
     Iface --> Host["HostDevice: naive pure-Crystal kernels"]
     Host --> CPU["CPU: host-visible memory (oracle)"]
     Host --> Sim["SimDiscrete: hidden memory (test device)"]
+    Host --> BLAS["BLAS: F32 matmul by cblas_sgemm (opt-in)"]
+    BLAS -. "FFI" .-> Lib["Accelerate / OpenBLAS"]
     style CPU stroke:#2b8a3e,stroke-width:3px
+    style Lib stroke:#d9480f,stroke-width:3px
 ```
 
 ## Core types
@@ -35,6 +38,7 @@ Type         |File                      |Role
 `HostDevice` |`devices/host.cr`         |Abstract device whose kernels run on the host CPU; holds `HostBuffer`s.                                                  
 `CPU`        |`devices/cpu.cr`          |The reference device: host kernels on host-visible memory.                                                               
 `SimDiscrete`|`devices/sim_discrete.cr` |A test device: host kernels on memory the host cannot map.                                                               
+`BLAS`       |`blas.cr`                 |Opt-in: host kernels with `F32` matmul by the platform BLAS.                                                             
 
 ```mermaid
 classDiagram
@@ -89,6 +93,7 @@ classDiagram
     Device <|-- HostDevice
     HostDevice <|-- CPU
     HostDevice <|-- SimDiscrete
+    HostDevice <|-- BLAS
     Buffer <|-- HostBuffer
 ```
 
@@ -236,19 +241,41 @@ The device interface always speaks in transfers, so that discrete-memory devices
 - **`map(buffer)`:** returns host-visible `Bytes`, or `nil` when the memory isn't host-visible. Readers try `map` first and fall back to `download`.
 - **`execute(node, output)`:** computes a node into a freshly allocated contiguous buffer, reading its sources' buffers through their views.
 - **`sync`:** waits for submitted work to finish.
+- **`shape_invariant?`:** reports whether results can depend on the shape of the computation around them, such as batch size (level 2 of Decision K). Features that need level 2 check it (Decision L).
 
 A buffer belongs to exactly one device and records which. A device rejects any buffer it does not own with `DeviceError`.
 
-### Host devices: CPU and SimDiscrete
+### Host devices: CPU, SimDiscrete and BLAS
 
-`HostDevice` holds the pure-Crystal kernels. Its two subclasses differ only in whether the host may see their memory:
+`HostDevice` holds the pure-Crystal kernels. Its subclasses differ in whether the host may see their memory, and in whether any kernel is replaced:
 
-Device       |`map`             |Purpose                                                      
--------------|------------------|-------------------------------------------------------------
-`CPU`        |returns the buffer|The oracle every other device is tested against              
-`SimDiscrete`|always `nil`      |Behaves like a discrete GPU; counts `uploads` and `downloads`
+Device       |`map`             |`shape_invariant?`|Purpose                                                      
+-------------|------------------|------------------|-------------------------------------------------------------
+`CPU`        |returns the buffer|true              |The oracle every other device is tested against              
+`SimDiscrete`|always `nil`      |true              |Behaves like a discrete GPU; counts `uploads` and `downloads`
+`BLAS`       |returns the buffer|false             |Replaces `F32` `MatMul` with `cblas_sgemm`                   
 
-Every op spec runs on both. Code that reads a buffer directly instead of going through `map` or `download` passes on `CPU` and fails on `SimDiscrete`, long before a real discrete GPU is involved.
+Every op spec runs on all three. Code that reads a buffer directly instead of going through `map` or `download` passes on `CPU` and fails on `SimDiscrete`, long before a real discrete GPU is involved.
+
+### The BLAS device
+
+`BLAS` is the first device to cross into native code. It is opt-in: `require "tensomite/blas"` links Accelerate on macOS or OpenBLAS elsewhere, so the core shard stays pure Crystal.
+
+It overrides `execute` for one case only, an `F32` `MatMul`, and inherits every other kernel from `HostDevice`, including `I32` matmul. Each batch matrix becomes one `cblas_sgemm` call. BLAS describes a matrix by a pointer, a transpose flag and a leading dimension (the distance between rows), so each operand's view is mapped onto those where possible and copied only where not:
+
+```mermaid
+flowchart TD
+    V["operand view, last two dims [rows, cols]"] --> R{{"col stride 1, row stride ≥ cols?"}}
+    R -- yes --> NT["no transpose, ld = row stride"]
+    R -- no --> C{{"row stride 1, col stride ≥ rows?"}}
+    C -- yes --> T["transpose, ld = col stride"]
+    C -- no --> P["copy into a packed row-major matrix"]
+    style P stroke:#d9480f,stroke-width:3px
+```
+
+So contiguous, transposed and column-sliced operands pass to BLAS without copying. A broadcast batch dimension (stride 0) is handled by the per-batch pointer. Only a broadcast inside the matrix, such as a row repeated with stride 0, is copied.
+
+Vendor BLAS libraries choose their blocking and threading by shape, so `BLAS` reports `shape_invariant?` false (Decision L). Results repeat exactly from run to run for the same shapes.
 
 ### Moving data between devices
 
@@ -350,6 +377,7 @@ flowchart LR
 
 - **Element counts and offsets are `Int32`,** following Crystal's `Slice` indexing. That caps one buffer at about 2 GB.
 - **Only `F32` and `I32`.** No type promotion: operands must have the same dtype.
+- **BLAS covers `F32` matmul only,** and the oracle's naive matmul is roughly 500 to 2,800 times slower (`bench/matmul.cr`).
 - **One device per op.** Moving data needs an explicit `to`, which goes through host memory.
 - **Every primitive is a separate kernel run.** `softmax` alone is five; fusion arrives in M7.
 - **Each scalar operand is a new leaf,** uploaded to the device once per use.

@@ -30,5 +30,9 @@ module Tensomite
 
     # Blocks until all work submitted to the device has finished.
     abstract def sync : Nil
+
+    # Returns true when a result's bits never depend on the shape of the computation
+    # around it, such as batch size or prompt chunking (level 2 of Decision K).
+    abstract def shape_invariant? : Bool
   end
 end

@@ -79,7 +79,7 @@ Each milestone is done when its exit criterion passes.
    - Reductions: sum, max, mean over an axis.
    - Composite ops: softmax, layernorm, embedding gather, causal mask, slice/concat, and naive matmul.
    - Exit: specs pass against hand-computed values, and the same suite passes unchanged on `SimDiscrete`.
-3. **BLAS seam.** Bind `cblas_sgemm` for Accelerate and OpenBLAS. Non-contiguous inputs are made contiguous first. Devices gain `shape_invariant?` (Decision L).
+3. **BLAS seam.** Bind `cblas_sgemm` for Accelerate and OpenBLAS, behind an opt-in `require "tensomite/blas"` so the core stays pure Crystal. Operands whose strides BLAS cannot describe are packed first. Devices gain `shape_invariant?` (Decision L).
    - Exit: results are within a relative error of 1e-5 of the naive matmul, and the speedup is benchmarked.
 4. **GPT-2 inference.** Write a safetensors loader (mmap as a CPU `Buffer`), a byte-level BPE tokeniser, and the GPT-2 small forward pass with a KV cache and sampling.
    - Fixtures (logits and tokens) are generated once from a PyTorch reference and committed, so CI needs no Python.

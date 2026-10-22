@@ -5,36 +5,40 @@ A guide for maintaining tensomite, fixing bugs and adding features. `DESIGN.md` 
 ## Setup
 
 1. **Install Crystal 1.22 or later**, which includes `shards`. On macOS, use `brew install crystal`.
-2. **Install development dependencies:** `shards install`.
-3. **Build the linter:**
+2. **Install a BLAS library** for the `BLAS` device, which the specs use. macOS already has Accelerate. On Debian or Ubuntu, `sudo apt-get install libopenblas-dev`.
+3. **Install development dependencies:** `shards install`.
+4. **Build the linter:**
 
    ```sh
    mkdir -p bin && cp lib/ameba/bin/ameba.cr bin && crystal build -o bin/ameba bin/ameba.cr
    ```
 
-   If you use [`ops`](https://github.com/nickthecook/ops), `ops up` does steps 2 and 3 from `ops.yml`.
+   If you use [`ops`](https://github.com/nickthecook/ops), `ops up` does steps 3 and 4 from `ops.yml`.
 
 ## Everyday commands
 
-Task                  |Command                               |With `ops`                 
-----------------------|--------------------------------------|---------------------------
-Run specs             |`crystal spec`                        |`ops test_specs`           
-Lint                  |`bin/ameba src/ spec/`                |`ops lint` (`src/` only)   
-Check formatting      |`crystal tool format --check src spec`|                           
-Fix formatting        |`crystal tool format src spec`        |                           
-Everything before a PR|all three of the above                |`ops test` (specs and lint)
+Task                  |Command                                     |With `ops`                 
+----------------------|--------------------------------------------|---------------------------
+Run specs             |`crystal spec`                              |`ops test_specs`           
+Lint                  |`bin/ameba src/ spec/ bench/`               |`ops lint` (`src/` only)   
+Check formatting      |`crystal tool format --check src spec bench`|                           
+Fix formatting        |`crystal tool format src spec bench`        |                           
+Everything before a PR|all three of the above                      |`ops test` (specs and lint)
 
 All three must be clean before a PR.
 
+Benchmarks live in `bench/` and run in release mode, for example `crystal run --release bench/matmul.cr`. CI type-checks, formats and lints them with everything else, but does not run them.
+
 ## Continuous integration
 
-`.github/workflows/ci.yml` runs on every push to `main` and on every pull request, whatever its base, so stacked PRs are checked too. It runs on Linux and macOS:
+`.github/workflows/ci.yml` runs on every push to `main` and on every pull request, whatever its base, so stacked PRs are checked too. It runs on Linux, with OpenBLAS installed, and on macOS, with Accelerate:
 
-Step                  |Linux|macOS
-----------------------|-----|-----
-`crystal spec`        |yes  |yes  
-Formatting check      |yes  |     
-`bin/ameba src/ spec/`|yes  |     
+Step                         |Linux|macOS
+-----------------------------|-----|-----
+`crystal spec`               |yes  |yes  
+Type-check `bench/`          |yes  |yes  
+Formatting check             |yes  |     
+`bin/ameba src/ spec/ bench/`|yes  |     
 
 - **Crystal is pinned** in the job matrix (currently 1.22.0). Bump it there, together with `crystal:` in `shard.yml` when the minimum changes.
 - **The cache** holds `lib/`, `shard.lock` and `bin/ameba`. Its key combines the OS, the Crystal version and a hash of `shard.yml`. `shard.lock` is not committed (this is a library), so `shard.yml` stands in for it. The Crystal version is in the key because `bin/ameba` is compiled with it.
@@ -51,8 +55,10 @@ src/tensomite/node.cr       Op and Node
 src/tensomite/tensor.cr     Tensor: construction, views, transfers, reading data
 src/tensomite/tensor/       Tensor ops by kind: elementwise, reduce, structural, composite
 src/tensomite/scheduler.cr  realisation
-src/tensomite/devices/      host.cr (shared host kernels), then one file per device
+src/tensomite/devices/      host.cr (shared host kernels), then one file per pure-Crystal device
+src/tensomite/blas.cr       opt-in BLAS binding and device; not required by src/tensomite.cr
 spec/                       specs, one file per type or kind of op
+bench/                      benchmarks, run with --release
 ```
 
 ## Conventions
@@ -63,6 +69,7 @@ spec/                       specs, one file per type or kind of op
 - **Check eagerly.** Any shape, dtype or device check that can run when an op is built must run there, not in a kernel. See "Error timing" in `DESIGN.md`.
 - **Raise tensomite errors** (`ShapeError`, `DTypeError`, `DeviceError`, `ExecutionError`, or `Error`) with a message naming the values involved, such as `"cannot expand [3] to [4]"`.
 - **Prefer composites to new primitives.** If an op can be built from existing `Op`s at acceptable cost, write it as a `Tensor` method in `tensor/composite.cr`. Every primitive costs a kernel on every device.
+- **Native code stays behind an opt-in `require`.** A file that binds a C library (`lib ... end` with `@[Link]`) is not required by `src/tensomite.cr`, so users who don't need it never link it. `tensomite/blas` is the first.
 - **Avoid `not_nil!`** (ameba flags it). Use an accessor that raises a meaningful error instead, such as `Node#buffer!`.
 
 ### Crystal gotchas met so far
@@ -80,7 +87,7 @@ spec/                       specs, one file per type or kind of op
 
 - **Expected values are worked out by hand,** never produced by tensomite itself. Write the intermediate result in a comment above the assertion, for example `# a.T + b = [[11, 24], [32, 45], [53, 66]]`, so a reviewer can check the arithmetic.
 - **Transcendental values come from an independent reference,** Python's `math` module, in float64, and are compared with `expect_close` (tolerance 1e-6 by default). Say so in a comment at the top of the spec file.
-- **Op specs run on every device.** Wrap them in `DEVICES.each do |device| … end` and build inputs with `tensor(device, shape, data)`. Results must be identical on every host device, so the same expectations apply to all of them. Device-specific behaviour, such as transfer counts, goes in `device_spec.cr`.
+- **Op specs run on every device.** Wrap them in `DEVICES.each do |device| … end` and build inputs with `tensor(device, shape, data)`. `DEVICES` holds `CPU`, `SimDiscrete` and `BLAS`. Results must be identical on all of them for the small integer inputs these specs use, so the same expectations apply. Comparisons on random data, where `BLAS` legitimately differs in the last bits, go in the device's own spec with a tolerance, as in `blas_spec.cr`. Device-specific behaviour, such as transfer counts, goes in `device_spec.cr`.
 - **Each milestone's exit criterion has its own `describe "Mn exit: …"` block.**
 - **Include non-contiguous inputs** (transposed and broadcast views) for any new op. Most indexing bugs hide there.
 - **Test the timing of errors,** as well as the fact that they are raised, when an op adds new checks.
