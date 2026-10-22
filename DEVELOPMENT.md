@@ -16,13 +16,13 @@ A guide for maintaining tensomite, fixing bugs and adding features. `DESIGN.md` 
 
 ## Everyday commands
 
-| Task | Command | With `ops` |
-|---|---|---|
-| Run specs | `crystal spec` | `ops test_specs` |
-| Lint | `bin/ameba src/ spec/` | `ops lint` (`src/` only) |
-| Check formatting | `crystal tool format --check src spec` | |
-| Fix formatting | `crystal tool format src spec` | |
-| Everything before a PR | all three of the above | `ops test` (specs and lint) |
+Task                  |Command                               |With `ops`                 
+----------------------|--------------------------------------|---------------------------
+Run specs             |`crystal spec`                        |`ops test_specs`           
+Lint                  |`bin/ameba src/ spec/`                |`ops lint` (`src/` only)   
+Check formatting      |`crystal tool format --check src spec`|                           
+Fix formatting        |`crystal tool format src spec`        |                           
+Everything before a PR|all three of the above                |`ops test` (specs and lint)
 
 All three must be clean before a PR.
 
@@ -99,10 +99,10 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    Wrong["Wrong result"] --> Raised{"Error raised?"}
+    Wrong["Wrong result"] --> Raised{{"Error raised?"}}
     Raised -- "at op call" --> Checks["Check inputs: shapes, dtypes, devices"]
     Raised -- "at realize" --> Kernel["Kernel or device bug"]
-    Raised -- no --> Contig{"Right for contiguous inputs?"}
+    Raised -- no --> Contig{{"Right for contiguous inputs?"}}
     Contig -- yes --> ViewBug["View bug: check strides, offset_of"]
     Contig -- no --> KernelBug["Kernel arithmetic bug"]
     style ViewBug stroke:#d9480f,stroke-width:3px

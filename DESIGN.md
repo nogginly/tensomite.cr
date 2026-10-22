@@ -11,24 +11,24 @@ flowchart TD
     User["User code: a + b, sum, transpose"] --> Tensor["Tensor: a View over a Node"]
     Tensor --> Node["Node: op, sources, shape, dtype, device"]
     Node --> Sched["Scheduler.realize: topological order, alloc, execute"]
-    Sched --> Iface{"Device: alloc, upload, download, map, execute, sync"}
+    Sched --> Iface{{"Device: alloc, upload, download, map, execute, sync"}}
     Iface --> CPU["CPU: naive pure-Crystal kernels (oracle)"]
     style CPU stroke:#2b8a3e,stroke-width:3px
 ```
 
 ## Core types
 
-| Type | File | Role |
-|---|---|---|
-| `DType` | `dtype.cr` | Runtime element type: `F32`, `I32`. `DType.of(Float32)` maps a Crystal type to it. |
-| `View` | `view.cr` | Shape, strides and offset, counted in elements. Pure metadata. |
-| `Buffer` | `device.cr` | An opaque allocation owned by one device. |
-| `Device` | `device.cr` | Where buffers live and kernels run. |
-| `Op` | `node.cr` | What a node computes: `Add`, `Mul`, `Sum`, `Copy`. |
-| `Node` | `node.cr` | A graph vertex producing one contiguous array. |
-| `Tensor` | `tensor.cr` | The user-facing value: a `View` over a `Node`. |
-| `Scheduler` | `scheduler.cr` | Turns unrealised nodes into kernel runs. |
-| `CPU` | `devices/cpu.cr` | The reference device. |
+Type       |File            |Role                                                                              
+-----------|----------------|----------------------------------------------------------------------------------
+`DType`    |`dtype.cr`      |Runtime element type: `F32`, `I32`. `DType.of(Float32)` maps a Crystal type to it.
+`View`     |`view.cr`       |Shape, strides and offset, counted in elements. Pure metadata.                    
+`Buffer`   |`device.cr`     |An opaque allocation owned by one device.                                         
+`Device`   |`device.cr`     |Where buffers live and kernels run.                                               
+`Op`       |`node.cr`       |What a node computes: `Add`, `Mul`, `Sum`, `Copy`.                                
+`Node`     |`node.cr`       |A graph vertex producing one contiguous array.                                    
+`Tensor`   |`tensor.cr`     |The user-facing value: a `View` over a `Node`.                                    
+`Scheduler`|`scheduler.cr`  |Turns unrealised nodes into kernel runs.                                          
+`CPU`      |`devices/cpu.cr`|The reference device.                                                             
 
 ```mermaid
 classDiagram
@@ -118,11 +118,11 @@ The orange tensors are views (a transpose and a broadcast) that copy nothing. Th
 
 A `View` maps a logical index onto a position in storage: `offset + Σ index[i] × strides[i]`.
 
-| Operation | Effect on the view (from shape `[2, 3]`, strides `[3, 1]`) |
-|---|---|
-| `transpose` | shape `[3, 2]`, strides `[1, 3]` |
-| `expand([4, 2, 3])` | shape `[4, 2, 3]`, strides `[0, 3, 1]` |
-| `reshape([3, 2])` | shape `[3, 2]`, strides `[2, 1]` (contiguous views only) |
+Operation          |Effect on the view (from shape `[2, 3]`, strides `[3, 1]`)
+-------------------|----------------------------------------------------------
+`transpose`        |shape `[3, 2]`, strides `[1, 3]`                          
+`expand([4, 2, 3])`|shape `[4, 2, 3]`, strides `[0, 3, 1]`                    
+`reshape([3, 2])`  |shape `[3, 2]`, strides `[2, 1]` (contiguous views only)  
 
 A stride of 0 re-reads the same element along that dimension. This is how broadcasting works without copying.
 
@@ -218,21 +218,21 @@ sequenceDiagram
 
 The plan accepts that errors in a lazy graph may surface far from their cause. To keep that rare, every check that can be made when an op is called is made then:
 
-| Error | Raised when |
-|---|---|
-| `ShapeError` | Building the op: broadcast mismatch, bad axis or permutation, wrong element count |
-| `DTypeError` | Building the op (mixed dtypes), or `to_a` with the wrong Crystal type |
-| `DeviceError` | Building the op with tensors on different devices |
+Error        |Raised when                                                                      
+-------------|---------------------------------------------------------------------------------
+`ShapeError` |Building the op: broadcast mismatch, bad axis or permutation, wrong element count
+`DTypeError` |Building the op (mixed dtypes), or `to_a` with the wrong Crystal type            
+`DeviceError`|Building the op with tensors on different devices                                
 
 Only failures during execution (none exist yet on the CPU) would surface at `realize`.
 
 ```mermaid
 flowchart LR
-    Call["a + b"] --> Check{"shape, dtype, device OK?"}
+    Call["a + b"] --> Check{{"shape, dtype, device OK?"}}
     Check -- no --> Err["raise now, at the caller's line"]
     Check -- yes --> Node["node built"]
     Node --> Real["realize"]
-    Real --> Exec{"execution OK?"}
+    Real --> Exec{{"execution OK?"}}
     Exec -- no --> Late["raise at realize"]
     style Err stroke:#2b8a3e,stroke-width:3px
     style Late stroke:#d9480f,stroke-width:3px
