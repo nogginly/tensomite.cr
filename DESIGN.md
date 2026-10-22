@@ -30,6 +30,53 @@ flowchart TD
 | `Scheduler` | `scheduler.cr` | Turns unrealised nodes into kernel runs. |
 | `CPU` | `devices/cpu.cr` | The reference device. |
 
+```mermaid
+classDiagram
+    class Tensor {
+        node : Node
+        view : View
+        +(other) Tensor
+        *(other) Tensor
+        sum(axis) Tensor
+        transpose() Tensor
+        realize() Tensor
+        to_a(type) Array
+    }
+    class View {
+        shape : Array
+        strides : Array
+        offset : Int32
+        offset_of(flat) Int32
+    }
+    class Node {
+        op : Op?
+        srcs : Array of Tensor
+        shape : Array
+        dtype : DType
+        buffer : Buffer?
+    }
+    class Device {
+        <<abstract>>
+        alloc(bytesize) Buffer
+        upload(buffer, bytes)
+        download(buffer, bytes)
+        map(buffer) Bytes?
+        execute(node, output)
+        sync()
+    }
+    class Buffer {
+        <<abstract>>
+        bytesize : Int32
+    }
+    Tensor --> Node : reads
+    Tensor --> View : through
+    Node --> Tensor : srcs, until realised
+    Node --> Buffer : once realised
+    Node --> Device : runs on
+    Device <|-- CPU
+    Buffer <|-- CPU_Buffer
+```
+
 ### Tensor and Node
 
 A `Tensor` is a small struct holding a `Node` and a `View`. The node is where the data comes from. The view says how to read it.
@@ -38,6 +85,15 @@ A `Tensor` is a small struct holding a `Node` and a `View`. The node is where th
 - **A node always produces a contiguous, row-major array** of its `shape`. All of the non-trivial layout lives in the views that read it.
 - **A leaf node** (from `Tensor.from`) has no op and is created realised.
 - **Any other node** holds its op and source tensors until it is realised. After that it holds only its buffer, and its sources are dropped so the graph behind it can be collected.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Unrealised : op called, e.g. a + b
+    [*] --> Realised : Tensor.from (leaf)
+    Unrealised --> Realised : Scheduler runs it
+    Unrealised : holds op and srcs
+    Realised : holds buffer only
+```
 
 For example, here is the graph for `(a.transpose + c).sum`, before it is realised:
 
@@ -70,7 +126,32 @@ A `View` maps a logical index onto a position in storage: `offset + Σ index[i] 
 
 A stride of 0 re-reads the same element along that dimension. This is how broadcasting works without copying.
 
+For example, here is how two views over the storage `[1, 2, 3, 4, 5, 6]` locate one element each:
+
+```mermaid
+flowchart LR
+    subgraph T["a.transpose: shape [3,2], strides [1,3]"]
+        T1["element [1,0]"] --> T2["0 + 1×1 + 0×3 = 1"] --> T3["storage[1] = 2"]
+    end
+    subgraph B["c.expand([3,2]): shape [3,2], strides [0,1]"]
+        B1["element [2,1]"] --> B2["0 + 2×0 + 1×1 = 1"] --> B3["storage[1] of c"]
+    end
+    style T2 stroke:#d9480f,stroke-width:3px
+    style B2 stroke:#d9480f,stroke-width:3px
+```
+
 Binary ops broadcast eagerly. `a + b` computes the common shape with NumPy rules, then expands both operands to that shape before building the node. **Kernels therefore only ever see sources whose shape equals the output shape**, with arbitrary strides. Every device inherits that simplification.
+
+```mermaid
+flowchart LR
+    A["a: [3,2]"] --> BS["broadcast_shape → [3,2]"]
+    C["c: [2]"] --> BS
+    BS --> EA["a.expand([3,2]): unchanged"]
+    BS --> EC["c.expand([3,2]): strides [0,1]"]
+    EA --> N["Node Add, shape [3,2]"]
+    EC --> N
+    style N stroke:#2b8a3e,stroke-width:3px
+```
 
 `reshape` of a non-contiguous view inserts a `Copy` node first, then reshapes the contiguous result.
 
@@ -94,6 +175,14 @@ The CPU device is the oracle that every future device is tested against. Its ker
 - **Indexing.** Each element is located with `View#offset_of(flat_index)`. This favours clarity over speed.
 - **Sum over an axis.** The summed axis is permuted to the end of the source view. Each output element then reads one run of consecutive logical indices, added left to right. A sum over all elements is the same loop with a single output.
 
+```mermaid
+flowchart LR
+    S["src [2,3], sum(0)"] --> P["permute([1,0]) → [3,2]"]
+    P --> R0["row 0: indices 0,1 → dst[0]"]
+    P --> R1["row 1: indices 2,3 → dst[1]"]
+    P --> R2["row 2: indices 4,5 → dst[2]"]
+```
+
 ### Realisation
 
 `Scheduler.realize(node)`:
@@ -103,6 +192,27 @@ The CPU device is the oracle that every future device is tested against. Its ker
 3. **Wait.** Call `sync` on the root's device.
 
 `Tensor#to_a(T)` realises the tensor, then reads the buffer (through `map` or `download`) in the view's logical order.
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant T as Tensor
+    participant S as Scheduler
+    participant D as Device
+    U->>T: to_a(Float32)
+    T->>S: realize(node)
+    S->>S: topological order of unrealised nodes
+    loop each node
+        S->>D: alloc(bytesize)
+        D-->>S: buffer
+        S->>D: execute(node, buffer)
+        S->>S: node.realized(buffer), drop srcs
+    end
+    S->>D: sync
+    T->>D: map(buffer), else download
+    D-->>T: bytes
+    T-->>U: elements in the view's logical order
+```
 
 ## Error timing
 
@@ -115,6 +225,18 @@ The plan accepts that errors in a lazy graph may surface far from their cause. T
 | `DeviceError` | Building the op with tensors on different devices |
 
 Only failures during execution (none exist yet on the CPU) would surface at `realize`.
+
+```mermaid
+flowchart LR
+    Call["a + b"] --> Check{"shape, dtype, device OK?"}
+    Check -- no --> Err["raise now, at the caller's line"]
+    Check -- yes --> Node["node built"]
+    Node --> Real["realize"]
+    Real --> Exec{"execution OK?"}
+    Exec -- no --> Late["raise at realize"]
+    style Err stroke:#2b8a3e,stroke-width:3px
+    style Late stroke:#d9480f,stroke-width:3px
+```
 
 ## Current limits
 

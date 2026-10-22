@@ -68,6 +68,14 @@ spec/                       specs, one file per type
 
 ### Adding an op
 
+```mermaid
+flowchart LR
+    Op["node.cr: Op member"] --> API["tensor.cr: Tensor method, checks, output shape"]
+    API --> K["devices/*.cr: kernel on every device"]
+    K --> Spec["spec: hand-computed values, views"]
+    Spec --> Doc["DESIGN.md, if a new concept"]
+```
+
 1. **Add a member to `Op`** in `node.cr`, with a one-line comment stating what it computes.
 2. **Add the `Tensor` method** in `tensor.cr`. It validates the shapes and dtypes, computes the output shape, and builds the node with `Tensor.lazy(Node.new(...))`. Broadcast or permute the sources there, so the kernel stays simple.
 3. **Implement the kernel on every device.** On the CPU, add a branch to `CPU#execute(T, node, dst)`. The `case` is exhaustive, so a missing branch is a compile error.
@@ -89,11 +97,33 @@ spec/                       specs, one file per type
 
 ## Debugging
 
+```mermaid
+flowchart TD
+    Wrong["Wrong result"] --> Raised{"Error raised?"}
+    Raised -- "at op call" --> Checks["Check inputs: shapes, dtypes, devices"]
+    Raised -- "at realize" --> Kernel["Kernel or device bug"]
+    Raised -- no --> Contig{"Right for contiguous inputs?"}
+    Contig -- yes --> ViewBug["View bug: check strides, offset_of"]
+    Contig -- no --> KernelBug["Kernel arithmetic bug"]
+    style ViewBug stroke:#d9480f,stroke-width:3px
+    style KernelBug stroke:#d9480f,stroke-width:3px
+```
+
 - **Inspect before realising.** An unrealised tensor's graph is all there: `t.node.op`, `t.node.srcs`, `t.node.shape`, and each source's `view`.
 - **Check the view first** when a result is wrong for transposed or broadcast inputs but right for contiguous ones. `View#offset_of(i)` shows where element `i` is read from.
 - **`node.realized?`** shows whether work has run. A realised node has no sources left to inspect, so inspect before realising.
 
 ## Workflow
+
+```mermaid
+flowchart LR
+    Main["main"] --> Br["new branch, named for the work"]
+    Br --> Work["code, specs, docs"]
+    Work --> Checks["specs, ameba, format clean"]
+    Checks --> PR["PR"]
+    PR --> Squash["squash-merge"]
+    Squash --> Main
+```
 
 - **One branch per PR,** named for its purpose (for example `m2-cpu-ops-simdiscrete`, `docs-design-development`). Branches start from the latest `main`.
 - **PRs are squash-merged.**
