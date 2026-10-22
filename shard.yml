@@ -1,0 +1,14 @@
+name: tensomite
+version: 0.1.0
+license: MPL-2.0
+authors:
+  - nogginly <nogginly@icloud.com>
+
+description: |
+  A small pure-Crystal tensor maths runtime with a minimal native seam to BLAS and the GPU.
+
+crystal: ">= 1.22.0"
+
+development_dependencies:
+  ameba:
+    github: crystal-ameba/ameba
