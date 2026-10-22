@@ -106,7 +106,7 @@ Each milestone is done when its exit criterion passes.
 - **Decision F, tensor typing:** non-generic `Tensor` with a runtime `DType` (proposed, confirm).
 - **Decision G, Metal plus Vulkan, or Vulkan everywhere via MoltenVK:** native Metal (proposed). Revisit after M8, when keeping two codegen emitters has a known cost.
 - **Decision H, Vulkan shader compilation:** compile at build time (decided). A Crystal macro runs `glslc` during `crystal build` and embeds the SPIR-V, so users need no compiler and there is no shaderc seam. Fused kernels on Vulkan are deferred to Decision I.
-- **Decision I, fused kernels on Vulkan:** decide at the end of M8, using the fusion gain measured on Metal in M7. The options are no fusion on Vulkan, shaderc at runtime for fused kernels only, or a small SPIR-V emitter in Crystal.
+- **Decision I, fused kernels on Vulkan:** decide at the end of M8, using the fusion gain measured on Metal in M7. The options are no fusion on Vulkan, hand-written fused kernels for common patterns (compiled at build time), shaderc at runtime for fused kernels only, or a small SPIR-V emitter in Crystal.
 
 ## Risks
 
