@@ -4,10 +4,13 @@ module Tensomite
     F32
     I32
 
-    # Returns the size of one element in bytes.
-    def bytesize : Int32
+    # Returns the number of bytes that hold *count* elements.
+    #
+    # Every byte-size calculation goes through here, because block formats store a
+    # group of elements in a fixed number of bytes rather than a size per element.
+    def bytes_for(count : Int32) : Int32
       case self
-      in F32, I32 then 4
+      in F32, I32 then count * 4
       end
     end
 

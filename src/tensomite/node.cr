@@ -62,7 +62,7 @@ module Tensomite
 
     # Returns the number of bytes produced.
     def bytesize : Int32
-      size * dtype.bytesize
+      dtype.bytes_for(size)
     end
 
     # Returns the buffer of a realised node; raises `Error` otherwise.

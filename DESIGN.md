@@ -22,19 +22,19 @@ flowchart TD
 
 ## Core types
 
-Type         |File                      |Role                                                                                    
--------------|--------------------------|----------------------------------------------------------------------------------------
-`DType`      |`dtype.cr`                |Runtime element type: `F32`, `I32`. `DType.of(Float32)` maps a Crystal type to it.      
-`View`       |`view.cr`                 |Shape, strides and offset, counted in elements. Pure metadata.                          
-`Buffer`     |`device.cr`               |An opaque allocation owned by one device, which it names.                               
-`Device`     |`device.cr`               |Where buffers live and kernels run.                                                     
-`Op`         |`node.cr`                 |The primitive operations devices implement.                                             
-`Node`       |`node.cr`                 |A graph vertex producing one contiguous array.                                          
-`Tensor`     |`tensor.cr`, `tensor/*.cr`|The user-facing value: a `View` over a `Node`. Its ops are grouped by kind in `tensor/`.
-`Scheduler`  |`scheduler.cr`            |Turns unrealised nodes into kernel runs.                                                
-`HostDevice` |`devices/host.cr`         |Abstract device whose kernels run on the host CPU; holds `HostBuffer`s.                 
-`CPU`        |`devices/cpu.cr`          |The reference device: host kernels on host-visible memory.                              
-`SimDiscrete`|`devices/sim_discrete.cr` |A test device: host kernels on memory the host cannot map.                              
+Type         |File                      |Role                                                                                                                     
+-------------|--------------------------|-------------------------------------------------------------------------------------------------------------------------
+`DType`      |`dtype.cr`                |Runtime element type: `F32`, `I32`. `DType.of(Float32)` maps a Crystal type to it; `bytes_for(count)` gives storage size.
+`View`       |`view.cr`                 |Shape, strides and offset, counted in elements. Pure metadata.                                                           
+`Buffer`     |`device.cr`               |An opaque allocation owned by one device, which it names.                                                                
+`Device`     |`device.cr`               |Where buffers live and kernels run.                                                                                      
+`Op`         |`node.cr`                 |The primitive operations devices implement.                                                                              
+`Node`       |`node.cr`                 |A graph vertex producing one contiguous array.                                                                           
+`Tensor`     |`tensor.cr`, `tensor/*.cr`|The user-facing value: a `View` over a `Node`. Its ops are grouped by kind in `tensor/`.                                 
+`Scheduler`  |`scheduler.cr`            |Turns unrealised nodes into kernel runs.                                                                                 
+`HostDevice` |`devices/host.cr`         |Abstract device whose kernels run on the host CPU; holds `HostBuffer`s.                                                  
+`CPU`        |`devices/cpu.cr`          |The reference device: host kernels on host-visible memory.                                                               
+`SimDiscrete`|`devices/sim_discrete.cr` |A test device: host kernels on memory the host cannot map.                                                               
 
 ```mermaid
 classDiagram
@@ -187,6 +187,8 @@ Composite |none: built from the rows above      |`mean`, `softmax`, `layernorm`,
 
 - **Scalars** become rank-0 leaf tensors of the operand's dtype (`Tensor.scalar`), which then broadcast like any other tensor. So `x * 0.5` is `Mul` of `x` and a broadcast scalar.
 - **Float-only ops** (`/`, `exp`, `log`, `tanh`, `sqrt`, `mean` and the composites) raise `DTypeError` on `I32` when called.
+- **One dtype per op.** Every source of an op must share one dtype (`check_compatible`), and `gather` ids are the only exception (`I32`). Decision N in `PLAN.md` relaxes this per op for quantised weights in M9.
+- **Byte sizes** always come from `DType#bytes_for(count)`, never from a size per element, so block formats with many elements per block fit without changes.
 - **`keepdims`** reshapes the reduced result to keep the axis with size 1. The reduction's output is contiguous, so this is a view, not a copy.
 
 For example, `softmax(axis)` expands into five primitive nodes:
