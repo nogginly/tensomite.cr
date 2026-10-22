@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, crystal: "1.22.0" }
+          - { os: macos-latest, crystal: "1.22.0" }
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Crystal
+        uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: ${{ matrix.crystal }}
+
+      # shard.lock is not committed, so the key follows shard.yml. The Crystal
+      # version is part of the key because bin/ameba is compiled with it.
+      - name: Cache shards and ameba
+        uses: actions/cache@v5
+        with:
+          path: |
+            lib
+            shard.lock
+            bin/ameba
+          key: ${{ runner.os }}-crystal-${{ matrix.crystal }}-shards-${{ hashFiles('shard.yml') }}
+
+      - name: Install shards
+        run: shards check || shards install
+
+      - name: Run specs
+        run: crystal spec
+
+      - name: Check formatting (Linux)
+        if: ${{ runner.os == 'Linux' }}
+        run: crystal tool format --check src spec
+
+      - name: Build ameba when not cached (Linux)
+        if: ${{ runner.os == 'Linux' }}
+        run: |
+          if [ ! -x bin/ameba ]; then
+            mkdir -p bin && cp lib/ameba/bin/ameba.cr bin && crystal build -o bin/ameba bin/ameba.cr
+          fi
+
+      - name: Run static code analysis (Linux)
+        if: ${{ runner.os == 'Linux' }}
+        run: bin/ameba src/ spec/
