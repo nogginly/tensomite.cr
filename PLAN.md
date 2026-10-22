@@ -82,11 +82,11 @@ Each milestone is done when its exit criterion passes.
    - Exit: results are within a relative error of 1e-5 of the naive matmul, and the speedup is benchmarked.
 4. **GPT-2 inference.** Write a safetensors loader (mmap as a CPU `Buffer`), a byte-level BPE tokeniser, and the GPT-2 small forward pass with a KV cache and sampling.
    - Fixtures (logits and tokens) are generated once from a PyTorch reference and committed, so CI needs no Python.
-   - Exit: logits are within tolerance of the fixture, greedy decoding matches for 64 tokens, the tokeniser matches the reference on a Unicode corpus, and baseline tokens/s is recorded.
+   - Exit: logits are within tolerance of the fixture, greedy decoding matches for 64 tokens, the tokeniser matches the reference on a Unicode corpus, logits for a position are bit-identical whether computed in prefill or in decode (CPU device), and baseline tokens/s is recorded.
 5. **Autograd and training.** Implement reverse mode as a graph transform: `grad(loss, params)` returns new lazy tensors. Add SGD, AdamW and cross-entropy.
    - Exit: gradients pass finite-difference checks, and a char-level Shakespeare model reaches a validation loss below 1.6 nats/char.
 6. **Metal backend.** Bind the driver through `objc_msgSend` (one declaration per selector signature) with autorelease pools around dispatch. Add a pipeline cache, then hand-written MSL kernels, ported one op at a time.
-   - Exit: every op matches the CPU oracle, and GPT-2 tokens/s beats BLAS.
+   - Exit: every op matches the CPU oracle, GPT-2 tokens/s beats BLAS, prefill and decode logits are bit-identical on Metal, and the cost of the deterministic split-K matvec against an atomic version is measured.
 7. **Kernel macros and memory planning.** `Tensomite.kernel` takes an expression block and generates, at compile time, a CPU loop, an MSL kernel and a GLSL kernel, plus a backward kernel by symbolic differentiation. Matmul gains bias and activation epilogues. Buffers are reused across the graph. GPT-2's elementwise chains (GELU, residual adds) move onto macros.
    - Exit: dispatch count per GPT-2 token falls measurably, tokens/s rises, macro kernels match their hand-written CPU oracles, and macro gradients pass finite-difference checks.
 8. **Vulkan backend.** Bind Vulkan compute, and port the hand-written kernels to GLSL compiled at build time. Kernel macros already emit GLSL, so fused kernels come for free.
@@ -108,6 +108,10 @@ Each milestone is done when its exit criterion passes.
 - **Decision H, Vulkan shader compilation:** compile at build time (decided). A Crystal macro runs `glslc` during `crystal build` and embeds the SPIR-V, so users need no compiler and there is no shaderc seam.
 - **Decision I, fused kernels on Vulkan:** settled by Decision J. Macro kernels emit GLSL at compile time.
 - **Decision J, how kernels are fused:** compile-time kernel macros (decided). Fusion is explicit: only what is written inside one macro is fused. Runtime auto-fusion over the graph is added only if measurements after M8 show a need for it. That would bring back the shader-compiler question for Vulkan (shaderc or a SPIR-V emitter in Crystal).
+- **Decision K, determinism:** three levels (decided).
+  1. Run to run: the same inputs, shapes and device give the same bits. Guaranteed everywhere, including parallel CPU code, which splits work independently of thread count.
+  2. Shape invariance: a position's logits do not depend on batch size or prompt chunking. A goal for tensomite's own inference kernels, tested by comparing prefill and decode. The BLAS backend is exempt, because vendor libraries choose strategies by shape.
+  3. Across devices: never promised. Comparisons use tolerances.
 
 ## Risks
 
