@@ -641,6 +641,25 @@ Outside kernels             |2.7         |3%
 - **The KV cache cost the most:** every token copies the whole cache. It still does, but in runs; a preallocated cache written in place would remove the copy altogether.
 - **The matmuls are limited by memory bandwidth:** each decoded token streams all ~500 MB of weights once, and 30 ms is about 17 GB/s.
 
+**Metal on the MacBook Pro, M5 Pro** (M6 part 3: every op on the GPU, `MatMul` one thread per output):
+
+Device |GPT-2 prefill tokens/s|GPT-2 decode tokens/s|ms per decoded token
+-------|----------------------|---------------------|--------------------
+`CPU`  |8.4                   |7.67                 |130                 
+`BLAS` |864.0                 |152.98               |7                   
+`Metal`|637.9                 |34.07                |29                  
+
+Size|`BLAS` ms|`BLAS` GFLOP/s|`Metal` ms|`Metal` GFLOP/s
+----|---------|--------------|----------|---------------
+64  |0.004    |127.1         |0.327     |1.6            
+128 |0.006    |675.5         |0.340     |12.3           
+256 |0.029    |1,152.1       |0.862     |38.9           
+512 |0.180    |1,488.2       |2.716     |98.8           
+
+- **About 0.33 ms per realise is fixed cost:** committing a command buffer and waiting for it. It dominates small matrices, and is paid once per decoded token.
+- **Decode leaves most of the GPU idle.** A decoded token is a run of matrix-vector products, and with one thread per output a 768-wide layer launches 768 threads, each looping over all 768 or 3,072 of `k`. Streaming GPT-2's ~500 MB of weights in 29 ms is about 17 GB/s, a small fraction of the memory bandwidth. Prefill has 64 times as many outputs per layer and gets within 75% of `BLAS`.
+- **Square matmuls reach 99 GFLOP/s** without tiling or threadgroup memory, against Accelerate's 1.5 TFLOP/s on the CPU's matrix units.
+
 **Training a character-level GPT on Tiny Shakespeare, Linux container.** The M5 exit is a validation loss below 1.8 within an hour here, and M7's is below 1.6 within an hour (Decision R). Runs use `examples/shakespeare.cr` on `BLAS`, with AdamW and a cosine schedule from 1e-3 to 1e-4:
 
 Model                                   |Params|Tokens per step|ms per step|Steps|Wall time|Validation loss, nats/char        
