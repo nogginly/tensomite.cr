@@ -316,7 +316,21 @@ flowchart TD
 
 **Calling Objective-C from Crystal.** Metal has no C API, so `metal/objc.cr` sends messages through `objc_msgSend`. That function must be called with the exact C signature of the method it reaches, and Crystal does not allow one C symbol to be declared with several signatures. So `ObjC.send(ReturnType, receiver, "selector:", args...)` casts its address to a `Proc` typed by its arguments, one type per call site. `NSUInteger` is `UInt64`, `BOOL` is passed as `UInt32`, and `MTLSize`, a 24-byte struct, is passed as a pointer, as arm64 passes structs over 16 bytes. Objects the runtime autoreleases are created inside `ObjC.autoreleasepool`, and those kept beyond it are retained.
 
-Ported so far: the elementwise ops (`Add`, `Sub`, `Mul`, `Div`, `Maximum`, `GreaterEqual`, `Exp`, `Log`, `Tanh`, `Sqrt`) and `Copy`, in `F32`.
+**Kernels that add.** Each kernel that adds does so in the host's order, so its results are bit-identical to the host's, not merely close:
+
+Op          |Threads                |Each thread                                                                                      
+------------|-----------------------|-------------------------------------------------------------------------------------------------
+`Sum`, `Max`|one per output         |folds its run of the source, permuted so the reduced axis is last, in index order                
+`ScatterAdd`|one per column         |zeroes its column, then adds the source rows into the rows their ids select, in order            
+`Unview`    |one per output position|inverts the view to find which logical elements read the position, and adds them in logical order
+
+`Unview` inverts a view by decomposing `position - offset` over the dimensions with a nonzero stride, largest first. The dimensions with stride 0 are the ones that repeat a position: their indices are walked in row-major order, which is logical order. The decomposition is unique when each stride exceeds the furthest the smaller ones can reach together. Every view tensomite builds satisfies that, and a view that did not would run on the host.
+
+One thread per output is simple but slow for a long reduction, such as the sum of a whole tensor. Faster strategies, in which threads share a reduction, change the order of additions; they belong with the matmul work, where the cost of a deterministic split is measured (the M6 exit).
+
+**Errors.** A GPU kernel cannot raise. `Gather` and `ScatterAdd` report an id out of range through a small shared error buffer, and `flush` raises the host's `ExecutionError` when it finds a report. The error therefore surfaces when the command buffer completes, at `realize`, as it does on the host. One difference remains: the nodes encoded before the error are marked realised, with undefined contents for the failing one.
+
+Ported so far, in `F32`: the elementwise ops (`Add`, `Sub`, `Mul`, `Div`, `Maximum`, `GreaterEqual`, `Exp`, `Log`, `Tanh`, `Sqrt`), `Copy`, `Sum`, `Max`, `Cat`, `Gather`, `ScatterAdd` and `Unview`. `MatMul` is next.
 
 ### Moving data between devices
 

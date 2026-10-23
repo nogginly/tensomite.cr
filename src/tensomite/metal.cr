@@ -55,6 +55,7 @@ module Tensomite
       Op::Exp => "exp_f32", Op::Log => "log_f32", Op::Tanh => "tanh_f32", Op::Sqrt => "sqrt_f32",
       Op::Copy => "copy_f32",
     }
+    private OTHER = %w[copy_into_f32 sum_f32 max_f32 gather_f32 scatter_add_f32 unview_f32]
 
     # Returns true when the system has a Metal GPU. Some virtual machines, such as
     # hosted CI runners, do not.
@@ -79,6 +80,9 @@ module Tensomite
     @pipelines = {} of String => Void*
     @command_buffer = Pointer(Void).null
     @encoder = Pointer(Void).null
+    # Where kernels report an index out of range: a count, the first bad id, and
+    # the number of rows it was checked against.
+    private getter(errors : MetalBuffer) { new_buffer(12).tap(&.bytes.fill(0)) }
 
     def initialize
       @device = LibMetal.MTLCreateSystemDefaultDevice
@@ -90,6 +94,10 @@ module Tensomite
     end
 
     def alloc(bytesize : Int32) : Buffer
+      new_buffer(bytesize)
+    end
+
+    private def new_buffer(bytesize : Int32) : MetalBuffer
       mtl = ObjC.send(Pointer(Void), @device, "newBufferWithLength:options:", Math.max(bytesize, 4).to_u64, STORAGE_SHARED)
       raise DeviceError.new("cannot allocate #{bytesize} bytes") if mtl.null?
       MetalBuffer.new(self, mtl, bytesize)
@@ -126,8 +134,7 @@ module Tensomite
     end
 
     def execute(node : Node, output : Buffer) : Nil
-      if (name = kernel_name(node)) && node.srcs.all? { |src| src.ndim <= MAX_DIMS }
-        encode(name, node, metal(output))
+      if encode(node, metal(output))
         @gpu_ops += 1
       else
         flush
@@ -136,10 +143,104 @@ module Tensomite
       end
     end
 
-    # Returns the Metal kernel for *node*, or `nil` when it runs on the host.
-    private def kernel_name(node : Node) : String?
-      return unless node.dtype.f32?
-      node.srcs.size == 2 ? BINARY[node.op]? : UNARY[node.op]?
+    # Encodes *node* as GPU work and returns true, or returns false when it has no
+    # Metal kernel: an op not yet ported, a dtype other than `F32`, a view of more
+    # than 8 dimensions, or a view `Unview` cannot invert.
+    private def encode(node : Node, output : MetalBuffer) : Bool
+      return false unless node.dtype.f32? && node.srcs.all? { |src| src.ndim <= MAX_DIMS }
+      srcs = node.srcs
+      case node.op
+      when Op::Sum, Op::Max
+        encode_reduce(node, output)
+      when Op::Cat
+        encode_cat(node, output)
+      when Op::Gather, Op::ScatterAdd
+        encode_rows(node, output)
+      when Op::Unview
+        return false unless encode_unview(node, output)
+      else
+        name = srcs.size == 2 ? BINARY[node.op]? : UNARY[node.op]?
+        return false unless name
+        dispatch(name, node.size, srcs.map { |src| mtl(src) } << output.mtl,
+          srcs.map { |src| view_args(src.view) } << u32(node.size))
+      end
+      true
+    end
+
+    # Sum and Max: one thread per output, folding a run of the source permuted so
+    # the reduced axis is last, as the host kernel does.
+    private def encode_reduce(node : Node, output : MetalBuffer) : Nil
+      src = node.srcs.first
+      view = src.view
+      run = view.size
+      if axis = node.axis
+        view = view.permute((0...view.ndim).reject(axis) + [axis])
+        run = view.shape.last
+      end
+      name = node.op == Op::Sum ? "sum_f32" : "max_f32"
+      dispatch(name, node.size, [mtl(src), output.mtl], [view_args(view), u32(run), u32(node.size)])
+    end
+
+    # Cat: one dispatch per source, copying it into its slice of the output.
+    private def encode_cat(node : Node, output : MetalBuffer) : Nil
+      axis = node.axis || raise Error.new("cat needs an axis")
+      out_view = View.contiguous(node.shape)
+      start = 0
+      node.srcs.each do |src|
+        stop = start + src.shape[axis]
+        region = out_view.slice(axis, start, stop)
+        dispatch("copy_into_f32", src.size, [mtl(src), output.mtl], [view_args(src.view), view_args(region), u32(src.size)])
+        start = stop
+      end
+    end
+
+    # Gather, one thread per output element, and ScatterAdd, one thread per column.
+    # Both report an id out of range through the error buffer (see `#flush`).
+    private def encode_rows(node : Node, output : MetalBuffer) : Nil
+      rows_src, ids = node.srcs
+      rows, width = node.op == Op::Gather ? rows_src.shape : node.shape
+      buffers = [mtl(rows_src), mtl(ids), output.mtl, errors.mtl]
+      constants = [view_args(rows_src.view), view_args(ids.view), u32(width), i32(rows)]
+      if node.op == Op::Gather
+        dispatch("gather_f32", node.size, buffers, constants << u32(node.size))
+      else
+        dispatch("scatter_add_f32", width, buffers, constants << u32(ids.size))
+      end
+    end
+
+    # Unview: one thread per output position, summing what the view reads from it.
+    # Returns false for a view whose positions are not each read by a regular grid
+    # of indices; see `#inverse_args`.
+    private def encode_unview(node : Node, output : MetalBuffer) : Bool
+      view = node.source_view || raise Error.new("unview needs a source view")
+      return false unless view.ndim <= MAX_DIMS && (inverse = inverse_args(view))
+      src = node.srcs.first
+      dispatch("unview_f32", node.size, [mtl(src), output.mtl], [view_args(src.view), view_args(view), inverse, u32(node.size)])
+      true
+    end
+
+    # Returns the kernels' `Inverse` struct for *view*: the dimensions with a
+    # nonzero stride and more than one index, largest stride first, then the rest.
+    #
+    # Returns `nil` unless each of those strides exceeds the furthest the smaller
+    # ones can reach together, which makes the decomposition of a position unique.
+    # Every view tensomite builds satisfies it; overlapping views run on the host.
+    private def inverse_args(view : View) : Bytes?
+      dims = (0...view.ndim)
+      strided = dims.select { |dim| view.strides[dim] != 0 && view.shape[dim] > 1 }.sort_by! { |dim| -view.strides[dim] }
+      reach = 0
+      strided.reverse_each do |dim|
+        stride = view.strides[dim]
+        return unless stride > reach
+        reach += stride * (view.shape[dim] - 1)
+      end
+      repeated = dims.reject { |dim| strided.includes?(dim) }
+      args = Slice(Int32).new(2 + 2 * MAX_DIMS)
+      args[0] = strided.size
+      strided.each_with_index { |dim, k| args[1 + k] = dim }
+      args[1 + MAX_DIMS] = repeated.size
+      repeated.each_with_index { |dim, k| args[2 + MAX_DIMS + k] = dim }
+      args.to_unsafe_bytes
     end
 
     # Compiles the kernel source and builds a compute pipeline for every kernel in it.
@@ -151,7 +252,7 @@ module Tensomite
         library = ObjC.send(Pointer(Void), @device, "newLibraryWithSource:options:error:", ObjC.string(SOURCE), options, error)
         ObjC.release(options)
         raise DeviceError.new("cannot compile Metal kernels: #{ObjC.describe(error.value)}") if library.null?
-        (BINARY.values + UNARY.values).each do |name|
+        (BINARY.values + UNARY.values + OTHER).each do |name|
           function = ObjC.send(Pointer(Void), library, "newFunctionWithName:", ObjC.string(name))
           raise DeviceError.new("no Metal kernel #{name}") if function.null?
           pipeline = ObjC.send(Pointer(Void), @device, "newComputePipelineStateWithFunction:error:", function, error)
@@ -163,43 +264,46 @@ module Tensomite
       end
     end
 
-    # Encodes one dispatch of kernel *name* for *node*: sources, output, each
-    # source's view, then the element count, one thread per output element.
-    private def encode(name : String, node : Node, output : MetalBuffer) : Nil
-      count = node.size
-      return if count == 0
+    # Encodes one dispatch of kernel *name* over *threads* threads, binding
+    # *buffers* from index 0 and then *constants*, each copied into the command.
+    private def dispatch(name : String, threads : Int32, buffers : Array(Void*), constants : Array(Bytes)) : Nil
+      return if threads == 0
       pipeline = @pipelines[name]
       encoder = open_encoder
       ObjC.send(Nil, encoder, "setComputePipelineState:", pipeline)
-      index = 0_u64
-      node.srcs.each do |src|
-        ObjC.send(Nil, encoder, "setBuffer:offset:atIndex:", metal(src.node.buffer!).mtl, 0_u64, index)
-        index += 1
+      buffers.each_with_index do |buffer, index|
+        ObjC.send(Nil, encoder, "setBuffer:offset:atIndex:", buffer, 0_u64, index.to_u64)
       end
-      ObjC.send(Nil, encoder, "setBuffer:offset:atIndex:", output.mtl, 0_u64, index)
-      index += 1
-      node.srcs.each do |src|
-        view = view_args(src.view)
-        ObjC.send(Nil, encoder, "setBytes:length:atIndex:", view.to_unsafe.as(Void*), view.bytesize.to_u64, index)
-        index += 1
+      constants.each_with_index(buffers.size) do |bytes, index|
+        ObjC.send(Nil, encoder, "setBytes:length:atIndex:", bytes.to_unsafe.as(Void*), bytes.size.to_u64, index.to_u64)
       end
-      n = count.to_u32
-      ObjC.send(Nil, encoder, "setBytes:length:atIndex:", pointerof(n).as(Void*), 4_u64, index)
       width = Math.min(ObjC.send(UInt64, pipeline, "maxTotalThreadsPerThreadgroup"), 256_u64)
-      grid = StaticArray[count.to_u64, 1_u64, 1_u64]
+      grid = StaticArray[threads.to_u64, 1_u64, 1_u64]
       group = StaticArray[width, 1_u64, 1_u64]
       ObjC.send(Nil, encoder, "dispatchThreads:threadsPerThreadgroup:", grid.to_unsafe, group.to_unsafe)
     end
 
     # Returns *view* laid out as the kernels' `View` struct.
-    private def view_args(view : View) : Slice(Int32)
+    private def view_args(view : View) : Bytes
       args = Slice(Int32).new(2 + 2 * MAX_DIMS)
       args[0], args[1] = view.ndim, view.offset
       view.ndim.times do |dim|
         args[2 + dim] = view.shape[dim]
         args[2 + MAX_DIMS + dim] = view.strides[dim]
       end
-      args
+      args.to_unsafe_bytes
+    end
+
+    private def u32(value : Int32) : Bytes
+      Slice[value.to_u32].to_unsafe_bytes
+    end
+
+    private def i32(value : Int32) : Bytes
+      Slice[value].to_unsafe_bytes
+    end
+
+    private def mtl(tensor : Tensor) : Void*
+      metal(tensor.node.buffer!).mtl
     end
 
     # Returns the open compute encoder, starting a command buffer when there is none.
@@ -213,8 +317,9 @@ module Tensomite
       @encoder
     end
 
-    # Commits the open command buffer, if any, and waits for it; raises
-    # `ExecutionError` if the GPU reports a failure.
+    # Commits the open command buffer, if any, and waits for it. Raises
+    # `ExecutionError` if the GPU reports a failure, or if a kernel reported an
+    # index out of range.
     private def flush : Nil
       return if @command_buffer.null?
       command_buffer = @command_buffer
@@ -229,6 +334,11 @@ module Tensomite
       end
       ObjC.release(command_buffer)
       raise ExecutionError.new("Metal command buffer failed: #{message}") if message
+      if (reports = @errors.try(&.bytes.unsafe_slice_of(Int32))) && reports[0] != 0
+        id, rows = reports[1], reports[2]
+        reports.fill(0)
+        raise ExecutionError.new("index #{id} out of range for #{rows} rows")
+      end
     end
 
     private def metal(buffer : Buffer) : MetalBuffer
