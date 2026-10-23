@@ -4,29 +4,29 @@ What the next session, or the next person, needs in order to carry on without th
 
 **Keeping it current.** Rewrite it rather than appending to it: at the end of each PR, and whenever a session's context passes about 70%. Anything that belongs in one of the other three documents goes there instead.
 
-*Last rewritten: 23 Oct 2026, with M6's last PR open.*
+*Last rewritten: 23 Oct 2026, with M7 under way.*
 
 ## Where things stand
 
-- **On `main`:** milestones 1 to 5, and M6 parts 1 to 3: the lazy tensor core, the CPU op set and `SimDiscrete`, the BLAS seam, GPT-2 inference verified against PyTorch, autograd with SGD, AdamW and a Shakespeare trainer, and a `Metal` device with every `F32` op on the GPU. CI runs on Linux and macOS (the macOS runner has a GPU), and Decisions A–S are recorded in `PLAN.md`.
-- **Open PR:** M6 part 4 on `m6-metal-split-k`: split-K matmul, Decision S, `bench/matvec.cr`, and the M6 exit spec on GPT-2 small. It completes M6.
-- **M6 exit, all met:** every op matches the oracle (`gpu_spec.cr`); GPT-2 small on Metal matches PyTorch, decodes greedily like it, and gives bit-identical prefill and decode (CI's GPU and the M5 Pro); Metal decodes at 64 tokens/s against BLAS's 152 and prefills at 1,149 against 906; determinism costs 0–4% for matrix-vector products and 8% for prefill (`DESIGN.md`, "Performance baselines").
-- **Next:** M7, kernel macros and memory planning. Measurements point at its targets: a token's matmuls take 3 ms of Metal's 16, so the rest is dispatches and one-thread-per-row reductions. Decision O requires Metal to beat BLAS there.
+- **On `main`:** milestones 1 to 6. That covers the lazy tensor core, the CPU op set and `SimDiscrete`, the BLAS seam, GPT-2 inference verified against PyTorch, autograd with SGD, AdamW and a Shakespeare trainer, and the `Metal` device with every `F32` op on the GPU and split-K matmul. CI runs on Linux and macOS (the macOS runner has a GPU), and Decisions A–W are recorded in `PLAN.md`.
+- **M7 plan:** seven PRs, listed under M7 in `PLAN.md`, with Decisions T (row ops are hand-written fused ops), U (a finalizer-fed buffer pool), V (GLSL waits for M8) and W (threads only if training is still too slow).
+- **Open PR:** M7 part 1 on `m7-profile`: `Metal::Profile` and `bench/profile_gpt2.cr`, to break down Metal's 16 ms per decoded token. Waiting on the maintainer's run on the M5 Pro.
+- **Why M7 starts by measuring:** a token's matmuls take 3 ms of Metal's 16; the rest is unexplained.
 - **Deferred:** Decision D, CPU parallelism. Profiling in M5 shows that training is bound by elementwise passes, so D now has a measured case; M7's fusion comes first.
 
 ## Working agreements
 
-Agreement           |Practice                                                                                                                                                                                                                                         
---------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-Branches            |One per PR, named for its purpose (`m5-autograd`, `docs-handoff`), cut from the latest `main`.                                                                                                                                                   
-Pull requests       |Claude opens them without waiting to be asked, then watches them: CI, reviews and merge, with a safety-net check-in.                                                                                                                             
-Stacked PRs         |When asked. The later PR's base is the earlier branch; GitHub retargets it after the earlier one merges.                                                                                                                                         
-Merging             |The maintainer merges, by squash or by merge commit. After a squash, merge `main` into a stacked branch and resolve conflicts with the branch's side; never rewrite history or force-push (the session blocks it anyway).                        
-Milestones          |Each ends with its exit criterion passing, with the evidence (numbers, logs) in the PR description.                                                                                                                                              
-Documents           |Updated in the same PR as the code (see "Workflow" in `DEVELOPMENT.md`). Tables and diagrams follow "Documents" in `DEVELOPMENT.md`; check them with `scripts/format_tables.py` and `scripts/check_diagrams.sh`.                                 
-Decisions           |Labelled with letters and recorded in `PLAN.md`. The next is **T**; S allowed Metal's matmul to differ from the CPU in the last bits. P (how to get GPT-2 small's fixtures) was settled by allowing Hugging Face; Q made this document committed.
-Understanding checks|Short questions labelled Q-A, Q-B and so on, after explaining something new. The next is **Q-S**.                                                                                                                                                
-Claims              |Measured before stated. Several assumptions were wrong when checked: decode time was dominated by the KV cache, not host kernels; GPT-2's file was unaligned. Say "I think" when something is unverified.                                        
+Agreement           |Practice                                                                                                                                                                                                                 
+--------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Branches            |One per PR, named for its purpose (`m5-autograd`, `docs-handoff`), cut from the latest `main`.                                                                                                                           
+Pull requests       |Claude opens them without waiting to be asked, then watches them: CI, reviews and merge, with a safety-net check-in.                                                                                                     
+Stacked PRs         |When asked. The later PR's base is the earlier branch; GitHub retargets it after the earlier one merges.                                                                                                                 
+Merging             |The maintainer merges, by squash or by merge commit. After a squash, merge `main` into a stacked branch and resolve conflicts with the branch's side; never rewrite history or force-push (the session blocks it anyway).
+Milestones          |Each ends with its exit criterion passing, with the evidence (numbers, logs) in the PR description.                                                                                                                      
+Documents           |Updated in the same PR as the code (see "Workflow" in `DEVELOPMENT.md`). Tables and diagrams follow "Documents" in `DEVELOPMENT.md`; check them with `scripts/format_tables.py` and `scripts/check_diagrams.sh`.         
+Decisions           |Labelled with letters and recorded in `PLAN.md`. The next is **X**; T to W planned M7. P (how to get GPT-2 small's fixtures) was settled by allowing Hugging Face; Q made this document committed.                       
+Understanding checks|Short questions labelled Q-A, Q-B and so on, after explaining something new. The next is **Q-T**.                                                                                                                        
+Claims              |Measured before stated. Several assumptions were wrong when checked: decode time was dominated by the KV cache, not host kernels; GPT-2's file was unaligned. Say "I think" when something is unverified.                
 
 ## Follow-ups found on the way
 
@@ -68,22 +68,23 @@ A MacBook Pro with an M5 Pro, using Accelerate. Its benchmark results are in "Pe
 
 The maintainer prefers to understand rather than consume, through analogies, examples and Mermaid diagrams. These have been explained and checked, so build on them rather than re-explaining:
 
-Concept                      |Takeaway                                                                                                            |Check   
------------------------------|--------------------------------------------------------------------------------------------------------------------|--------
-Lazy graphs                  |Ops build nodes; `realize` runs them, so passes can see the whole graph. Shape errors still come early.             |Q-A     
-Discrete and unified memory  |Design for transfers; unified memory makes them free, not the reverse.                                              |Q-B     
-Shader compilation           |Source to SPIR-V can be at build time; SPIR-V to machine code is always the driver's.                               |none    
-Fusion                       |One kernel instead of many, saving memory traffic and dispatches. Compile-time macros fuse what is written together.|Q-E, Q-F
-Matmul and fusion            |Matmul reuses inputs, so it is tiled; only its epilogue and prologue fuse.                                          |Q-E     
-Online softmax               |A running maximum with rescaling by `exp(m − m')` lets softmax work tile by tile, as in FlashAttention.             |Q-G     
-Associativity and determinism|Float addition order changes the bits. Levels 1, 2 and 3 of Decision K.                                             |Q-H, Q-I
-Prefix caching               |Why level 2 matters: a cache hit must give the same bits as recomputing.                                            |Q-I     
-Auto-vectorisation           |`Slice` vectorises and `Array` does not; float sums do not reorder; integer sums do.                                |none    
-Loop-carried dependencies    |Vectorise across independent outputs; a running total can't be split without reordering.                            |Q-O     
-Quantised dot products       |Q4 × Q8 in integers vectorises and is exact within a block.                                                         |none    
-Where BLAS's speed comes from|Bookkeeping, loop order, register and cache blocking, threads, matrix units: factors that multiply.                 |Q-N     
-Decode is memory-bound       |Each token streams all the weights; the GPU's edge shrinks on unified memory.                                       |none    
-Reverse-mode autograd        |`grad` is a graph transform: chain rules build a backward graph of ordinary ops; views' adjoints sum (`Unview`).    |not yet 
-Split-K and determinism      |Fixed-size chunks of `k`, combined in chunk order, keep bits independent of row count and zero-padding; costs ~0–8%.|Q-R     
+Concept                      |Takeaway                                                                                                                          |Check          
+-----------------------------|----------------------------------------------------------------------------------------------------------------------------------|---------------
+Lazy graphs                  |Ops build nodes; `realize` runs them, so passes can see the whole graph. Shape errors still come early.                           |Q-A            
+Discrete and unified memory  |Design for transfers; unified memory makes them free, not the reverse.                                                            |Q-B            
+Shader compilation           |Source to SPIR-V can be at build time; SPIR-V to machine code is always the driver's.                                             |none           
+Fusion                       |One kernel instead of many, saving memory traffic and dispatches. Compile-time macros fuse what is written together.              |Q-E, Q-F       
+Matmul and fusion            |Matmul reuses inputs, so it is tiled; only its epilogue and prologue fuse.                                                        |Q-E            
+Online softmax               |A running maximum with rescaling by `exp(m − m')` lets softmax work tile by tile, as in FlashAttention.                           |Q-G            
+Associativity and determinism|Float addition order changes the bits. Levels 1, 2 and 3 of Decision K.                                                           |Q-H, Q-I       
+Prefix caching               |Why level 2 matters: a cache hit must give the same bits as recomputing.                                                          |Q-I            
+Auto-vectorisation           |`Slice` vectorises and `Array` does not; float sums do not reorder; integer sums do.                                              |none           
+Loop-carried dependencies    |Vectorise across independent outputs; a running total can't be split without reordering.                                          |Q-O            
+Quantised dot products       |Q4 × Q8 in integers vectorises and is exact within a block.                                                                       |none           
+Where BLAS's speed comes from|Bookkeeping, loop order, register and cache blocking, threads, matrix units: factors that multiply.                               |Q-N            
+Decode is memory-bound       |Each token streams all the weights; the GPU's edge shrinks on unified memory.                                                     |none           
+Reverse-mode autograd        |`grad` is a graph transform: chain rules build a backward graph of ordinary ops; views' adjoints sum (`Unview`).                  |not yet        
+Split-K and determinism      |Fixed-size chunks of `k`, combined in chunk order, keep bits independent of row count and zero-padding; costs ~0–8%.              |Q-R            
+Fused kernels and rounding   |A fused CPU loop rounds exactly as the composite does, so the composite is a bit-exact oracle; GPU `tanh` differs in the last bit.|Q-S (explained)
 
 Questions asked but never answered: Q-D (why a SPIR-V emitter in Crystal needs no compiler at run time), Q-J (why `sum(axis)` permutes the axis to the end), Q-L (why `Cat` writes through a slice view), Q-M (why `max` starts from the first element), Q-P (why broadcasting needs no gradient rule of its own), Q-Q (the gradient of `x` expanded from `[3]` to `[2, 3]`), Q-R (why the split must depend only on `k` for prefill to equal decode). Q-K was answered, after a correction: a stride of 0 means repeated reads of one position, not contiguous rows.

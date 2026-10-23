@@ -71,6 +71,20 @@ require "./spec_helper"
         end
       end
 
+      it "profiles dispatches, host ops and GPU time per kernel" do
+        a = Tensor.from(f32(1, 2, 3, 4), [2, 2], metal)
+        profile = Metal::Profile.new(per_kernel: true)
+        metal.profile = profile
+        ((a + 1) * a).sum.realize
+        (Tensor.from([1], [1], metal) + Tensor.from([2], [1], metal)).realize
+        metal.profile = nil
+        profile.dispatches.should eq 3
+        profile.kernels.keys.sort.should eq ["Add", "Mul", "Sum"]
+        profile.kernels.values.all? { |(count, seconds)| count == 1 && seconds >= 0 }.should be_true
+        profile.host_ops.keys.should eq ["Add I32"]
+        profile.command_buffers.should eq 3
+      end
+
       it "shares memory with the host" do
         t = Tensor.from(f32(1, 2), [2], metal)
         metal.map(t.node.buffer!).should_not be_nil
