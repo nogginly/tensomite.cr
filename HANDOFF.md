@@ -13,7 +13,8 @@ What the next session, or the next person, needs in order to carry on without th
 - **Stacked PR:** M6 part 2, on `m6-metal-ops`: Metal kernels for `Sum`, `Max`, `Cat`, `Gather`, `ScatterAdd` and `Unview`, all bit-identical to the host.
 - **Stacked PR:** M6 part 3, on `m6-metal-matmul`: `MatMul` on Metal, bit-identical to the host, and Metal rows in `bench/gpt2.cr` and `bench/matmul.cr`.
 - **Stacked PR:** M6 part 4, on `m6-metal-split-k`: split-K matmul on Metal (deterministic by default, atomic for measurement, serial for checking), Decision S, and `bench/matvec.cr`.
-- **Next in M6:** the exit, measured on the maintainer's M5 Pro: GPT-2 tokens/s against `BLAS` (Decision O), bit-identical prefill and decode, and the cost of split-K matvec.
+- **M6 exit, measured on the maintainer's M5 Pro:** every op matches the oracle (`gpu_spec.cr`), GPT-2 small's prefill and decode are bit-identical on Metal (`M6 exit` in `gpt2_spec.cr`), Metal decodes at 64 tokens/s against BLAS's 152 and prefills at 1,149 against 906, and the deterministic split costs nothing in decode and 9% in prefill against atomics. The GPT-2 small spec on Metal still needs one run on the M5 Pro.
+- **Next:** M7, kernel macros and memory planning, where Metal must beat BLAS in decode (Decision O).
 - **Deferred:** Decision D, CPU parallelism. Profiling in M5 shows that training is bound by elementwise passes, so D now has a measured case; M7's fusion comes first.
 
 ## Working agreements

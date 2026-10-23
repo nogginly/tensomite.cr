@@ -113,3 +113,36 @@ describe "M4 exit: GPT-2 small" do
     pending "needs TENSOMITE_GPT2_DIR and spec/fixtures/gpt2/expected.json"
   end
 end
+
+# The M6 exit criterion on GPT-2 small: the same checks as M4, on each GPU.
+describe "M6 exit: GPT-2 small on GPUs" do
+  dir = ENV["TENSOMITE_GPT2_DIR"]? || ""
+  fixture = "#{__DIR__}/fixtures/gpt2/expected.json"
+  ready = File.exists?("#{dir}/model.safetensors") && File.exists?(fixture)
+
+  if !ready
+    pending "needs TENSOMITE_GPT2_DIR and spec/fixtures/gpt2/expected.json"
+  elsif GPUS.empty?
+    pending "no GPU on this machine"
+  else
+    expected = Expected.read(fixture)
+    GPUS.each do |gpu|
+      describe gpu.class do
+        model = GPT2.load("#{dir}/model.safetensors", device: gpu)
+
+        it "matches the reference logits within 2e-3" do
+          logit_error(expected, model.forward(expected.prompt_ids, model.new_cache)).should be <= 2e-3
+        end
+
+        it "decodes 64 tokens greedily like the reference" do
+          model.generate(expected.prompt_ids, 64).should eq expected.greedy
+        end
+
+        it "gives bit-identical logits in prefill and in one-by-one decode" do
+          prefill = model.forward(expected.prompt_ids, model.new_cache).to_a(Float32)
+          decode_one_by_one(model, expected.prompt_ids).should eq prefill
+        end
+      end
+    end
+  end
+end
