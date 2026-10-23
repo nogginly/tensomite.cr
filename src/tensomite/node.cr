@@ -31,6 +31,14 @@ module Tensomite
     Gather
     # Matrix product of `[..., M, K]` and `[..., K, N]`; batch dimensions are already broadcast.
     MatMul
+    # Elementwise 1 where `a >= b` and 0 elsewhere, in the sources' dtype.
+    GreaterEqual
+    # The adjoint of reading through `Node#source_view`: each output element, in the
+    # viewed node's shape, is the sum of the source elements the view reads from it.
+    Unview
+    # Rows of source 0 added into output rows selected by the `I32` indices in
+    # source 1; the adjoint of `Gather`. Rows no index selects are zero.
+    ScatterAdd
   end
 
   # A vertex of the compute graph, producing one contiguous array of `shape`.
@@ -44,9 +52,11 @@ module Tensomite
     getter dtype : DType
     getter device : Device
     getter axis : Int32?
+    # The view an `Unview` node inverts.
+    getter source_view : View?
     getter buffer : Buffer?
 
-    def initialize(@op : Op, @srcs : Array(Tensor), @shape, @dtype, @device, @axis = nil)
+    def initialize(@op : Op, @srcs : Array(Tensor), @shape, @dtype, @device, @axis = nil, @source_view = nil)
     end
 
     def initialize(buffer : Buffer, @shape, @dtype, @device)

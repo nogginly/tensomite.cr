@@ -1,6 +1,6 @@
 # Tensomite: design
 
-This document describes the design as it is built today, currently through milestone 4. `PLAN.md` holds where the design is going and why. `DEVELOPMENT.md` covers how to work on the code.
+This document describes the design as it is built today, currently through milestone 5. `PLAN.md` holds where the design is going and why. `DEVELOPMENT.md` covers how to work on the code.
 
 ## Overview
 
@@ -13,6 +13,8 @@ flowchart TD
     Comp --> Tensor["Tensor: a View over a Node"]
     Tensor --> Node["Node: primitive op, sources, shape, dtype, device"]
     Node --> Sched["Scheduler.realize: topological order, alloc, execute"]
+    Tensor --> Grad["Tensomite.grad: builds the backward graph"]
+    Grad --> Node
     Sched --> Iface{{"Device: alloc, upload, download, map, execute, sync"}}
     Iface --> Host["HostDevice: naive pure-Crystal kernels"]
     Host --> CPU["CPU: host-visible memory (oracle)"]
@@ -25,25 +27,27 @@ flowchart TD
 
 ## Core types
 
-Type         |File                      |Role                                                                                                                     
--------------|--------------------------|-------------------------------------------------------------------------------------------------------------------------
-`DType`      |`dtype.cr`                |Runtime element type: `F32`, `I32`. `DType.of(Float32)` maps a Crystal type to it; `bytes_for(count)` gives storage size.
-`View`       |`view.cr`                 |Shape, strides and offset, counted in elements. Pure metadata.                                                           
-`Buffer`     |`device.cr`               |An opaque allocation owned by one device, which it names.                                                                
-`Device`     |`device.cr`               |Where buffers live and kernels run.                                                                                      
-`Op`         |`node.cr`                 |The primitive operations devices implement.                                                                              
-`Node`       |`node.cr`                 |A graph vertex producing one contiguous array.                                                                           
-`Tensor`     |`tensor.cr`, `tensor/*.cr`|The user-facing value: a `View` over a `Node`. Its ops are grouped by kind in `tensor/`.                                 
-`Scheduler`  |`scheduler.cr`            |Turns unrealised nodes into kernel runs.                                                                                 
-`HostDevice` |`devices/host.cr`         |Abstract device whose kernels run on the host CPU; holds `HostBuffer`s.                                                  
-`CPU`        |`devices/cpu.cr`          |The reference device: host kernels on host-visible memory.                                                               
-`SimDiscrete`|`devices/sim_discrete.cr` |A test device: host kernels on memory the host cannot map.                                                               
-`BLAS`       |`blas.cr`                 |Opt-in: host kernels with `F32` matmul by the platform BLAS.                                                             
-`MappedFile` |`mapped_file.cr`          |A read-only memory mapping of a file, unmapped when collected.                                                           
-`SafeTensors`|`safetensors.cr`          |Reads tensors from a safetensors file, zero-copy on host devices.                                                        
-`BPE`        |`bpe.cr`                  |GPT-2's byte-level byte-pair-encoding tokeniser.                                                                         
-`Sampler`    |`sampler.cr`              |Picks the next token: greedy, or seeded temperature and top-k sampling.                                                  
-`GPT2`       |`models/gpt2.cr`          |The GPT-2 decoder with a KV cache.                                                                                       
+Type            |File                      |Role                                                                                                                     
+----------------|--------------------------|-------------------------------------------------------------------------------------------------------------------------
+`DType`         |`dtype.cr`                |Runtime element type: `F32`, `I32`. `DType.of(Float32)` maps a Crystal type to it; `bytes_for(count)` gives storage size.
+`View`          |`view.cr`                 |Shape, strides and offset, counted in elements. Pure metadata.                                                           
+`Buffer`        |`device.cr`               |An opaque allocation owned by one device, which it names.                                                                
+`Device`        |`device.cr`               |Where buffers live and kernels run.                                                                                      
+`Op`            |`node.cr`                 |The primitive operations devices implement.                                                                              
+`Node`          |`node.cr`                 |A graph vertex producing one contiguous array.                                                                           
+`Tensor`        |`tensor.cr`, `tensor/*.cr`|The user-facing value: a `View` over a `Node`. Its ops are grouped by kind in `tensor/`.                                 
+`Scheduler`     |`scheduler.cr`            |Turns unrealised nodes into kernel runs.                                                                                 
+`Tensomite.grad`|`autograd.cr`             |Builds the backward graph of a loss: lazy gradients for a list of params.                                                
+`Optimizer`     |`optim.cr`                |`SGD` and `AdamW`: new params from params and gradients.                                                                 
+`HostDevice`    |`devices/host.cr`         |Abstract device whose kernels run on the host CPU; holds `HostBuffer`s.                                                  
+`CPU`           |`devices/cpu.cr`          |The reference device: host kernels on host-visible memory.                                                               
+`SimDiscrete`   |`devices/sim_discrete.cr` |A test device: host kernels on memory the host cannot map.                                                               
+`BLAS`          |`blas.cr`                 |Opt-in: host kernels with `F32` matmul by the platform BLAS.                                                             
+`MappedFile`    |`mapped_file.cr`          |A read-only memory mapping of a file, unmapped when collected.                                                           
+`SafeTensors`   |`safetensors.cr`          |Reads tensors from a safetensors file, zero-copy on host devices.                                                        
+`BPE`           |`bpe.cr`                  |GPT-2's byte-level byte-pair-encoding tokeniser.                                                                         
+`Sampler`       |`sampler.cr`              |Picks the next token: greedy, or seeded temperature and top-k sampling.                                                  
+`GPT2`          |`models/gpt2.cr`          |The GPT-2 decoder with a KV cache.                                                                                       
 
 ```mermaid
 classDiagram
@@ -187,13 +191,14 @@ flowchart LR
 
 Devices implement only the primitive ops in `Op`. Everything else is a composite: a `Tensor` method that builds a small graph of primitives. A new device therefore needs kernels for the primitives and nothing more.
 
-Kind      |Primitive ops (`Op`)                 |`Tensor` API                                          
-----------|-------------------------------------|------------------------------------------------------
-Binary    |`Add`, `Sub`, `Mul`, `Div`, `Maximum`|`+`, `-`, `*`, `/`, `maximum`, with tensors or scalars
-Unary     |`Exp`, `Log`, `Tanh`, `Sqrt`         |`exp`, `log`, `tanh`, `sqrt`, unary `-`               
-Reduction |`Sum`, `Max`                         |`sum`, `max`, with optional `axis` and `keepdims`     
-Structural|`Copy`, `Cat`, `Gather`, `MatMul`    |`contiguous`, `Tensor.cat`, `gather`, `matmul`        
-Composite |none: built from the rows above      |`mean`, `softmax`, `layernorm`, `gelu`                
+Kind      |Primitive ops (`Op`)                  |`Tensor` API                                                          
+----------|--------------------------------------|----------------------------------------------------------------------
+Binary    |`Add`, `Sub`, `Mul`, `Div`, `Maximum` |`+`, `-`, `*`, `/`, `maximum`, with tensors or scalars                
+Unary     |`Exp`, `Log`, `Tanh`, `Sqrt`          |`exp`, `log`, `tanh`, `sqrt`, unary `-`                               
+Reduction |`Sum`, `Max`                          |`sum`, `max`, with optional `axis` and `keepdims`                     
+Structural|`Copy`, `Cat`, `Gather`, `MatMul`     |`contiguous`, `Tensor.cat`, `gather`, `matmul`                        
+Adjoint   |`GreaterEqual`, `Unview`, `ScatterAdd`|`greater_equal`; the other two only through `Tensomite.grad`          
+Composite |none: built from the rows above       |`mean`, `softmax`, `log_softmax`, `cross_entropy`, `layernorm`, `gelu`
 
 - **Scalars** become rank-0 leaf tensors of the operand's dtype (`Tensor.scalar`), which then broadcast like any other tensor. So `x * 0.5` is `Mul` of `x` and a broadcast scalar.
 - **Float-only ops** (`/`, `exp`, `log`, `tanh`, `sqrt`, `mean` and the composites) raise `DTypeError` on `I32` when called.
@@ -305,7 +310,7 @@ sequenceDiagram
 The host kernels are deliberately naive, and they run in a fixed order. That gives level 1 determinism from Decision K: the same inputs give the same bits on every run. Their order of arithmetic also never depends on shape, which is the basis for level 2 later.
 
 - **Kernel structure.** `execute` dispatches on `DType` to a generic method, `execute(Float32, …)` or `execute(Int32, …)`, which dispatches on `Op`. A buffer's bytes are read as `Slice(T)`. Results are converted with `T.new(...)`, so every branch compiles for every dtype; float-only ops never reach an integer kernel because they are rejected when called.
-- **Indexing.** Each element is located with `View#offset_of(flat_index)`. This favours clarity over speed.
+- **Indexing in runs.** Kernels walk logical indices in order, in runs that each view can step through with a fixed stride. When every view involved is dense or constant, the run is the whole tensor. Otherwise it is the last dimension. `View#offset_of` finds each run's start, once per run rather than once per element. The order of arithmetic is the same as indexing every element, so the results are bit-identical, and strided reads are three to five times faster.
 - **Reductions.** The reduced axis is permuted to the end of the source view, so each output element reads one run of consecutive logical indices. `Sum` folds the run from zero, and `Max` from its first element. A reduction over all elements is the same loop with a single output.
 
 ```mermaid
@@ -317,6 +322,7 @@ flowchart LR
 ```
 
 - **`Cat`** writes each source through a *slice view of the output*, so the same indexing code that reads views also writes them.
+- **`Unview`** zero-fills its output, then adds each source element at the position its view reads, in index order. **`ScatterAdd`** does the same for whole rows. Both add in a fixed order, so gradients are deterministic too.
 - **`Gather`** copies row `ids[i]` of a 2-D table into output row `i`. An id outside the table raises `ExecutionError`.
 - **`MatMul`** computes each output as a dot product over `k`, added in index order. Its sources arrive already expanded to the common batch shape. It is the one kernel that does not call `offset_of` per element: it finds where each batch matrix starts, then walks rows, columns and `k` with the sources' strides directly. The order of additions is unchanged, so the result is bit-identical to indexing each element (`spec/host_kernels_spec.cr`), and about 10 times faster.
 
@@ -324,7 +330,7 @@ flowchart LR
 
 `Scheduler.realize(node)`:
 
-1. **Order.** A depth-first walk lists the unrealised nodes reachable from the root, in topological order. A node shared by several consumers is listed, and computed, once.
+1. **Order.** A depth-first walk, with an explicit stack so that deep training graphs cannot exhaust the call stack, lists the unrealised nodes reachable from the root, in topological order. A node shared by several consumers is listed, and computed, once.
 2. **Run.** For each node: allocate an output buffer on its device, `execute`, then mark the node realised, which drops its sources.
 3. **Wait.** Call `sync` on the root's device.
 
@@ -352,6 +358,97 @@ sequenceDiagram
 ```
 
 If a kernel raises, the nodes before it stay realised and the failing node stays unrealised.
+
+## Autograd
+
+`Tensomite.grad(loss, params)` returns the gradient of a one-element `loss` with respect to each param, as lazy tensors. It is a graph transform: it reads the unrealised graph behind `loss` and builds a second graph of ordinary primitive ops beside it. Nothing runs until a gradient is realised, and devices need no autograd code at all.
+
+1. **Order.** List the nodes behind `loss` in topological order, stopping at leaves.
+2. **Mark.** Keep only the nodes that lead to a param. Inputs, masks and targets get no gradient.
+3. **Seed.** The loss node's gradient is a tensor of ones.
+4. **Walk back.** In reverse order, each node's accumulated gradient, in the node's shape, goes through its op's chain rule to give one gradient per marked source. Each is added to its source's node.
+5. **Read out.** Each param's gradient is its node's gradient, read through the param's view.
+
+For example, `loss = (w * x).sum` builds two nodes forwards and two backwards:
+
+```mermaid
+flowchart LR
+    W["w (param)"] --> M["Mul"]
+    X["x (input)"] --> M
+    M --> S["Sum → loss"]
+    Ones["ones, the seed"] --> E["expand to x's shape"]
+    S -. "rule for Sum" .-> E
+    E --> GW["Mul: g · x = ∂loss/∂w"]
+    X --> GW
+    M -. "rule for Mul" .-> GW
+    style W stroke:#2b8a3e,stroke-width:3px
+    style GW stroke:#2b8a3e,stroke-width:3px
+```
+
+The backward graph reuses `x`, a forward node, so realising a gradient realises whatever forward work it needs. Realising `loss` and the gradients in either order shares that work.
+
+### Chain rules
+
+Each rule turns `g`, the gradient of the op's output, into a gradient for each source in the source's view shape. `out` is the op's own output, reused where it is cheaper than recomputing.
+
+Op            |Gradient for each source                                                      
+--------------|------------------------------------------------------------------------------
+`Add`, `Sub`  |`g`, and `g` or `-g`                                                          
+`Mul`         |`g·b`, `g·a`                                                                  
+`Div`         |`g / b`, `-g·out / b`                                                         
+`Maximum`     |`g·m` and `g·(1 - m)`, where `m = a.greater_equal(b)`; ties go to `a`         
+`Exp`         |`g·out`                                                                       
+`Log`         |`g / a`                                                                       
+`Tanh`        |`g·(1 - out²)`                                                                
+`Sqrt`        |`g / (2·out)`                                                                 
+`Sum`         |`g` reshaped to keep the reduced axis, then expanded back                     
+`Max`         |`g` expanded, times `m / m.sum`, where `m` marks the maxima; ties share evenly
+`Copy`        |`g`                                                                           
+`Cat`         |one slice of `g` per source                                                   
+`Gather`      |`ScatterAdd` of `g`'s rows into the table's rows; ids get none                
+`MatMul`      |`g·bᵀ`, `aᵀ·g`                                                                
+`ScatterAdd`  |`g` gathered by the ids                                                       
+`Unview`      |`g` read through the inverted view                                            
+`GreaterEqual`|none: it is a step function                                                   
+
+### Views and broadcasting, backwards
+
+Sources are views, so a source's gradient arrives in the view's shape and has to land on the node behind it. Broadcasting needs no rule of its own: an `expand` is a view with stride 0, and its adjoint sums.
+
+- **A view covering its whole node in row-major order** (the common case) only needs a reshape.
+- **Any other view** (a transpose, slice, expand or permute) becomes an `Unview` node holding the view. Each output position is the sum of the gradient elements that the view reads from it. So a bias of shape `[C]`, expanded to `[N, C]`, gets the column sums; a slice gets zeros outside its range.
+
+```mermaid
+flowchart LR
+    G["g, [N, C]"] --> U["Unview of expand([N, C])"]
+    U --> B["∂loss/∂bias, [C]: column sums"]
+```
+
+A tensor used twice gets two contributions, added together in the walk's fixed order.
+
+### Realised nodes and constants
+
+A realised node has dropped its sources (see "Tensor and Node"), so there is nothing behind it to differentiate. Rather than silently treating it as a constant, and returning zeros for every param behind it, `grad` raises `Error`. A value that is meant to be constant, such as a precomputed table, is made a leaf with `Tensor#detach`, which realises the tensor and wraps its buffer in a new leaf node.
+
+### Optimizers
+
+Tensors are immutable, so an optimizer does not update params in place. `Optimizer#step(params, grads)` returns new params, realised and detached, and the training loop passes them to the next forward pass. State such as momentum is kept by position in the params array, and detached each step, so no step's graph outlives it.
+
+```mermaid
+flowchart LR
+    P["params"] --> F["forward: lazy graph"]
+    F --> L["loss"]
+    L --> G["Tensomite.grad: lazy gradients"]
+    G --> O["Optimizer#step: new params, realised and detached"]
+    O --> P
+```
+
+- **`SGD`**: `p - lr·v`, where `v` is `g` or, with momentum, `momentum·v + g`.
+- **`AdamW`**: Adam with decoupled weight decay and bias correction. `lr` can be changed between steps for a schedule. Params that should not decay, such as norms and biases, are given to a second `AdamW` with `weight_decay: 0`.
+
+### Cross-entropy
+
+`logits.cross_entropy(targets)` is the mean of `-log_softmax(logits)[row, target]` over rows. `log_softmax` is `x - max - log(Σ exp(x - max))`, which never takes the log of an underflowed probability. The entries are picked by `gather` from the log-probabilities flattened to a `[rows × classes, 1]` table, with indices `row × classes + target` computed on the host. So the targets are realised when the op is built, and the gradient arrives through the `Gather` rule.
 
 ## Error timing
 
@@ -507,5 +604,6 @@ Outside kernels             |2.7         |3%
 - **One device per op.** Moving data needs an explicit `to`, which goes through host memory.
 - **Every primitive is a separate kernel run.** `softmax` alone is five; fusion arrives in M7.
 - **Each scalar operand is a new leaf,** uploaded to the device once per use.
-- **No autograd.** Realised nodes drop their sources, which autograd (M5) will need to revisit.
-- **Recursive graph walk.** Very deep graphs could exhaust the stack.
+- **No buffer reuse.** Every node gets a fresh buffer, and training allocates hundreds of megabytes per step. On Linux, the Boehm collector then returns freed pages to the system and faults them back in, which roughly doubles a training step unless `GC_UNMAP_THRESHOLD=0` is set. Memory planning in M7 replaces this.
+- **Gradients of gradients** are built by the same rules, but are not tested.
+- **`grad` needs an unrealised graph.** Realise the loss after calling `grad`, or together with the gradients.

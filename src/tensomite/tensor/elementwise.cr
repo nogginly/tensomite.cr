@@ -27,6 +27,12 @@ module Tensomite
       binary(Op::Maximum, other)
     end
 
+    # Returns 1 where this tensor is at least *other* and 0 elsewhere, in this
+    # tensor's dtype, broadcasting both operands to a common shape.
+    def greater_equal(other : Tensor) : Tensor
+      binary(Op::GreaterEqual, other)
+    end
+
     # Applies the operator with *other* broadcast as a scalar of this tensor's dtype.
     def +(other : Number) : Tensor
       self + scalar(other)

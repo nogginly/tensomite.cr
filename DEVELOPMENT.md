@@ -17,28 +17,38 @@ A guide for maintaining tensomite, fixing bugs and adding features. `DESIGN.md` 
 
 ## Everyday commands
 
-Task                  |Command                                     |With `ops`                 
-----------------------|--------------------------------------------|---------------------------
-Run specs             |`crystal spec`                              |`ops test_specs`           
-Lint                  |`bin/ameba src/ spec/ bench/`               |`ops lint` (`src/` only)   
-Check formatting      |`crystal tool format --check src spec bench`|                           
-Fix formatting        |`crystal tool format src spec bench`        |                           
-Everything before a PR|all three of the above                      |`ops test` (specs and lint)
+Task                  |Command                                              |With `ops`                 
+----------------------|-----------------------------------------------------|---------------------------
+Run specs             |`crystal spec`                                       |`ops test_specs`           
+Lint                  |`bin/ameba src/ spec/ bench/ examples/`              |`ops lint` (`src/` only)   
+Check formatting      |`crystal tool format --check src spec bench examples`|                           
+Fix formatting        |`crystal tool format src spec bench examples`        |                           
+Everything before a PR|all three of the above                               |`ops test` (specs and lint)
 
 All three must be clean before a PR.
 
-Benchmarks live in `bench/` and run in release mode, for example `crystal run --release bench/matmul.cr`. CI type-checks, formats and lints them with everything else, but does not run them.
+Benchmarks live in `bench/` and examples in `examples/`. Both run in release mode, for example `crystal run --release bench/matmul.cr`. CI type-checks, formats and lints them with everything else, but does not run them.
+
+**Training on Tiny Shakespeare** (the M5 exit):
+
+```sh
+scripts/fetch_shakespeare.sh
+crystal build --release examples/shakespeare.cr -o shakespeare
+GC_UNMAP_THRESHOLD=0 ./shakespeare --steps 2000
+```
+
+`--help` lists the model and training options. `GC_UNMAP_THRESHOLD=0` stops the garbage collector from returning freed pages to the system after every collection. Training allocates hundreds of megabytes a step, and on Linux the unmapping and refaulting roughly doubles the step time.
 
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs on every push to `main` and on every pull request, whatever its base, so stacked PRs are checked too. It runs on Linux, with OpenBLAS installed, and on macOS, with Accelerate:
 
-Step                         |Linux|macOS
------------------------------|-----|-----
-`crystal spec --release`     |yes  |yes  
-Type-check `bench/`          |yes  |yes  
-Formatting check             |yes  |     
-`bin/ameba src/ spec/ bench/`|yes  |     
+Step                                   |Linux|macOS
+---------------------------------------|-----|-----
+`crystal spec --release`               |yes  |yes  
+Type-check `bench/`, `examples/`       |yes  |yes  
+Formatting check                       |yes  |     
+`bin/ameba src/ spec/ bench/ examples/`|yes  |     
 
 - **Crystal is pinned** in the job matrix (currently 1.22.0). Bump it there, together with `crystal:` in `shard.yml` when the minimum changes.
 - **The cache** holds `lib/`, `shard.lock` and `bin/ameba`. Its key combines the OS, the Crystal version and a hash of `shard.yml`. `shard.lock` is not committed (this is a library), so `shard.yml` stands in for it. The Crystal version is in the key because `bin/ameba` is compiled with it.
@@ -55,6 +65,8 @@ src/tensomite/node.cr       Op and Node
 src/tensomite/tensor.cr     Tensor: construction, views, transfers, reading data
 src/tensomite/tensor/       Tensor ops by kind: elementwise, reduce, structural, composite
 src/tensomite/scheduler.cr  realisation
+src/tensomite/autograd.cr   Tensomite.grad and the chain rule for every op
+src/tensomite/optim.cr      SGD and AdamW
 src/tensomite/devices/      host.cr (shared host kernels), then one file per pure-Crystal device
 src/tensomite/blas.cr       opt-in BLAS binding and device; not required by src/tensomite.cr
 src/tensomite/mapped_file.cr, safetensors.cr   weight loading
@@ -64,7 +76,8 @@ spec/                       specs, one file per type or kind of op
 spec/fixtures/              reference outputs and small reference files (see below)
 scripts/                    fixture generation and model download
 bench/                      benchmarks, run with --release
-models/                     downloaded weights (git-ignored)
+examples/                   programs using the library, such as training on Shakespeare
+models/, data/              downloaded weights and datasets (git-ignored)
 ```
 
 ## Reference fixtures
@@ -127,6 +140,7 @@ Benchmarks of model speed depend only on shapes, so `bench/gpt2.cr` can run on a
 - **Each milestone's exit criterion has its own `describe "Mn exit: …"` block.**
 - **Include non-contiguous inputs** (transposed and broadcast views) for any new op. Most indexing bugs hide there.
 - **Test the timing of errors,** as well as the fact that they are raised, when an op adds new checks.
+- **Gradients are checked against central finite differences** with `check_gradients` in `autograd_spec.cr`. The loss weights each output element by a different random number, so a rule that mixes up elements cannot pass by symmetry. In `F32`, a step of 1e-2 balances truncation error against rounding error, and the tolerance is relative, 2e-3. Random inputs keep `max` and `maximum` away from ties, where the derivative is undefined. A spec that breaks a rule on purpose should fail; two deliberate mistakes were caught when the specs were written.
 - **Exact comparison** (`should eq`) is right for the CPU device on small integers. Use tolerances only where the order of arithmetic legitimately differs, such as between devices.
 
 ## Recipes
@@ -137,15 +151,17 @@ Benchmarks of model speed depend only on shapes, so `bench/gpt2.cr` can run on a
 flowchart LR
     Op["node.cr: Op member"] --> API["tensor/*.cr: Tensor method, checks, output shape"]
     API --> K["devices/*.cr: kernel on every device"]
-    K --> Spec["spec: hand-computed values, views"]
+    K --> Rule["autograd.cr: chain rule"]
+    Rule --> Spec["spec: hand-computed values, views, finite differences"]
     Spec --> Doc["DESIGN.md, if a new concept"]
 ```
 
 1. **Add a member to `Op`** in `node.cr`, with a one-line comment stating what it computes.
 2. **Add the `Tensor` method** in the matching `tensor/*.cr` file. It validates the shapes and dtypes (`check_compatible`, `check_float`), computes the output shape, and builds the node with `Tensor.lazy(Node.new(...))`. Broadcast or permute the sources there, so the kernel stays simple.
 3. **Implement the kernel on every device.** For host devices, add a branch to `HostDevice#execute(T, node, dst)`. The `case` is exhaustive, so a missing branch is a compile error.
-4. **Write specs** with hand-computed values over contiguous, transposed and broadcast inputs.
-5. **Update `DESIGN.md`** if the op adds a concept, such as a new node field or a new kind of view.
+4. **Add its chain rule** to `Tensor.backward` in `autograd.cr`: one gradient per source, in the source's shape, or `nil` for a source without one. That `case` is exhaustive too.
+5. **Write specs** with hand-computed values over contiguous, transposed and broadcast inputs, and a finite-difference check of the gradient in `autograd_spec.cr`.
+6. **Update `DESIGN.md`** if the op adds a concept, such as a new node field or a new kind of view.
 
 ### Adding a dtype
 

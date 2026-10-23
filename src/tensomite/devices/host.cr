@@ -65,38 +65,71 @@ module Tensomite
     private def execute(type : T.class, node : Node, output : Buffer) : Nil forall T
       dst = elements(T, output)
       case node.op
-      in Op::Add     then binary(T, node, dst) { |x, y| x + y }
-      in Op::Sub     then binary(T, node, dst) { |x, y| x - y }
-      in Op::Mul     then binary(T, node, dst) { |x, y| x * y }
-      in Op::Div     then binary(T, node, dst) { |x, y| T.new(x / y) }
-      in Op::Maximum then binary(T, node, dst) { |x, y| x > y ? x : y }
-      in Op::Exp     then unary(T, node, dst) { |x| T.new(Math.exp(x)) }
-      in Op::Log     then unary(T, node, dst) { |x| T.new(Math.log(x)) }
-      in Op::Tanh    then unary(T, node, dst) { |x| T.new(Math.tanh(x)) }
-      in Op::Sqrt    then unary(T, node, dst) { |x| T.new(Math.sqrt(x)) }
-      in Op::Sum     then reduce(T, node, dst, T.zero) { |acc, x| acc + x }
-      in Op::Max     then reduce(T, node, dst, nil) { |acc, x| x > acc ? x : acc }
-      in Op::Copy    then copy(T, node, dst)
-      in Op::Cat     then cat(T, node, dst)
-      in Op::Gather  then gather(T, node, dst)
-      in Op::MatMul  then matmul(T, node, dst)
-      in Nil         then raise Error.new("leaf nodes are created realised")
+      in Op::Add          then binary(T, node, dst) { |x, y| x + y }
+      in Op::Sub          then binary(T, node, dst) { |x, y| x - y }
+      in Op::Mul          then binary(T, node, dst) { |x, y| x * y }
+      in Op::Div          then binary(T, node, dst) { |x, y| T.new(x / y) }
+      in Op::Maximum      then binary(T, node, dst) { |x, y| x > y ? x : y }
+      in Op::Exp          then unary(T, node, dst) { |x| T.new(Math.exp(x)) }
+      in Op::Log          then unary(T, node, dst) { |x| T.new(Math.log(x)) }
+      in Op::Tanh         then unary(T, node, dst) { |x| T.new(Math.tanh(x)) }
+      in Op::Sqrt         then unary(T, node, dst) { |x| T.new(Math.sqrt(x)) }
+      in Op::Sum          then reduce(T, node, dst, T.zero) { |acc, x| acc + x }
+      in Op::Max          then reduce(T, node, dst, nil) { |acc, x| x > acc ? x : acc }
+      in Op::Copy         then copy(T, node, dst)
+      in Op::Cat          then cat(T, node, dst)
+      in Op::Gather       then gather(T, node, dst)
+      in Op::MatMul       then matmul(T, node, dst)
+      in Op::GreaterEqual then binary(T, node, dst) { |x, y| x >= y ? T.new(1) : T.zero }
+      in Op::Unview       then unview(T, node, dst)
+      in Op::ScatterAdd   then scatter_add(T, node, dst)
+      in Nil              then raise Error.new("leaf nodes are created realised")
       end
+    end
+
+    # Returns the length of the runs of consecutive logical indices that a kernel
+    # can walk with a fixed stride in every one of *views*, which share a shape of
+    # *size* elements: all of them when each view is dense or constant, otherwise
+    # the last dimension.
+    private def run_length(size : Int32, views : Enumerable(View)) : Int32
+      return size if views.all? { |view| view.dense? || view.constant? }
+      views.first.shape.last? || 1
+    end
+
+    # Returns the step between the positions of consecutive elements of a run.
+    private def run_stride(view : View) : Int32
+      view.strides.last? || 0
     end
 
     # Applies the block to each pair of elements; sources already have the output shape.
+    #
+    # Walks the output in runs (see `#run_length`), finding each source's position
+    # through its view once per run and stepping by its stride within it.
     private def binary(type : T.class, node : Node, dst : Slice(T), & : T, T -> T) : Nil forall T
+      return if dst.empty?
       a, b = node.srcs
       xs, ys = elements(T, a), elements(T, b)
-      dst.size.times do |i|
-        dst[i] = yield xs[a.view.offset_of(i)], ys[b.view.offset_of(i)]
+      run = run_length(dst.size, {a.view, b.view})
+      sa, sb = run_stride(a.view), run_stride(b.view)
+      (dst.size // run).times do |run_index|
+        base = run_index * run
+        pa, pb = a.view.offset_of(base), b.view.offset_of(base)
+        run.times { |j| dst[base + j] = yield xs[pa + j * sa], ys[pb + j * sb] }
       end
     end
 
+    # Applies the block to each element, walking in runs as `#binary` does.
     private def unary(type : T.class, node : Node, dst : Slice(T), & : T -> T) : Nil forall T
+      return if dst.empty?
       src = node.srcs.first
       xs = elements(T, src)
-      dst.size.times { |i| dst[i] = yield xs[src.view.offset_of(i)] }
+      run = run_length(dst.size, {src.view})
+      stride = run_stride(src.view)
+      (dst.size // run).times do |run_index|
+        base = run_index * run
+        pos = src.view.offset_of(base)
+        run.times { |j| dst[base + j] = yield xs[pos + j * stride] }
+      end
     end
 
     # Folds each output's inputs left to right, starting from *init*, or from the
@@ -104,7 +137,8 @@ module Tensomite
     #
     # 1. Permutes the reduced axis to the end, so each output owns a run of `n`
     #    consecutive logical indices; with no axis, the single output owns them all.
-    # 2. Folds each run in index order.
+    # 2. Folds each output's indices in order, walking them in runs (see
+    #    `#run_length`).
     private def reduce(type : T.class, node : Node, dst : Slice(T), init : T?, & : T, T -> T) : Nil forall T
       src = node.srcs.first
       xs = elements(T, src)
@@ -114,18 +148,57 @@ module Tensomite
         view = view.permute((0...view.ndim).reject(axis) + [axis])
         n = view.shape.last
       end
+      if n == 0
+        dst.fill(init || T.zero)
+        return
+      end
+      run = run_length(n, {view})
+      stride = run_stride(view)
       dst.size.times do |row|
-        base = row * n
-        acc, start = init.nil? ? {xs[view.offset_of(base)], 1} : {init, 0}
-        (start...n).each { |j| acc = yield acc, xs[view.offset_of(base + j)] }
+        acc = init || xs[view.offset_of(row * n)]
+        (n // run).times do |run_index|
+          pos = view.offset_of(row * n + run_index * run)
+          start = run_index == 0 && init.nil? ? 1 : 0
+          (start...run).each { |j| acc = yield acc, xs[pos + j * stride] }
+        end
         dst[row] = acc
       end
     end
 
     private def copy(type : T.class, node : Node, dst : Slice(T)) : Nil forall T
+      unary(T, node, dst) { |x| x }
+    end
+
+    # Adds each source element into the output position the inverted view reads it
+    # from, in index order, walking in runs as `#binary` does.
+    private def unview(type : T.class, node : Node, dst : Slice(T)) : Nil forall T
       src = node.srcs.first
+      view = node.source_view || raise Error.new("unview needs a source view")
       xs = elements(T, src)
-      dst.size.times { |i| dst[i] = xs[src.view.offset_of(i)] }
+      dst.fill(T.zero)
+      return if src.size == 0
+      run = run_length(src.size, {view, src.view})
+      sv, ss = run_stride(view), run_stride(src.view)
+      (src.size // run).times do |run_index|
+        base = run_index * run
+        pv, ps = view.offset_of(base), src.view.offset_of(base)
+        run.times { |j| dst[pv + j * sv] += xs[ps + j * ss] }
+      end
+    end
+
+    # Adds source row `i` into output row `ids[i]`, in index order.
+    private def scatter_add(type : T.class, node : Node, dst : Slice(T)) : Nil forall T
+      rows_src, ids = node.srcs
+      rows, width = node.shape
+      xs = elements(T, rows_src)
+      idx = elements(Int32, ids)
+      dst.fill(T.zero)
+      ids.size.times do |i|
+        id = idx[ids.view.offset_of(i)]
+        raise ExecutionError.new("index #{id} out of range for #{rows} rows") unless 0 <= id < rows
+        pos, stride = rows_src.view.offset_of(i * width), run_stride(rows_src.view)
+        width.times { |j| dst[id * width + j] += xs[pos + j * stride] }
+      end
     end
 
     # Writes each source into its slice of the output, viewed along the axis.
@@ -137,7 +210,15 @@ module Tensomite
         xs = elements(T, src)
         stop = start + src.shape[axis]
         region = out_view.slice(axis, start, stop)
-        src.size.times { |i| dst[region.offset_of(i)] = xs[src.view.offset_of(i)] }
+        if src.size > 0
+          run = run_length(src.size, {region, src.view})
+          sr, ss = run_stride(region), run_stride(src.view)
+          (src.size // run).times do |run_index|
+            base = run_index * run
+            pr, ps = region.offset_of(base), src.view.offset_of(base)
+            run.times { |j| dst[pr + j * sr] = xs[ps + j * ss] }
+          end
+        end
         start = stop
       end
     end
@@ -153,7 +234,8 @@ module Tensomite
         unless 0 <= id < rows
           raise ExecutionError.new("index #{id} out of range for #{rows} rows")
         end
-        width.times { |j| dst[i * width + j] = xs[table.view.offset_of(id * width + j)] }
+        pos, stride = table.view.offset_of(id * width), run_stride(table.view)
+        width.times { |j| dst[i * width + j] = xs[pos + j * stride] }
       end
     end
 
