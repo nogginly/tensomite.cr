@@ -55,7 +55,7 @@ Nothing persists between containers except what is pushed. Setting one up from s
 
 **Training data:** `scripts/fetch_shakespeare.sh` (from GitHub raw, allowed by default).
 
-**Long runs.** Start them with `nohup … &` and a log in the scratchpad, then wait with a background `until grep -q … log; do sleep 30; done`; a foreground `sleep` is blocked. Set `GC_UNMAP_THRESHOLD=0` for training.
+**Long runs.** Start them with `nohup … &` and a log in the scratchpad, then wait with a background `until grep -q … log; do sleep 30; done`; a foreground `sleep` is blocked. Set `GC_UNMAP_THRESHOLD=0` for training. The container is reclaimed when the session goes idle, which kills background jobs: a run of several hours survives only while the session is active, so run those on the maintainer's machine.
 
 **Shell gotchas.** `rm` on a path built from a shell variable (`rm -f "$D"/*`) is blocked; use a literal path or `"${D:?}"`. Force-pushes are blocked. Crystal cannot `require` an absolute path (see "Crystal gotchas" in `DEVELOPMENT.md`), so temporary scripts that load tensomite go inside the repo and are deleted afterwards.
 
