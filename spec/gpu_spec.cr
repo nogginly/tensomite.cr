@@ -7,7 +7,8 @@ private def random(device : Device, shape : Array(Int32), seed : Int32, lo = -1f
 end
 
 # Ops whose GPU results must equal the CPU's bit for bit: IEEE arithmetic and
-# comparisons are exact whatever the device. Inputs cover dense, transposed,
+# comparisons are exact whatever the device, and these GPU kernels add in the
+# host's order. Inputs cover dense, transposed,
 # broadcast and sliced views.
 EXACT = {
   "add"            => ->(d : Device) { random(d, [5, 7], 1) + random(d, [7], 2) },
@@ -41,11 +42,17 @@ EXACT = {
     x = random(d, [3, 1, 2], 1)
     Tensomite.grad((x.expand([3, 4, 2]).permute([1, 2, 0]) * random(d, [4, 2, 3], 2)).sum, [x]).first
   },
+}
+
+# Matrix products, which GPUs may split over k and so add in a different order
+# (Decision S). The inputs give sums of up to 300 terms, hence the wider bound.
+MATMUL = {
   "matmul"               => ->(d : Device) { random(d, [2, 5, 6], 1).matmul(random(d, [6, 3], 2)) },
   "matmul of transposes" => ->(d : Device) { random(d, [6, 5], 1).transpose.matmul(random(d, [7, 6], 2).transpose) },
   "matrix by vector"     => ->(d : Device) { random(d, [1, 64], 1).matmul(random(d, [64, 33], 2)) },
   "broadcast batch"      => ->(d : Device) { random(d, [4, 5], 1).matmul(random(d, [3, 5, 2], 2)) },
   "attention shapes"     => ->(d : Device) { random(d, [2, 3, 8], 1).matmul(random(d, [2, 5, 8], 2).transpose) },
+  "long k"               => ->(d : Device) { random(d, [3, 300], 1).matmul(random(d, [300, 40], 2)) },
 }
 
 # Ops whose GPU results may differ in the last bits: division and transcendental
@@ -76,6 +83,15 @@ describe "GPU devices against the CPU" do
           expected = build.call(CPU.default)
           actual.shape.should eq expected.shape
           actual.to_a(Float32).should eq expected.to_a(Float32)
+        end
+      end
+
+      MATMUL.each do |name, build|
+        it "matches #{name} within 1e-5 relative error" do
+          actual = build.call(gpu).to_a(Float32)
+          expected = build.call(CPU.default).to_a(Float32)
+          actual.size.should eq expected.size
+          actual.zip(expected) { |a, e| a.should be_close(e, 1e-5 * Math.max(1f32, e.abs)) }
         end
       end
 

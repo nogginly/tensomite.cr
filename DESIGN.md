@@ -312,7 +312,7 @@ flowchart TD
     style E stroke:#2b8a3e,stroke-width:3px
 ```
 
-**Determinism.** Addition, subtraction, multiplication and comparisons are correctly rounded IEEE operations, so they give the same bits on the GPU as on the CPU, and `spec/gpu_spec.cr` checks them for equality. Division and the transcendental functions use the GPU maths library and are compared within 1e-6 (level 3 of Decision K). Every kernel computes each element on its own, so the device is shape-invariant.
+**Determinism.** Addition, subtraction, multiplication and comparisons are correctly rounded IEEE operations, so they give the same bits on the GPU as on the CPU, and `spec/gpu_spec.cr` checks them for equality. Division and the transcendental functions use the GPU maths library and are compared within 1e-6 (level 3 of Decision K). `MatMul` splits its sums across threads and is compared within 1e-5 (Decision S, below). Every kernel computes each element on its own, so the device is shape-invariant.
 
 **Calling Objective-C from Crystal.** Metal has no C API, so `metal/objc.cr` sends messages through `objc_msgSend`. That function must be called with the exact C signature of the method it reaches, and Crystal does not allow one C symbol to be declared with several signatures. So `ObjC.send(ReturnType, receiver, "selector:", args...)` casts its address to a `Proc` typed by its arguments, one type per call site. `NSUInteger` is `UInt64`, `BOOL` is passed as `UInt32`, and `MTLSize`, a 24-byte struct, is passed as a pointer, as arm64 passes structs over 16 bytes. Objects the runtime autoreleases are created inside `ObjC.autoreleasepool`, and those kept beyond it are retained.
 
@@ -330,7 +330,29 @@ One thread per output is simple but slow for a long reduction, such as the sum o
 
 **Errors.** A GPU kernel cannot raise. `Gather` and `ScatterAdd` report an id out of range through a small shared error buffer, and `flush` raises the host's `ExecutionError` when it finds a report. The error therefore surfaces when the command buffer completes, at `realize`, as it does on the host. One difference remains: the nodes encoded before the error are marked realised, with undefined contents for the failing one.
 
-**`MatMul`** uses one thread per output element, computing its dot product over `k` in index order, as the host kernel does. Each batch matrix's start comes from `offset_of` once, and rows, columns and `k` then step by the views' strides. The product and the running sum are separate statements, so the compiler cannot fuse them into a single rounding (a fused multiply-add), which would change the bits. One thread per output keeps every output's arithmetic independent of `m`, so prefill and decode give the same bits. A matrix-vector product (`m` = 1) has only `n` threads, each looping over all of `k`, which leaves much of the GPU idle; splitting `k` across threads is measured next.
+**`MatMul`** has three modes (`Metal#matmul_mode`), because a matrix-vector product (`m` = 1), which is what decoding mostly does, has too few outputs to fill the GPU with one thread each:
+
+Mode             |Threads per output                    |How partial sums combine                     |Bits                                                           
+-----------------|--------------------------------------|---------------------------------------------|---------------------------------------------------------------
+`Serial`         |one, adding over all of `k` in order  |none                                         |identical to the host                                          
+`Split` (default)|8, each summing chunks of 64 along `k`|one thread adds the chunks in chunk order    |repeat every run; independent of `m` and of zero-padding of `k`
+`Atomic`         |8, as `Split`                         |atomic adds, in whatever order threads finish|may change from run to run; for measurement only               
+
+```mermaid
+flowchart LR
+    K["k, cut into chunks of 64 at fixed offsets"] --> T["8 threads per output, each summing whole chunks in index order"]
+    T --> P["partial sums in threadgroup memory"]
+    P --> F["first thread: ((c0 + c1) + c2) + ... in chunk order"]
+    F --> O["output"]
+    style F stroke:#2b8a3e,stroke-width:3px
+```
+
+- **Why chunks, not slices.** Cutting `k` into 8 equal slices would move the boundaries whenever `k` changes. In attention, `scores · v` sums over the sequence: in prefill, a position's row has zeros for the masked positions after it, and in decode the same position's row simply stops there. Chunks at fixed offsets give both rows the same chunks, plus chunks of exact zeros in prefill, and `x + 0 = x`. So prefill and decode stay bit-identical (`spec/gpt2_spec.cr`, and the padding spec in `spec/metal_spec.cr`).
+- **Coalesced reads.** A threadgroup owns 32 adjacent output columns of one row, so the 32 threads working on the same chunk read 32 adjacent columns of the weights at a time.
+- **Decision S.** Splitting changes the order of additions, so `Split` no longer matches the host bit for bit: `spec/gpu_spec.cr` compares matmuls within 1e-5. Levels 1 and 2 of Decision K still hold, which is what caching and reproducibility need.
+- **No fused multiply-add.** Each product and running sum are separate statements, so the compiler cannot fuse them into one rounding. That is what keeps `Serial` identical to the host.
+
+The atomic kernel needs `atomic_float`, from Metal 3. Without it the device still works, and only `Atomic` raises.
 
 Every op now has an `F32` Metal kernel. `I32` ops, views of more than 8 dimensions and overlapping views run on the host.
 
@@ -641,24 +663,43 @@ Outside kernels             |2.7         |3%
 - **The KV cache cost the most:** every token copies the whole cache. It still does, but in runs; a preallocated cache written in place would remove the copy altogether.
 - **The matmuls are limited by memory bandwidth:** each decoded token streams all ~500 MB of weights once, and 30 ms is about 17 GB/s.
 
-**Metal on the MacBook Pro, M5 Pro** (M6 part 3: every op on the GPU, `MatMul` one thread per output):
+**Metal on the MacBook Pro, M5 Pro** (M6: every op on the GPU; `MatMul` in each of its modes):
 
-Device |GPT-2 prefill tokens/s|GPT-2 decode tokens/s|ms per decoded token
--------|----------------------|---------------------|--------------------
-`CPU`  |8.4                   |7.67                 |130                 
-`BLAS` |864.0                 |152.98               |7                   
-`Metal`|637.9                 |34.07                |29                  
+Device                |GPT-2 prefill tokens/s|GPT-2 decode tokens/s|ms per decoded token
+----------------------|----------------------|---------------------|--------------------
+`CPU`                 |8.6                   |7.63                 |131                 
+`BLAS`                |905.5                 |152.01               |7                   
+`Metal`, serial matmul|635.3                 |34.22                |29                  
+`Metal`, split matmul |1,148.7               |63.57                |16                  
+`Metal`, atomic matmul|1,267.5               |63.52                |16                  
 
-Size|`BLAS` ms|`BLAS` GFLOP/s|`Metal` ms|`Metal` GFLOP/s
-----|---------|--------------|----------|---------------
-64  |0.004    |127.1         |0.327     |1.6            
-128 |0.006    |675.5         |0.340     |12.3           
-256 |0.029    |1,152.1       |0.862     |38.9           
-512 |0.180    |1,488.2       |2.716     |98.8           
+Size|`BLAS` ms|`BLAS` GFLOP/s|`Metal` ms (split)|`Metal` GFLOP/s
+----|---------|--------------|------------------|---------------
+64  |0.003    |151.6         |0.255             |2.1            
+128 |0.005    |786.3         |0.293             |14.3           
+256 |0.027    |1,240.8       |0.966             |34.7           
+512 |0.205    |1,308.1       |2.716             |98.8           
 
-- **About 0.33 ms per realise is fixed cost:** committing a command buffer and waiting for it. It dominates small matrices, and is paid once per decoded token.
-- **Decode leaves most of the GPU idle.** A decoded token is a run of matrix-vector products, and with one thread per output a 768-wide layer launches 768 threads, each looping over all 768 or 3,072 of `k`. Streaming GPT-2's ~500 MB of weights in 29 ms is about 17 GB/s, a small fraction of the memory bandwidth. Prefill has 64 times as many outputs per layer and gets within 75% of `BLAS`.
-- **Square matmuls reach 99 GFLOP/s** without tiling or threadgroup memory, against Accelerate's 1.5 TFLOP/s on the CPU's matrix units.
+- **Splitting `k` nearly doubled decode** (34 to 64 tokens/s) and lifted prefill past `BLAS` (1,149 against 906 tokens/s).
+- **Determinism costs nothing in decode and about 9% in prefill.** The atomic split decodes at the same speed and prefills at 1,268 tokens/s. Waiting for the 8 partial sums and adding them in order is cheap beside streaming the weights.
+**Matrix-vector products by mode** (`bench/matvec.cr`, M5 Pro; 20 products per realise, ms per 20):
+
+Shape (GPT-2 small)         |Serial|Split |Atomic|Atomic saving
+----------------------------|------|------|------|-------------
+attention q·k·v, 768 → 2,304|3.293 |0.895 |0.859 |4%           
+attention out, 768 → 768    |2.070 |0.564 |0.570 |-1%          
+MLP up, 768 → 3,072         |3.231 |0.923 |0.914 |1%           
+MLP down, 3,072 → 768       |11.713|1.839 |1.795 |2%           
+logits, 768 → 50,257        |13.986|11.804|11.768|0%           
+prefill MLP up, 64 rows     |11.851|12.574|11.537|8%           
+
+- **The logits product runs at memory bandwidth.** Its 154 MB of weights, too large for any cache, stream in 0.59 ms, about 260 GB/s.
+- **A token's matmuls take about 3 ms of its 16.** Each layer's four products take about 211 µs, so 2.5 ms for 12 layers, plus 0.6 ms for the logits. The smaller weights may stay in the GPU's cache across the 20 products, so those figures flatter decode a little.
+- **With 64 rows, splitting costs 6%** over serial: the GPU is already full, and the split's barriers are pure cost. One kernel for every number of rows is what keeps prefill equal to decode.
+- **Decode is still behind `BLAS`** (16 ms against 7 ms per token). The matmuls take about 3 ms of it (above), so about 13 ms goes elsewhere. Each primitive op is its own dispatch, hundreds per token, and the reductions inside `layernorm` and `softmax` use one thread per output. That is M7's work: kernel macros fuse those chains (Decision O requires Metal to beat `BLAS` there).
+- **Square matmuls barely change, at 99 GFLOP/s** against Accelerate's 1.3 TFLOP/s on the CPU's matrix units. They already had enough outputs to fill the GPU; they need tiling in threadgroup memory, which comes with M7's matmul epilogues.
+- **About 0.3 ms per realise is fixed cost:** committing a command buffer and waiting for it. It dominates small matrices, and is paid once per decoded token.
+- **With one thread per output (serial), decode left most of the GPU idle:** a 768-wide layer launched 768 threads, each looping over all of `k`.
 
 **Training a character-level GPT on Tiny Shakespeare, Linux container.** The M5 exit is a validation loss below 1.8 within an hour here, and M7's is below 1.6 within an hour (Decision R). Runs use `examples/shakespeare.cr` on `BLAS`, with AdamW and a cosine schedule from 1e-3 to 1e-4:
 

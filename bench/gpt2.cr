@@ -20,12 +20,18 @@ heads = (ARGV[1]? || "12").to_i
 
 puts "device|prefill tokens/s|decode tokens/s|ms per decoded token"
 puts "------|----------------|---------------|--------------------"
-devices = [CPU.default, BLAS.default] of Device
+# Each device to run, with a label and a setup to apply first.
+runs = [{"CPU", CPU.default.as(Device), -> { }}, {"BLAS", BLAS.default.as(Device), -> { }}]
 {% if flag?(:darwin) && flag?(:aarch64) %}
-  devices << Metal.default if Metal.available?
+  if Metal.available?
+    Metal::MatMulMode.values.each do |mode|
+      runs << {"Metal, #{mode.to_s.downcase} matmul", Metal.default.as(Device), -> { Metal.default.matmul_mode = mode }}
+    end
+  end
 {% end %}
 
-devices.each do |device|
+runs.each do |label, device, setup|
+  setup.call
   model = GPT2.load(path, heads, device)
   prompt = Array.new(PROMPT) { |i| (i * 37) % model.config.vocab }
   cache = model.new_cache
@@ -38,5 +44,5 @@ devices.each do |device|
   DECODE.times { |i| model.forward([i], cache) }
   decode = (Time.instant - start).total_seconds
 
-  puts "%s|%.1f|%.2f|%.0f" % {device.class.name.split("::").last, PROMPT / prefill, DECODE / decode, decode / DECODE * 1000}
+  puts "%s|%.1f|%.2f|%.0f" % {label, PROMPT / prefill, DECODE / decode, decode / DECODE * 1000}
 end
