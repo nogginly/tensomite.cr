@@ -1,10 +1,14 @@
-# Measures GPT-2 tokens per second on the CPU oracle and on BLAS.
+# Measures GPT-2 tokens per second on the CPU oracle, on BLAS and, on an Apple
+# Silicon Mac with a GPU, on Metal.
 #
 #     crystal run --release bench/gpt2.cr -- path/to/model.safetensors [heads]
 #
 # Speed depends only on the model's shapes, so any weights of GPT-2 small's shapes
 # give the same numbers as the real ones.
 require "../src/tensomite/blas"
+{% if flag?(:darwin) && flag?(:aarch64) %}
+  require "../src/tensomite/metal"
+{% end %}
 
 include Tensomite
 
@@ -16,7 +20,12 @@ heads = (ARGV[1]? || "12").to_i
 
 puts "device|prefill tokens/s|decode tokens/s|ms per decoded token"
 puts "------|----------------|---------------|--------------------"
-[CPU.default, BLAS.default].each do |device|
+devices = [CPU.default, BLAS.default] of Device
+{% if flag?(:darwin) && flag?(:aarch64) %}
+  devices << Metal.default if Metal.available?
+{% end %}
+
+devices.each do |device|
   model = GPT2.load(path, heads, device)
   prompt = Array.new(PROMPT) { |i| (i * 37) % model.config.vocab }
   cache = model.new_cache

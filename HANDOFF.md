@@ -11,7 +11,8 @@ What the next session, or the next person, needs in order to carry on without th
 - **On `main`:** milestones 1 to 5. That covers the lazy tensor core, the CPU op set and `SimDiscrete`, the BLAS seam, GPT-2 inference verified against PyTorch, and autograd with SGD, AdamW and a Shakespeare trainer. CI runs on Linux and macOS, and Decisions A–R are recorded in `PLAN.md`.
 - **Open PR:** the first of M6, on `m6-metal-device`. It adds the Objective-C binding, a `Metal` device over shared buffers, and MSL kernels for the elementwise ops and `Copy`; every other op runs on the host over the same memory. The container is Linux, so the Metal path is only cross-compiled here. The maintainer runs `crystal spec` on the M5 Pro and reports the results.
 - **Stacked PR:** M6 part 2, on `m6-metal-ops`: Metal kernels for `Sum`, `Max`, `Cat`, `Gather`, `ScatterAdd` and `Unview`, all bit-identical to the host.
-- **Next in M6:** `MatMul` on Metal, then the exit: GPT-2 tokens/s against `BLAS` (Decision O), bit-identical prefill and decode, and the cost of split-K matvec.
+- **Stacked PR:** M6 part 3, on `m6-metal-matmul`: `MatMul` on Metal, bit-identical to the host, and Metal rows in `bench/gpt2.cr` and `bench/matmul.cr`.
+- **Next in M6:** split-K matmul, deterministic and atomic, then the exit: GPT-2 tokens/s against `BLAS` (Decision O), bit-identical prefill and decode, and the cost of split-K matvec.
 - **Deferred:** Decision D, CPU parallelism. Profiling in M5 shows that training is bound by elementwise passes, so D now has a measured case; M7's fusion comes first.
 
 ## Working agreements
