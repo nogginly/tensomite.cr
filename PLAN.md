@@ -131,6 +131,7 @@ Each milestone is done when its exit criterion passes.
   3. Block-format tensors are leaves loaded from files, stored row by row, sliced only by whole rows, and never produced by an op. `View` stays in logical elements.
   4. `F16` and `BF16` are tensomite's own types, stored as `UInt16` and computed in `Float32`.
 - **Decision O, when Metal must beat BLAS:** measured in M6, required in M7 (decided). On Apple Silicon, Accelerate reaches about 1 TFLOP/s on a 512 matmul (M5 Pro), and GPT-2 decoding is a run of small matrix-vector products where a GPU's dispatch overhead and the shared memory bandwidth erode its advantage. Fewer dispatches per token, from kernel macros, are what is expected to give the GPU the lead.
+- **Decision R, the M5 training exit:** open. Gradients pass their finite-difference checks, and training works: the 0.8M-param model reaches 1.726 nats/char in 36 minutes in the 4-core container. Reaching 1.6 needs a larger model and a longer context, about 1.6 s a step and two to three hours of training here, because training is bound by elementwise passes that fusion and buffer reuse (M7) and parallel kernels (Decision D) will speed up. Options: (a) keep 1.6 and accept a multi-hour run, here or on the maintainer's Mac; (b) bring Decision D forward into M5; (c) exit M5 on a lower bar reachable in under an hour, and make 1.6 within an hour an exit of M7, where it measures what fusion and memory planning buy.
 
 ## Risks
 

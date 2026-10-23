@@ -577,12 +577,12 @@ The M5 Pro's BLAS throughput is higher than its NEON units alone can deliver. Ac
 
 **GPT-2 small, Linux container** (shapes of GPT-2 small, 64-token prompt, 32 decoded tokens):
 
-Device|Prefill tokens/s|Decode tokens/s|ms per decoded token
-------|----------------|---------------|--------------------
-`CPU` |2.1             |1.64           |609                 
-`BLAS`|57.9            |10.25          |98                  
+Device|M4 prefill tokens/s|M4 decode tokens/s|M5 prefill tokens/s|M5 decode tokens/s|M5 ms per decoded token
+------|-------------------|------------------|-------------------|------------------|-----------------------
+`CPU` |2.1                |1.64              |2.7                |2.17              |462                    
+`BLAS`|57.9               |10.25             |258.3              |29.59             |34                     
 
-Where a decoded token's 93 ms goes on `BLAS`, timed per kernel:
+M5's gain comes from walking views in runs (see "Host kernels"), which made `Cat`, the KV cache's copy, several times cheaper. As of M4, before that change, a decoded token's 93 ms on `BLAS` went as follows:
 
 Kernel                      |ms per token|Share
 ----------------------------|------------|-----
@@ -591,8 +591,26 @@ Kernel                      |ms per token|Share
 All other host kernels      |15.6        |17%  
 Outside kernels             |2.7         |3%   
 
-- **The KV cache costs the most:** every token copies the whole cache, element by element through `offset_of`. A preallocated cache written in place would remove most of it.
+- **The KV cache cost the most:** every token copies the whole cache. It still does, but in runs; a preallocated cache written in place would remove the copy altogether.
 - **The matmuls are limited by memory bandwidth:** each decoded token streams all ~500 MB of weights once, and 30 ms is about 17 GB/s.
+
+**Training a character-level GPT on Tiny Shakespeare, Linux container** (`examples/shakespeare.cr`, `BLAS`, AdamW, cosine schedule from 1e-3 to 1e-4):
+
+Model                                   |Params|Tokens per step|ms per step|Steps|Wall time|Validation loss, nats/char
+----------------------------------------|------|---------------|-----------|-----|---------|--------------------------
+4 layers, 4 heads, width 128, context 64|0.8M  |1,024          |720        |3,000|36 min   |1.726                     
+
+Where the time of a step went, measured over 10 steps of that model before two fixes:
+
+Cost                                       |Before             |After                             
+-------------------------------------------|-------------------|----------------------------------
+Per-element `offset_of` in host kernels    |11 s of kernel time|3.9 s, after walking runs         
+Allocation, with `GC_UNMAP_THRESHOLD` unset|3.6 s              |0.9 s, with `GC_UNMAP_THRESHOLD=0`
+`MatMul` on `BLAS`                         |0.4 s              |0.4 s                             
+
+- **Training is bound by elementwise passes, not by matmul.** The composites are built from primitives, so `gelu`, `softmax` and `layernorm`, forwards and backwards, touch tens of millions of elements per step. Each pass reads and writes fresh memory at about 2.4 ns per element, against 0.45 ns for the same loop over cached buffers. Fusion (M7) and buffer reuse (M7) attack exactly this, and parallel host kernels (Decision D) would divide it by the core count.
+- **The 720 ms was measured without `GC_UNMAP_THRESHOLD=0`,** which brings it to about 500 ms.
+- **Attention grows with the square of the context.** Doubling the context to 128, at the same width, more than doubles the step.
 
 ## Current limits
 
