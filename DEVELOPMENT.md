@@ -1,6 +1,6 @@
 # Tensomite: development
 
-A guide for maintaining tensomite, fixing bugs and adding features. `DESIGN.md` explains how the code works, and `PLAN.md` explains where it's going.
+A guide for maintaining tensomite, fixing bugs and adding features. `DESIGN.md` explains how the code works, `PLAN.md` explains where it's going, and `HANDOFF.md` says where things stand and how we work.
 
 ## Setup
 
@@ -190,6 +190,9 @@ flowchart TD
   ```
 
 - **Diagrams** are Mermaid, embedded where they explain the design better than prose. Decision nodes use the hexagon `{{"question?"}}`, not the diamond. Emphasis uses a coloured border only (`stroke`), never a fill.
+- **Check both before a PR** that touches documents:
+  - `python3 scripts/format_tables.py DESIGN.md DEVELOPMENT.md PLAN.md HANDOFF.md` pads tables in place, and changes nothing when they are already right.
+  - `scripts/check_diagrams.sh` renders every Mermaid block with mermaid-cli (through `npx`) and lists any that fail to parse.
 
 ## Workflow
 
@@ -209,4 +212,5 @@ flowchart LR
   - `DESIGN.md` whenever the design as built changes.
   - `DEVELOPMENT.md` whenever a convention, command or gotcha is learned.
   - `PLAN.md` when a decision or milestone changes.
+  - `HANDOFF.md` at the end of each PR, rewritten rather than appended to: where things stand, working agreements, follow-ups, environment and concepts covered.
 - **AI use** follows `DISCLOSURE.md`: generated code is reviewed until it is understood as if written by hand.
