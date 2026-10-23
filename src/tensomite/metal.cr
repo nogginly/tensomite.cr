@@ -38,9 +38,10 @@ module Tensomite
   # whether it runs.
   #
   # Kernels are compiled from MSL source when the device is created, with fast math
-  # off. Arithmetic and comparisons give the same bits as the host kernels;
-  # `exp`, `log`, `tanh` and `sqrt` may differ in the last bits (level 3 of
-  # Decision K).
+  # off. Arithmetic, comparisons and reductions give the same bits as the host
+  # kernels. `exp`, `log`, `tanh` and `sqrt` may differ in the last bits, and so
+  # may `MatMul`, which splits `k` across threads (`#matmul_mode`); all of them
+  # repeat exactly from run to run and are shape-invariant (Decisions K and S).
   class Metal < HostDevice
     private SOURCE           = {{ read_file("#{__DIR__}/metal/kernels.metal") }}
     private MAX_DIMS         =     8
@@ -55,7 +56,23 @@ module Tensomite
       Op::Exp => "exp_f32", Op::Log => "log_f32", Op::Tanh => "tanh_f32", Op::Sqrt => "sqrt_f32",
       Op::Copy => "copy_f32",
     }
-    private OTHER = %w[copy_into_f32 sum_f32 max_f32 gather_f32 scatter_add_f32 unview_f32 matmul_f32]
+    private OTHER    = %w[copy_into_f32 sum_f32 max_f32 gather_f32 scatter_add_f32 unview_f32 matmul_f32 matmul_split_f32]
+    private OPTIONAL = %w[fill_zero_f32 matmul_atomic_f32]
+    private COLS     = 32
+    private SLICES   =  8
+
+    # How `MatMul` divides its work.
+    enum MatMulMode
+      # One thread per output, adding over `k` in index order: bit-identical to the
+      # host, but a matrix-vector product leaves most of the GPU idle.
+      Serial
+      # Several threads per output, each summing fixed chunks of `k`, combined in
+      # chunk order: deterministic and shape-invariant. The default.
+      Split
+      # As `Split`, but each thread adds its chunks into the output atomically, in
+      # whatever order threads finish. Not deterministic; for measurement only.
+      Atomic
+    end
 
     # Returns true when the system has a Metal GPU. Some virtual machines, such as
     # hosted CI runners, do not.
@@ -74,6 +91,9 @@ module Tensomite
     # Returns how many ops have run on the GPU and on the host since creation.
     getter gpu_ops = 0
     getter host_ops = 0
+
+    # How `MatMul` divides its work; see `MatMulMode`.
+    property matmul_mode = MatMulMode::Split
 
     @device : Void*
     @queue : Void*
@@ -183,11 +203,26 @@ module Tensomite
       dispatch(name, node.size, [mtl(src), output.mtl], [view_args(view), u32(run), u32(node.size)])
     end
 
-    # MatMul: one thread per output element, a dot product over `k` in index order.
+    # MatMul, divided as `#matmul_mode` says.
+    #
+    # `Split` and `Atomic` launch one threadgroup per output row and block of
+    # `COLS` columns, with `SLICES` threads per column, each summing chunks of `k`.
     private def encode_matmul(node : Node, output : MetalBuffer) : Nil
       a, b = node.srcs
-      dims = Slice[a.shape[-2].to_u32, a.shape[-1].to_u32, b.shape[-1].to_u32].to_unsafe_bytes
-      dispatch("matmul_f32", node.size, [mtl(a), mtl(b), output.mtl], [view_args(a.view), view_args(b.view), dims, u32(node.size)])
+      m, k, n = a.shape[-2], a.shape[-1], b.shape[-1]
+      dims = Slice[m.to_u32, k.to_u32, n.to_u32].to_unsafe_bytes
+      buffers = [mtl(a), mtl(b), output.mtl]
+      constants = [view_args(a.view), view_args(b.view), dims]
+      case matmul_mode
+      in .serial?
+        dispatch("matmul_f32", node.size, buffers, constants << u32(node.size))
+      in .split?
+        dispatch_groups("matmul_split_f32", {(n + COLS - 1) // COLS, node.size // n}, {COLS, SLICES}, buffers, constants)
+      in .atomic?
+        raise DeviceError.new("atomic matmul needs Metal 3") unless @pipelines.has_key?("matmul_atomic_f32")
+        dispatch("fill_zero_f32", node.size, [output.mtl], [u32(node.size)])
+        dispatch_groups("matmul_atomic_f32", {(n + COLS - 1) // COLS, node.size // n}, {COLS, SLICES}, buffers, constants)
+      end
     end
 
     # Cat: one dispatch per source, copying it into its slice of the output.
@@ -261,8 +296,9 @@ module Tensomite
         library = ObjC.send(Pointer(Void), @device, "newLibraryWithSource:options:error:", ObjC.string(SOURCE), options, error)
         ObjC.release(options)
         raise DeviceError.new("cannot compile Metal kernels: #{ObjC.describe(error.value)}") if library.null?
-        (BINARY.values + UNARY.values + OTHER).each do |name|
+        (BINARY.values + UNARY.values + OTHER + OPTIONAL).each do |name|
           function = ObjC.send(Pointer(Void), library, "newFunctionWithName:", ObjC.string(name))
+          next if function.null? && OPTIONAL.includes?(name)
           raise DeviceError.new("no Metal kernel #{name}") if function.null?
           pipeline = ObjC.send(Pointer(Void), @device, "newComputePipelineStateWithFunction:error:", function, error)
           ObjC.release(function)
@@ -277,6 +313,27 @@ module Tensomite
     # *buffers* from index 0 and then *constants*, each copied into the command.
     private def dispatch(name : String, threads : Int32, buffers : Array(Void*), constants : Array(Bytes)) : Nil
       return if threads == 0
+      pipeline = bind(name, buffers, constants)
+      width = Math.min(ObjC.send(UInt64, pipeline, "maxTotalThreadsPerThreadgroup"), 256_u64)
+      grid = StaticArray[threads.to_u64, 1_u64, 1_u64]
+      group = StaticArray[width, 1_u64, 1_u64]
+      ObjC.send(Nil, open_encoder, "dispatchThreads:threadsPerThreadgroup:", grid.to_unsafe, group.to_unsafe)
+    end
+
+    # Encodes one dispatch of kernel *name* over a 2-D grid of *groups*
+    # threadgroups, each of *threads* threads, binding arguments as `#dispatch` does.
+    private def dispatch_groups(name : String, groups : {Int32, Int32}, threads : {Int32, Int32},
+                                buffers : Array(Void*), constants : Array(Bytes)) : Nil
+      return if groups[0] == 0 || groups[1] == 0
+      bind(name, buffers, constants)
+      grid = StaticArray[groups[0].to_u64, groups[1].to_u64, 1_u64]
+      group = StaticArray[threads[0].to_u64, threads[1].to_u64, 1_u64]
+      ObjC.send(Nil, open_encoder, "dispatchThreadgroups:threadsPerThreadgroup:", grid.to_unsafe, group.to_unsafe)
+    end
+
+    # Sets kernel *name*'s pipeline on the open encoder and binds its arguments;
+    # returns the pipeline.
+    private def bind(name : String, buffers : Array(Void*), constants : Array(Bytes)) : Void*
       pipeline = @pipelines[name]
       encoder = open_encoder
       ObjC.send(Nil, encoder, "setComputePipelineState:", pipeline)
@@ -286,10 +343,7 @@ module Tensomite
       constants.each_with_index(buffers.size) do |bytes, index|
         ObjC.send(Nil, encoder, "setBytes:length:atIndex:", bytes.to_unsafe.as(Void*), bytes.size.to_u64, index.to_u64)
       end
-      width = Math.min(ObjC.send(UInt64, pipeline, "maxTotalThreadsPerThreadgroup"), 256_u64)
-      grid = StaticArray[threads.to_u64, 1_u64, 1_u64]
-      group = StaticArray[width, 1_u64, 1_u64]
-      ObjC.send(Nil, encoder, "dispatchThreads:threadsPerThreadgroup:", grid.to_unsafe, group.to_unsafe)
+      pipeline
     end
 
     # Returns *view* laid out as the kernels' `View` struct.

@@ -12,22 +12,23 @@ What the next session, or the next person, needs in order to carry on without th
 - **Open PR:** the first of M6, on `m6-metal-device`. It adds the Objective-C binding, a `Metal` device over shared buffers, and MSL kernels for the elementwise ops and `Copy`; every other op runs on the host over the same memory. The container is Linux, so the Metal path is only cross-compiled here. The maintainer runs `crystal spec` on the M5 Pro and reports the results.
 - **Stacked PR:** M6 part 2, on `m6-metal-ops`: Metal kernels for `Sum`, `Max`, `Cat`, `Gather`, `ScatterAdd` and `Unview`, all bit-identical to the host.
 - **Stacked PR:** M6 part 3, on `m6-metal-matmul`: `MatMul` on Metal, bit-identical to the host, and Metal rows in `bench/gpt2.cr` and `bench/matmul.cr`.
-- **Next in M6:** split-K matmul, deterministic and atomic, then the exit: GPT-2 tokens/s against `BLAS` (Decision O), bit-identical prefill and decode, and the cost of split-K matvec.
+- **Stacked PR:** M6 part 4, on `m6-metal-split-k`: split-K matmul on Metal (deterministic by default, atomic for measurement, serial for checking), Decision S, and `bench/matvec.cr`.
+- **Next in M6:** the exit, measured on the maintainer's M5 Pro: GPT-2 tokens/s against `BLAS` (Decision O), bit-identical prefill and decode, and the cost of split-K matvec.
 - **Deferred:** Decision D, CPU parallelism. Profiling in M5 shows that training is bound by elementwise passes, so D now has a measured case; M7's fusion comes first.
 
 ## Working agreements
 
-Agreement           |Practice                                                                                                                                                                                                                 
---------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-Branches            |One per PR, named for its purpose (`m5-autograd`, `docs-handoff`), cut from the latest `main`.                                                                                                                           
-Pull requests       |Claude opens them without waiting to be asked, then watches them: CI, reviews and merge, with a safety-net check-in.                                                                                                     
-Stacked PRs         |When asked. The later PR's base is the earlier branch; GitHub retargets it after the earlier one merges.                                                                                                                 
-Merging             |The maintainer merges, by squash or by merge commit. After a squash, merge `main` into a stacked branch and resolve conflicts with the branch's side; never rewrite history or force-push (the session blocks it anyway).
-Milestones          |Each ends with its exit criterion passing, with the evidence (numbers, logs) in the PR description.                                                                                                                      
-Documents           |Updated in the same PR as the code (see "Workflow" in `DEVELOPMENT.md`). Tables and diagrams follow "Documents" in `DEVELOPMENT.md`; check them with `scripts/format_tables.py` and `scripts/check_diagrams.sh`.         
-Decisions           |Labelled with letters and recorded in `PLAN.md`. The next is **S**; R set the M5 and M7 training exits. P (how to get GPT-2 small's fixtures) was settled by allowing Hugging Face; Q made this document committed.      
-Understanding checks|Short questions labelled Q-A, Q-B and so on, after explaining something new. The next is **Q-P**.                                                                                                                        
-Claims              |Measured before stated. Several assumptions were wrong when checked: decode time was dominated by the KV cache, not host kernels; GPT-2's file was unaligned. Say "I think" when something is unverified.                
+Agreement           |Practice                                                                                                                                                                                                                                         
+--------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Branches            |One per PR, named for its purpose (`m5-autograd`, `docs-handoff`), cut from the latest `main`.                                                                                                                                                   
+Pull requests       |Claude opens them without waiting to be asked, then watches them: CI, reviews and merge, with a safety-net check-in.                                                                                                                             
+Stacked PRs         |When asked. The later PR's base is the earlier branch; GitHub retargets it after the earlier one merges.                                                                                                                                         
+Merging             |The maintainer merges, by squash or by merge commit. After a squash, merge `main` into a stacked branch and resolve conflicts with the branch's side; never rewrite history or force-push (the session blocks it anyway).                        
+Milestones          |Each ends with its exit criterion passing, with the evidence (numbers, logs) in the PR description.                                                                                                                                              
+Documents           |Updated in the same PR as the code (see "Workflow" in `DEVELOPMENT.md`). Tables and diagrams follow "Documents" in `DEVELOPMENT.md`; check them with `scripts/format_tables.py` and `scripts/check_diagrams.sh`.                                 
+Decisions           |Labelled with letters and recorded in `PLAN.md`. The next is **T**; S allowed Metal's matmul to differ from the CPU in the last bits. P (how to get GPT-2 small's fixtures) was settled by allowing Hugging Face; Q made this document committed.
+Understanding checks|Short questions labelled Q-A, Q-B and so on, after explaining something new. The next is **Q-S**.                                                                                                                                                
+Claims              |Measured before stated. Several assumptions were wrong when checked: decode time was dominated by the KV cache, not host kernels; GPT-2's file was unaligned. Say "I think" when something is unverified.                                        
 
 ## Follow-ups found on the way
 
@@ -86,4 +87,4 @@ Where BLAS's speed comes from|Bookkeeping, loop order, register and cache blocki
 Decode is memory-bound       |Each token streams all the weights; the GPU's edge shrinks on unified memory.                                       |none    
 Reverse-mode autograd        |`grad` is a graph transform: chain rules build a backward graph of ordinary ops; views' adjoints sum (`Unview`).    |not yet 
 
-Questions asked but never answered: Q-D (why a SPIR-V emitter in Crystal needs no compiler at run time), Q-J (why `sum(axis)` permutes the axis to the end), Q-K (what a stride of 0 means for reads), Q-L (why `Cat` writes through a slice view), Q-M (why `max` starts from the first element).
+Questions asked but never answered: Q-D (why a SPIR-V emitter in Crystal needs no compiler at run time), Q-J (why `sum(axis)` permutes the axis to the end), Q-L (why `Cat` writes through a slice view), Q-M (why `max` starts from the first element), Q-P (why broadcasting needs no gradient rule of its own), Q-Q (the gradient of `x` expanded from `[3]` to `[2, 3]`), Q-R (why the split must depend only on `k` for prefill to equal decode). Q-K was answered, after a correction: a stride of 0 means repeated reads of one position, not contiguous rows.

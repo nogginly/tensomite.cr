@@ -31,6 +31,46 @@ require "./spec_helper"
         a.gather(ids).matmul(a).sum(1).to_a(Float32).should eq f32(37, 17)
       end
 
+      describe "matmul modes" do
+        rng = Random.new(5)
+        xs = Array(Float32).new(3 * 200) { rng.rand(-1f32...1f32) }
+        ws = Array(Float32).new(200 * 70) { rng.rand(-1f32...1f32) }
+        product = ->(mode : Metal::MatMulMode) do
+          metal.matmul_mode = mode
+          Tensor.from(xs, [3, 200], metal).matmul(Tensor.from(ws, [200, 70], metal)).to_a(Float32)
+      ensure
+        metal.matmul_mode = Metal::MatMulMode::Split
+        end
+        expected = Tensor.from(xs, [3, 200]).matmul(Tensor.from(ws, [200, 70])).to_a(Float32)
+
+        it "is bit-identical to the host when serial" do
+          product.call(Metal::MatMulMode::Serial).should eq expected
+        end
+
+        it "gives the same bits on every run when split" do
+          first = product.call(Metal::MatMulMode::Split)
+          3.times { product.call(Metal::MatMulMode::Split).should eq first }
+        end
+
+        it "keeps the bits of each output when k is padded with zeros" do
+          # Prefill and decode differ only by masked positions, which add zeros
+          # to k; chunks at fixed offsets make that change nothing.
+          padded = xs.each_slice(200).to_a.flat_map { |row| row + Array.new(77, 0f32) }
+          padded_ws = ws + Array.new(77 * 70, 0f32)
+          split = product.call(Metal::MatMulMode::Split)
+          Tensor.from(padded, [3, 277], metal).matmul(Tensor.from(padded_ws, [277, 70], metal)).to_a(Float32).should eq split
+        end
+
+        it "gives a row the same bits whatever the number of rows" do
+          one_row = Tensor.from(xs[0, 200], [1, 200], metal).matmul(Tensor.from(ws, [200, 70], metal)).to_a(Float32)
+          one_row.should eq product.call(Metal::MatMulMode::Split)[0, 70]
+        end
+
+        it "stays close to the host when atomic" do
+          product.call(Metal::MatMulMode::Atomic).zip(expected) { |a, e| a.should be_close(e, 1e-5 * Math.max(1f32, e.abs)) }
+        end
+      end
+
       it "shares memory with the host" do
         t = Tensor.from(f32(1, 2), [2], metal)
         metal.map(t.node.buffer!).should_not be_nil

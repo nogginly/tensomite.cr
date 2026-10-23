@@ -245,3 +245,98 @@ kernel void matmul_f32(device const float* a [[buffer(0)]],
     }
     dst[i] = acc;
 }
+
+// Split-K matrix products, for when one thread per output leaves the GPU idle, as
+// in a matrix-vector product.
+//
+// A threadgroup owns COLS adjacent output columns of one output row, with SLICES
+// threads per column. k is cut into chunks of CHUNK elements at fixed offsets, so
+// a chunk boundary never depends on k, m or n. Each thread sums whole chunks in
+// index order, and adjacent threads read adjacent columns of b, so reads coalesce.
+#define COLS 32
+#define SLICES 8
+#define CHUNK 64
+
+// Returns the sum of chunk c of the dot product for one output, in index order.
+static float chunk_sum(device const float* a, device const float* b, int pa, int pb,
+                       int sa, int sb, uint k, uint c) {
+    float acc = 0.0f;
+    uint stop = min(k, (c + 1) * CHUNK);
+    for (uint s = c * CHUNK; s < stop; s++) {
+        float product = a[pa + int(s) * sa] * b[pb + int(s) * sb];
+        acc = acc + product;
+    }
+    return acc;
+}
+
+// Deterministic: in each pass the SLICES threads of a column compute SLICES
+// consecutive chunks, and the first thread adds them to the column's total in
+// chunk order. The total is therefore ((c0 + c1) + c2) + ..., whatever the
+// threadgroup size; extra chunks past k add exact zeros.
+kernel void matmul_split_f32(device const float* a [[buffer(0)]],
+                             device const float* b [[buffer(1)]],
+                             device float* dst [[buffer(2)]],
+                             constant View& va [[buffer(3)]],
+                             constant View& vb [[buffer(4)]],
+                             constant uint* dims [[buffer(5)]],
+                             uint2 group [[threadgroup_position_in_grid]],
+                             uint2 tid [[thread_position_in_threadgroup]]) {
+    threadgroup float partial[SLICES][COLS];
+    uint m = dims[0], k = dims[1], n = dims[2];
+    uint lane = tid.x, slice = tid.y;
+    uint col = group.x * COLS + lane;
+    uint out_row = group.y;
+    uint batch = out_row / m, row = out_row % m;
+    bool live = col < n;
+    int pa = offset_of(va, batch * m * k) + int(row) * va.strides[va.ndim - 2];
+    int pb = live ? offset_of(vb, batch * k * n) + int(col) * vb.strides[vb.ndim - 1] : 0;
+    int sa = va.strides[va.ndim - 1];
+    int sb = vb.strides[vb.ndim - 2];
+    uint chunks = (k + CHUNK - 1) / CHUNK;
+    float total = 0.0f;
+    for (uint first = 0; first < chunks; first += SLICES) {
+        uint c = first + slice;
+        partial[slice][lane] = live && c < chunks ? chunk_sum(a, b, pa, pb, sa, sb, k, c) : 0.0f;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (slice == 0) {
+            for (uint t = 0; t < SLICES; t++) total = total + partial[t][lane];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (slice == 0 && live) dst[out_row * n + col] = total;
+}
+
+#if __METAL_VERSION__ >= 300
+kernel void fill_zero_f32(device float* dst [[buffer(0)]],
+                          constant uint& n [[buffer(1)]],
+                          uint i [[thread_position_in_grid]]) {
+    if (i < n) dst[i] = 0.0f;
+}
+
+// Atomic, for measurement only: each thread adds its chunk sums straight into the
+// zeroed output, so the order of the additions, and the bits, can change from
+// run to run.
+kernel void matmul_atomic_f32(device const float* a [[buffer(0)]],
+                              device const float* b [[buffer(1)]],
+                              device atomic_float* dst [[buffer(2)]],
+                              constant View& va [[buffer(3)]],
+                              constant View& vb [[buffer(4)]],
+                              constant uint* dims [[buffer(5)]],
+                              uint2 group [[threadgroup_position_in_grid]],
+                              uint2 tid [[thread_position_in_threadgroup]]) {
+    uint m = dims[0], k = dims[1], n = dims[2];
+    uint lane = tid.x, slice = tid.y;
+    uint col = group.x * COLS + lane;
+    if (col >= n) return;
+    uint out_row = group.y;
+    uint batch = out_row / m, row = out_row % m;
+    int pa = offset_of(va, batch * m * k) + int(row) * va.strides[va.ndim - 2];
+    int pb = offset_of(vb, batch * k * n) + int(col) * vb.strides[vb.ndim - 1];
+    int sa = va.strides[va.ndim - 1];
+    int sb = vb.strides[vb.ndim - 2];
+    uint chunks = (k + CHUNK - 1) / CHUNK;
+    float acc = 0.0f;
+    for (uint c = slice; c < chunks; c += SLICES) acc = acc + chunk_sum(a, b, pa, pb, sa, sb, k, c);
+    atomic_fetch_add_explicit(&dst[out_row * n + col], acc, memory_order_relaxed);
+}
+#endif

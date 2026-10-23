@@ -312,7 +312,7 @@ flowchart TD
     style E stroke:#2b8a3e,stroke-width:3px
 ```
 
-**Determinism.** Addition, subtraction, multiplication and comparisons are correctly rounded IEEE operations, so they give the same bits on the GPU as on the CPU, and `spec/gpu_spec.cr` checks them for equality. Division and the transcendental functions use the GPU maths library and are compared within 1e-6 (level 3 of Decision K). Every kernel computes each element on its own, so the device is shape-invariant.
+**Determinism.** Addition, subtraction, multiplication and comparisons are correctly rounded IEEE operations, so they give the same bits on the GPU as on the CPU, and `spec/gpu_spec.cr` checks them for equality. Division and the transcendental functions use the GPU maths library and are compared within 1e-6 (level 3 of Decision K). `MatMul` splits its sums across threads and is compared within 1e-5 (Decision S, below). Every kernel computes each element on its own, so the device is shape-invariant.
 
 **Calling Objective-C from Crystal.** Metal has no C API, so `metal/objc.cr` sends messages through `objc_msgSend`. That function must be called with the exact C signature of the method it reaches, and Crystal does not allow one C symbol to be declared with several signatures. So `ObjC.send(ReturnType, receiver, "selector:", args...)` casts its address to a `Proc` typed by its arguments, one type per call site. `NSUInteger` is `UInt64`, `BOOL` is passed as `UInt32`, and `MTLSize`, a 24-byte struct, is passed as a pointer, as arm64 passes structs over 16 bytes. Objects the runtime autoreleases are created inside `ObjC.autoreleasepool`, and those kept beyond it are retained.
 
@@ -330,7 +330,29 @@ One thread per output is simple but slow for a long reduction, such as the sum o
 
 **Errors.** A GPU kernel cannot raise. `Gather` and `ScatterAdd` report an id out of range through a small shared error buffer, and `flush` raises the host's `ExecutionError` when it finds a report. The error therefore surfaces when the command buffer completes, at `realize`, as it does on the host. One difference remains: the nodes encoded before the error are marked realised, with undefined contents for the failing one.
 
-**`MatMul`** uses one thread per output element, computing its dot product over `k` in index order, as the host kernel does. Each batch matrix's start comes from `offset_of` once, and rows, columns and `k` then step by the views' strides. The product and the running sum are separate statements, so the compiler cannot fuse them into a single rounding (a fused multiply-add), which would change the bits. One thread per output keeps every output's arithmetic independent of `m`, so prefill and decode give the same bits. A matrix-vector product (`m` = 1) has only `n` threads, each looping over all of `k`, which leaves much of the GPU idle; splitting `k` across threads is measured next.
+**`MatMul`** has three modes (`Metal#matmul_mode`), because a matrix-vector product (`m` = 1), which is what decoding mostly does, has too few outputs to fill the GPU with one thread each:
+
+Mode             |Threads per output                    |How partial sums combine                     |Bits                                                           
+-----------------|--------------------------------------|---------------------------------------------|---------------------------------------------------------------
+`Serial`         |one, adding over all of `k` in order  |none                                         |identical to the host                                          
+`Split` (default)|8, each summing chunks of 64 along `k`|one thread adds the chunks in chunk order    |repeat every run; independent of `m` and of zero-padding of `k`
+`Atomic`         |8, as `Split`                         |atomic adds, in whatever order threads finish|may change from run to run; for measurement only               
+
+```mermaid
+flowchart LR
+    K["k, cut into chunks of 64 at fixed offsets"] --> T["8 threads per output, each summing whole chunks in index order"]
+    T --> P["partial sums in threadgroup memory"]
+    P --> F["first thread: ((c0 + c1) + c2) + ... in chunk order"]
+    F --> O["output"]
+    style F stroke:#2b8a3e,stroke-width:3px
+```
+
+- **Why chunks, not slices.** Cutting `k` into 8 equal slices would move the boundaries whenever `k` changes. In attention, `scores · v` sums over the sequence: in prefill, a position's row has zeros for the masked positions after it, and in decode the same position's row simply stops there. Chunks at fixed offsets give both rows the same chunks, plus chunks of exact zeros in prefill, and `x + 0 = x`. So prefill and decode stay bit-identical (`spec/gpt2_spec.cr`, and the padding spec in `spec/metal_spec.cr`).
+- **Coalesced reads.** A threadgroup owns 32 adjacent output columns of one row, so the 32 threads working on the same chunk read 32 adjacent columns of the weights at a time.
+- **Decision S.** Splitting changes the order of additions, so `Split` no longer matches the host bit for bit: `spec/gpu_spec.cr` compares matmuls within 1e-5. Levels 1 and 2 of Decision K still hold, which is what caching and reproducibility need.
+- **No fused multiply-add.** Each product and running sum are separate statements, so the compiler cannot fuse them into one rounding. That is what keeps `Serial` identical to the host.
+
+The atomic kernel needs `atomic_float`, from Metal 3. Without it the device still works, and only `Atomic` raises.
 
 Every op now has an `F32` Metal kernel. `I32` ops, views of more than 8 dimensions and overlapping views run on the host.
 
