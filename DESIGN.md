@@ -1,6 +1,6 @@
 # Tensomite: design
 
-This document describes the design as it is built today, currently through milestone 5. `PLAN.md` holds where the design is going and why. `DEVELOPMENT.md` covers how to work on the code.
+This document describes the design as it is built today, currently through milestone 5, with milestone 6 (Metal) under way. `PLAN.md` holds where the design is going and why. `DEVELOPMENT.md` covers how to work on the code.
 
 ## Overview
 
@@ -21,6 +21,8 @@ flowchart TD
     Host --> Sim["SimDiscrete: hidden memory (test device)"]
     Host --> BLAS["BLAS: F32 matmul by cblas_sgemm (opt-in)"]
     BLAS -. "FFI" .-> Lib["Accelerate / OpenBLAS"]
+    Host --> Metal["Metal: MSL kernels on the GPU, host kernels for the rest (opt-in)"]
+    Metal -. "objc_msgSend" .-> MetalFw["Metal framework"]
     style CPU stroke:#2b8a3e,stroke-width:3px
     style Lib stroke:#d9480f,stroke-width:3px
 ```
@@ -43,6 +45,7 @@ Type            |File                      |Role
 `CPU`           |`devices/cpu.cr`          |The reference device: host kernels on host-visible memory.                                                               
 `SimDiscrete`   |`devices/sim_discrete.cr` |A test device: host kernels on memory the host cannot map.                                                               
 `BLAS`          |`blas.cr`                 |Opt-in: host kernels with `F32` matmul by the platform BLAS.                                                             
+`Metal`         |`metal.cr`, `metal/`      |Opt-in, Apple Silicon: MSL kernels on the GPU over shared memory, host kernels for unported ops.                         
 `MappedFile`    |`mapped_file.cr`          |A read-only memory mapping of a file, unmapped when collected.                                                           
 `SafeTensors`   |`safetensors.cr`          |Reads tensors from a safetensors file, zero-copy on host devices.                                                        
 `BPE`           |`bpe.cr`                  |GPT-2's byte-level byte-pair-encoding tokeniser.                                                                         
@@ -103,7 +106,9 @@ classDiagram
     HostDevice <|-- CPU
     HostDevice <|-- SimDiscrete
     HostDevice <|-- BLAS
+    HostDevice <|-- Metal
     Buffer <|-- HostBuffer
+    HostBuffer <|-- MetalBuffer
 ```
 
 ### Tensor and Node
@@ -286,6 +291,32 @@ flowchart TD
 So contiguous, transposed and column-sliced operands pass to BLAS without copying. A broadcast batch dimension (stride 0) is handled by the per-batch pointer. Only a broadcast inside the matrix, such as a row repeated with stride 0, is copied.
 
 Vendor BLAS libraries choose their blocking and threading by shape, so `BLAS` reports `shape_invariant?` false (Decision L). Results repeat exactly from run to run for the same shapes.
+
+### The Metal device
+
+`Metal` is opt-in (`require "tensomite/metal"`) and Apple Silicon only. It is a `HostDevice` too, which is the key to porting one op at a time.
+
+- **Buffers are shared.** Each `MetalBuffer` is an `MTLBuffer` in shared storage, and also a `HostBuffer` over the same bytes. The CPU and GPU address the same memory, so `map` returns it and transfers are plain copies.
+- **Ported ops run on the GPU; the rest run on the host, on the same memory.** `execute` looks for an MSL kernel for the node. If there is one, it encodes a dispatch. If not, it waits for the GPU and runs the inherited host kernel. Porting an op therefore changes where it runs, never whether it runs, and every op works from the first PR.
+- **Dispatches are batched.** Kernels are encoded into one open command buffer, which is committed and waited for only when the host next needs memory: a host kernel, `map`, `upload`, `download` or `sync`. The encoder dispatches serially, so each kernel sees its predecessors' results.
+- **Kernels are MSL source**, in `metal/kernels.metal`, embedded at compile time and compiled by the driver when the device is created, with fast math off. Each thread computes one output element and reads its sources through their views, with the same arithmetic as `View#offset_of`, so any view the host accepts works on the GPU (up to 8 dimensions).
+
+```mermaid
+flowchart TD
+    N["execute(node)"] --> K{{"MSL kernel for this op and dtype?"}}
+    K -- yes --> E["encode a dispatch into the open command buffer"]
+    K -- no --> F["flush: commit and wait"]
+    F --> H["host kernel on the shared memory"]
+    E --> Next["next node"]
+    H --> Next
+    style E stroke:#2b8a3e,stroke-width:3px
+```
+
+**Determinism.** Addition, subtraction, multiplication and comparisons are correctly rounded IEEE operations, so they give the same bits on the GPU as on the CPU, and `spec/gpu_spec.cr` checks them for equality. Division and the transcendental functions use the GPU maths library and are compared within 1e-6 (level 3 of Decision K). Every kernel computes each element on its own, so the device is shape-invariant.
+
+**Calling Objective-C from Crystal.** Metal has no C API, so `metal/objc.cr` sends messages through `objc_msgSend`. That function must be called with the exact C signature of the method it reaches, and Crystal does not allow one C symbol to be declared with several signatures. So `ObjC.send(ReturnType, receiver, "selector:", args...)` casts its address to a `Proc` typed by its arguments, one type per call site. `NSUInteger` is `UInt64`, `BOOL` is passed as `UInt32`, and `MTLSize`, a 24-byte struct, is passed as a pointer, as arm64 passes structs over 16 bytes. Objects the runtime autoreleases are created inside `ObjC.autoreleasepool`, and those kept beyond it are retained.
+
+Ported so far: the elementwise ops (`Add`, `Sub`, `Mul`, `Div`, `Maximum`, `GreaterEqual`, `Exp`, `Log`, `Tanh`, `Sqrt`) and `Copy`, in `F32`.
 
 ### Moving data between devices
 

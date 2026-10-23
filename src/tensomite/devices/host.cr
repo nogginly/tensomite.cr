@@ -13,6 +13,11 @@ module Tensomite
     def initialize(device : Device, @bytes : Bytes, @owner : MappedFile)
       super(device, @bytes.size)
     end
+
+    # Wraps host memory owned by a subclass, such as a GPU buffer the host can see.
+    protected def initialize(device : Device, @bytes : Bytes)
+      super(device, @bytes.size)
+    end
   end
 
   # A device whose kernels run on the host CPU, in pure Crystal.
