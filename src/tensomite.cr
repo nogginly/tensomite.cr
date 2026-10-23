@@ -9,6 +9,11 @@ require "./tensomite/scheduler"
 require "./tensomite/devices/host"
 require "./tensomite/devices/cpu"
 require "./tensomite/devices/sim_discrete"
+require "./tensomite/mapped_file"
+require "./tensomite/safetensors"
+require "./tensomite/bpe"
+require "./tensomite/sampler"
+require "./tensomite/models/gpt2"
 
 module Tensomite
   # :nodoc:

@@ -1,6 +1,6 @@
 # Tensomite: design
 
-This document describes the design as it is built today, currently through milestone 3. `PLAN.md` holds where the design is going and why. `DEVELOPMENT.md` covers how to work on the code.
+This document describes the design as it is built today, currently through milestone 4. `PLAN.md` holds where the design is going and why. `DEVELOPMENT.md` covers how to work on the code.
 
 ## Overview
 
@@ -39,6 +39,11 @@ Type         |File                      |Role
 `CPU`        |`devices/cpu.cr`          |The reference device: host kernels on host-visible memory.                                                               
 `SimDiscrete`|`devices/sim_discrete.cr` |A test device: host kernels on memory the host cannot map.                                                               
 `BLAS`       |`blas.cr`                 |Opt-in: host kernels with `F32` matmul by the platform BLAS.                                                             
+`MappedFile` |`mapped_file.cr`          |A read-only memory mapping of a file, unmapped when collected.                                                           
+`SafeTensors`|`safetensors.cr`          |Reads tensors from a safetensors file, zero-copy on host devices.                                                        
+`BPE`        |`bpe.cr`                  |GPT-2's byte-level byte-pair-encoding tokeniser.                                                                         
+`Sampler`    |`sampler.cr`              |Picks the next token: greedy, or seeded temperature and top-k sampling.                                                  
+`GPT2`       |`models/gpt2.cr`          |The GPT-2 decoder with a KV cache.                                                                                       
 
 ```mermaid
 classDiagram
@@ -313,7 +318,7 @@ flowchart LR
 
 - **`Cat`** writes each source through a *slice view of the output*, so the same indexing code that reads views also writes them.
 - **`Gather`** copies row `ids[i]` of a 2-D table into output row `i`. An id outside the table raises `ExecutionError`.
-- **`MatMul`** computes each output as a dot product over `k`, added in index order. Its sources arrive already expanded to the common batch shape.
+- **`MatMul`** computes each output as a dot product over `k`, added in index order. Its sources arrive already expanded to the common batch shape. It is the one kernel that does not call `offset_of` per element: it finds where each batch matrix starts, then walks rows, columns and `k` with the sources' strides directly. The order of additions is unchanged, so the result is bit-identical to indexing each element (`spec/host_kernels_spec.cr`), and about 10 times faster.
 
 ## Realisation
 
@@ -373,11 +378,132 @@ flowchart LR
     style Late stroke:#d9480f,stroke-width:3px
 ```
 
+## Models and data
+
+### Loading weights
+
+`SafeTensors.open(path)` maps the whole file once with `MappedFile` and parses only the JSON header. Each tensor is then a realised leaf over its own byte range:
+
+```mermaid
+flowchart LR
+    File[("model.safetensors")] --> Map["MappedFile: mmap of the whole file"]
+    Map --> Header["header: name → dtype, shape, byte range"]
+    Header --> Dev{{"host device?"}}
+    Dev -- yes --> Adopt["HostBuffer over the byte range, no copy; keeps the MappedFile alive"]
+    Dev -- no --> Upload["alloc and upload"]
+    Adopt --> Leaf["leaf Tensor"]
+    Upload --> Leaf
+    style Adopt stroke:#2b8a3e,stroke-width:3px
+```
+
+- **Nothing is read until used.** The operating system pages weights in as kernels touch them.
+- **Unaligned tensors are copied.** A tensor is read in place only when its data starts on a 4-byte boundary. Older safetensors writers do not pad the header: in GPT-2 small's published file the data section starts at byte 14,291, so every tensor is 3 bytes off and is copied into a new, aligned buffer at load. Reading `Float32`s from unaligned addresses happens to work on x86 and ARM64, but LLVM treats it as undefined behaviour, and GPU uploads need alignment anyway.
+- **The mapping lives as long as any tensor over it,** because each `HostBuffer` holds its `MappedFile`.
+- **Limits:** one tensor must fit in 2 GiB (an `Int32` `Slice`), but the file may be larger. Only `F32` and `I32` tensors load; other dtypes raise `DTypeError`.
+- **Every header entry is checked** against the file: its byte range fits and holds exactly the bytes its shape needs.
+
+### Tokeniser
+
+`BPE` reproduces GPT-2's byte-level byte-pair encoding from a `vocab.json` and a `merges.txt`:
+
+```mermaid
+flowchart LR
+    Text["text"] --> Words["split by GPT-2's pattern (Unicode-aware)"]
+    Words --> Bytes["each word's UTF-8 bytes"]
+    Bytes --> Chars["bytes mapped to printable characters"]
+    Chars --> Merge["merge the lowest-ranked adjacent pair, repeatedly"]
+    Merge --> Ids["vocabulary ids"]
+```
+
+- **Every byte maps to a printable character** (space becomes `Ġ`, newline `Ċ`), so any byte sequence round-trips, including emoji and broken UTF-8.
+- **The pattern is compiled with `Regex::Options::UCP`,** so `\s` matches Unicode whitespace, such as a no-break space, as in the reference implementations.
+- **Decoding** maps characters back to bytes and replaces invalid UTF-8 with U+FFFD, as the reference does.
+- **Words are cached** after their first encoding.
+
+### GPT-2
+
+`GPT2.load(path, heads, device)` reads every size except the number of heads from the weight shapes. `forward(ids, cache)` runs new positions after those in the cache and returns their logits:
+
+```mermaid
+flowchart TD
+    Ids["ids"] --> Embed["token embedding + position embedding"]
+    Embed --> Block["block × layers"]
+    subgraph Block["each block"]
+        LN1["layernorm"] --> Attn["causal self-attention over cache + new keys"]
+        Attn --> Add1["+ residual"]
+        Add1 --> LN2["layernorm"]
+        LN2 --> MLP["matmul, GELU, matmul"]
+        MLP --> Add2["+ residual"]
+    end
+    Block --> LNF["final layernorm"]
+    LNF --> Logits["matmul with the token embedding (tied) → logits"]
+```
+
+- **The KV cache** holds each layer's keys and values as `[heads, positions, head width]`. New positions are appended with `Tensor.cat`, which copies the cache. That costs O(n²) over a whole generation, which is fine at GPT-2's 1,024 positions.
+- **The causal mask** is `Tensor.causal_mask(new, past + new)`, so the same code serves prefill (many new positions) and decode (one).
+- **Weights stay in GPT-2's `[in, out]` layout,** so each linear layer is a plain `x.matmul(w) + b`. The output layer reuses the token embedding through a transposed view, with no copy.
+- **`generate(prompt, count, sampler)`** prefills the prompt, then decodes one token at a time, yielding each.
+
+### Sampling
+
+`Sampler.greedy` picks the highest logit, the first on ties. Otherwise logits are divided by the temperature, cut to the `top_k` highest when it is positive, and drawn from their softmax with a seeded `Random::PCG32`, so a seed repeats a run.
+
+### Verified against the reference
+
+Model         |Tokeniser corpus|Max logit difference from PyTorch|Greedy tokens|Prefill against decode       
+--------------|----------------|---------------------------------|-------------|-----------------------------
+Tiny reference|identical ids   |4.6e-6 (`CPU`), 3.9e-6 (`BLAS`)  |20 identical |bit-identical on host devices
+GPT-2 small   |identical ids   |3.7e-4 (`CPU`)                   |64 identical |bit-identical on `CPU`       
+
+GPT-2 small's larger difference reflects its size: 12 layers of 768-wide dot products added in a different order from PyTorch's.
+
+### Determinism in practice
+
+On host devices, a position's logits are bit-identical whether it is computed in a prefill or one token at a time (`spec/gpt2_spec.cr`). That is level 2 of Decision K. It holds because every host kernel's order of arithmetic depends only on the index, and masked positions contribute exact zeros to sums.
+
+On `BLAS`, the same comparison on the tiny reference model differs in the low bits of 77% of logits (at most 1.4e-6). That is why `BLAS` reports `shape_invariant?` false.
+
+## Performance baselines
+
+Measured with `bench/matmul.cr` and `bench/gpt2.cr`, built with `--release`. Medians of several runs.
+
+**Matmul, naive oracle against BLAS, square `F32` matrices** (the oracle as of M3, before its strided matmul):
+
+Size|Linux container, 4 cores, OpenBLAS: oracle / BLAS ms|MacBook Pro, M5 Pro, Accelerate: oracle / BLAS ms|M5 Pro GFLOP/s
+----|----------------------------------------------------|-------------------------------------------------|--------------
+64  |8.03 / 0.015                                        |2.59 / 0.004                                     |141           
+128 |40.87 / 0.042                                       |20.92 / 0.007                                    |606           
+256 |349.72 / 0.123                                      |169.20 / 0.043                                   |774           
+512 |3,276.51 / 1.176                                    |1,301.29 / 0.260                                 |1,031         
+
+The M5 Pro's BLAS throughput is higher than its NEON units alone can deliver. Accelerate is most likely using the CPU's matrix extension.
+
+**GPT-2 small, Linux container** (shapes of GPT-2 small, 64-token prompt, 32 decoded tokens):
+
+Device|Prefill tokens/s|Decode tokens/s|ms per decoded token
+------|----------------|---------------|--------------------
+`CPU` |2.1             |1.64           |609                 
+`BLAS`|57.9            |10.25          |98                  
+
+Where a decoded token's 93 ms goes on `BLAS`, timed per kernel:
+
+Kernel                      |ms per token|Share
+----------------------------|------------|-----
+`Cat` (growing the KV cache)|44.9        |48%  
+`MatMul` (`cblas_sgemm`)    |30.1        |32%  
+All other host kernels      |15.6        |17%  
+Outside kernels             |2.7         |3%   
+
+- **The KV cache costs the most:** every token copies the whole cache, element by element through `offset_of`. A preallocated cache written in place would remove most of it.
+- **The matmuls are limited by memory bandwidth:** each decoded token streams all ~500 MB of weights once, and 30 ms is about 17 GB/s.
+
 ## Current limits
 
 - **Element counts and offsets are `Int32`,** following Crystal's `Slice` indexing. That caps one buffer at about 2 GB.
 - **Only `F32` and `I32`.** No type promotion: operands must have the same dtype.
-- **BLAS covers `F32` matmul only,** and the oracle's naive matmul is roughly 500 to 2,800 times slower (`bench/matmul.cr`).
+- **BLAS covers `F32` matmul only.** See "Performance baselines" for how far the oracle is behind it.
+- **Model weights load as `F32` only.** `F16` and quantised weights arrive with M9.
+- **The KV cache grows by copying** (`Tensor.cat`), which is quadratic over a long generation and is half of decode time on `BLAS`.
 - **One device per op.** Moving data needs an explicit `to`, which goes through host memory.
 - **Every primitive is a separate kernel run.** `softmax` alone is five; fusion arrives in M7.
 - **Each scalar operand is a new leaf,** uploaded to the device once per use.

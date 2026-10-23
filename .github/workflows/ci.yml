@@ -43,8 +43,25 @@ jobs:
       - name: Install shards
         run: shards check || shards install
 
+      # GPT-2 small is fetched only once its reference fixtures are committed;
+      # until then the M4 exit specs are pending and nothing is downloaded.
+      - name: Cache GPT-2 small
+        if: ${{ hashFiles('spec/fixtures/gpt2/expected.json') != '' }}
+        uses: actions/cache@v5
+        with:
+          path: models/gpt2
+          key: gpt2-small-openai-community-v1
+
+      - name: Fetch GPT-2 small
+        if: ${{ hashFiles('spec/fixtures/gpt2/expected.json') != '' }}
+        run: scripts/fetch_gpt2.sh models/gpt2
+
+      # Release mode keeps bounds and overflow checks, and runs GPT-2 small's
+      # exit specs about five times faster than a debug build.
       - name: Run specs
-        run: crystal spec
+        env:
+          TENSOMITE_GPT2_DIR: models/gpt2
+        run: crystal spec --release
 
       - name: Type-check benchmarks
         run: for f in bench/*.cr; do crystal build --no-codegen "$f"; done
