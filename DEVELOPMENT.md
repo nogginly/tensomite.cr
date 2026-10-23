@@ -78,9 +78,9 @@ Fixture     |Contents                                                           
 
 `expected.json` holds a Unicode tokeniser corpus and its ids, a prompt and its ids, reference logits, and the greedy continuation. The tiny tokeniser's ids are checked against both Hugging Face's Rust tokeniser and transformers' Python port of GPT-2's original one before they are written.
 
-To regenerate:
+Running the specs needs no Python: the fixtures are committed, and only GPT-2 small's weights are downloaded (below). To regenerate the fixtures:
 
-1. **Create a Python environment:** `python3 -m venv .venv && .venv/bin/pip install torch transformers tokenizers safetensors`.
+1. **Create a Python environment** with a Python that PyTorch publishes wheels for. 3.13 was used here; a newer release such as 3.15 can have none yet, and pip then reports "no matching distribution found for torch": `python3.13 -m venv .venv && .venv/bin/pip install torch transformers tokenizers safetensors`.
 2. **Tiny fixtures:** `.venv/bin/python scripts/make_fixtures.py tiny`.
 3. **GPT-2 small fixtures:** `scripts/fetch_gpt2.sh models/gpt2`, then `.venv/bin/python scripts/make_fixtures.py gpt2 models/gpt2`.
 
