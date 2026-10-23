@@ -682,7 +682,21 @@ Size|`BLAS` ms|`BLAS` GFLOP/s|`Metal` ms (split)|`Metal` GFLOP/s
 
 - **Splitting `k` nearly doubled decode** (34 to 64 tokens/s) and lifted prefill past `BLAS` (1,149 against 906 tokens/s).
 - **Determinism costs nothing in decode and about 9% in prefill.** The atomic split decodes at the same speed and prefills at 1,268 tokens/s. Waiting for the 8 partial sums and adding them in order is cheap beside streaming the weights.
-- **Decode is still behind `BLAS`** (16 ms against 7 ms per token). Streaming ~500 MB of weights in 16 ms is about 31 GB/s, still far below the memory's bandwidth, so the time goes elsewhere. Each primitive op is its own dispatch, hundreds per token, and the reductions inside `layernorm` and `softmax` use one thread per output. That is M7's work: kernel macros fuse those chains (Decision O requires Metal to beat `BLAS` there).
+**Matrix-vector products by mode** (`bench/matvec.cr`, M5 Pro; 20 products per realise, ms per 20):
+
+Shape (GPT-2 small)         |Serial|Split |Atomic|Atomic saving
+----------------------------|------|------|------|-------------
+attention q·k·v, 768 → 2,304|3.293 |0.895 |0.859 |4%           
+attention out, 768 → 768    |2.070 |0.564 |0.570 |-1%          
+MLP up, 768 → 3,072         |3.231 |0.923 |0.914 |1%           
+MLP down, 3,072 → 768       |11.713|1.839 |1.795 |2%           
+logits, 768 → 50,257        |13.986|11.804|11.768|0%           
+prefill MLP up, 64 rows     |11.851|12.574|11.537|8%           
+
+- **The logits product runs at memory bandwidth.** Its 154 MB of weights, too large for any cache, stream in 0.59 ms, about 260 GB/s.
+- **A token's matmuls take about 3 ms of its 16.** Each layer's four products take about 211 µs, so 2.5 ms for 12 layers, plus 0.6 ms for the logits. The smaller weights may stay in the GPU's cache across the 20 products, so those figures flatter decode a little.
+- **With 64 rows, splitting costs 6%** over serial: the GPU is already full, and the split's barriers are pure cost. One kernel for every number of rows is what keeps prefill equal to decode.
+- **Decode is still behind `BLAS`** (16 ms against 7 ms per token). The matmuls take about 3 ms of it (above), so about 13 ms goes elsewhere. Each primitive op is its own dispatch, hundreds per token, and the reductions inside `layernorm` and `softmax` use one thread per output. That is M7's work: kernel macros fuse those chains (Decision O requires Metal to beat `BLAS` there).
 - **Square matmuls barely change, at 99 GFLOP/s** against Accelerate's 1.3 TFLOP/s on the CPU's matrix units. They already had enough outputs to fill the GPU; they need tiling in threadgroup memory, which comes with M7's matmul epilogues.
 - **About 0.3 ms per realise is fixed cost:** committing a command buffer and waiting for it. It dominates small matrices, and is paid once per decoded token.
 - **With one thread per output (serial), decode left most of the GPU idle:** a 768-wide layer launched 768 threads, each looping over all of `k`.
