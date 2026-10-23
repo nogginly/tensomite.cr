@@ -56,6 +56,17 @@ module Tensomite
       shape.product(1)
     end
 
+    # Returns true when consecutive logical indices are consecutive positions, from
+    # `offset` onwards.
+    def dense? : Bool
+      strides == View.row_major_strides(shape)
+    end
+
+    # Returns true when every logical index reads the same position.
+    def constant? : Bool
+      strides.all?(&.zero?)
+    end
+
     # Returns true when the view walks its elements in row-major order from element 0.
     def contiguous? : Bool
       offset == 0 && strides == View.row_major_strides(shape)

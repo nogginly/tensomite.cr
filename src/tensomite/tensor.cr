@@ -40,6 +40,19 @@ module Tensomite
       end
     end
 
+    # Returns a realised tensor of *shape* with every element *value*.
+    def self.full(shape : Array(Int32), value : Number, dtype : DType = DType::F32, device : Device = CPU.default) : Tensor
+      case dtype
+      in .f32? then from(Array.new(shape.product(1), value.to_f32), shape, device)
+      in .i32? then from(Array.new(shape.product(1), value.to_i32), shape, device)
+      end
+    end
+
+    # Returns a realised tensor of *shape* filled with zeros.
+    def self.zeros(shape : Array(Int32), dtype : DType = DType::F32, device : Device = CPU.default) : Tensor
+      full(shape, 0, dtype, device)
+    end
+
     def shape : Array(Int32)
       view.shape
     end
@@ -96,6 +109,14 @@ module Tensomite
       Tensor.lazy(Node.new(Op::Copy, [self], shape, dtype, device))
     end
 
+    # Realises this tensor and returns it as a leaf over the same buffer, so later
+    # graphs, and `Tensomite.grad`, treat it as a constant rather than as the result
+    # of the ops that made it.
+    def detach : Tensor
+      realize
+      Tensor.new(Node.new(node.buffer!, node.shape, dtype, device), view)
+    end
+
     # Computes this tensor and everything it depends on; returns `self`.
     def realize : Tensor
       Scheduler.realize(node)
@@ -134,6 +155,19 @@ module Tensomite
     protected def host_bytes : Bytes
       buffer = node.buffer!
       device.map(buffer) || Bytes.new(buffer.bytesize).tap { |host| device.download(buffer, host) }
+    end
+
+    # Returns the gradient of the node this tensor views, from *grad* of this
+    # tensor's shape: the sum, at each position of the node, of the elements of
+    # *grad* that the view reads from it.
+    protected def unview(grad : Tensor) : Tensor
+      Tensor.lazy(Node.new(Op::Unview, [grad], node.shape, dtype, device, source_view: view))
+    end
+
+    # Returns a `[rows, width]` tensor where row `ids[i]` accumulates row `i` of this
+    # `[n, width]` tensor.
+    protected def scatter_add_rows(ids : Tensor, rows : Int32) : Tensor
+      Tensor.lazy(Node.new(Op::ScatterAdd, [self, ids], [rows, shape[1]], dtype, device))
     end
 
     # Raises unless *others* share this tensor's dtype and device.

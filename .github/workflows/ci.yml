@@ -63,12 +63,12 @@ jobs:
           TENSOMITE_GPT2_DIR: models/gpt2
         run: crystal spec --release
 
-      - name: Type-check benchmarks
-        run: for f in bench/*.cr; do crystal build --no-codegen "$f"; done
+      - name: Type-check benchmarks and examples
+        run: for f in bench/*.cr examples/*.cr; do crystal build --no-codegen "$f"; done
 
       - name: Check formatting (Linux)
         if: ${{ runner.os == 'Linux' }}
-        run: crystal tool format --check src spec bench
+        run: crystal tool format --check src spec bench examples
 
       - name: Build ameba when not cached (Linux)
         if: ${{ runner.os == 'Linux' }}
@@ -79,4 +79,4 @@ jobs:
 
       - name: Run static code analysis (Linux)
         if: ${{ runner.os == 'Linux' }}
-        run: bin/ameba src/ spec/ bench/
+        run: bin/ameba src/ spec/ bench/ examples/
