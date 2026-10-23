@@ -17,8 +17,10 @@ require "./spec_helper"
         (a.transpose * a + 1).exp.realize
         metal.gpu_ops.should eq gpu + 3
         metal.host_ops.should eq host
+        # a·a = [[7, 10], [15, 22]], which sums to 54; only the matmul runs on the host.
         a.matmul(a).sum.to_a(Float32).should eq f32(54)
-        metal.host_ops.should eq host + 2
+        metal.host_ops.should eq host + 1
+        metal.gpu_ops.should eq gpu + 4
       end
 
       it "mixes GPU and host ops in one graph" do
