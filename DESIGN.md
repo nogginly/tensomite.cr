@@ -330,7 +330,9 @@ One thread per output is simple but slow for a long reduction, such as the sum o
 
 **Errors.** A GPU kernel cannot raise. `Gather` and `ScatterAdd` report an id out of range through a small shared error buffer, and `flush` raises the host's `ExecutionError` when it finds a report. The error therefore surfaces when the command buffer completes, at `realize`, as it does on the host. One difference remains: the nodes encoded before the error are marked realised, with undefined contents for the failing one.
 
-Ported so far, in `F32`: the elementwise ops (`Add`, `Sub`, `Mul`, `Div`, `Maximum`, `GreaterEqual`, `Exp`, `Log`, `Tanh`, `Sqrt`), `Copy`, `Sum`, `Max`, `Cat`, `Gather`, `ScatterAdd` and `Unview`. `MatMul` is next.
+**`MatMul`** uses one thread per output element, computing its dot product over `k` in index order, as the host kernel does. Each batch matrix's start comes from `offset_of` once, and rows, columns and `k` then step by the views' strides. The product and the running sum are separate statements, so the compiler cannot fuse them into a single rounding (a fused multiply-add), which would change the bits. One thread per output keeps every output's arithmetic independent of `m`, so prefill and decode give the same bits. A matrix-vector product (`m` = 1) has only `n` threads, each looping over all of `k`, which leaves much of the GPU idle; splitting `k` across threads is measured next.
+
+Every op now has an `F32` Metal kernel. `I32` ops, views of more than 8 dimensions and overlapping views run on the host.
 
 ### Moving data between devices
 

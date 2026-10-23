@@ -214,3 +214,34 @@ kernel void unview_f32(device const float* src [[buffer(0)]],
     }
     dst[p] = acc;
 }
+
+// Output element i of a batched matrix product, [..., m, k] by [..., k, n], as a
+// dot product over k in index order, as the host does. dims holds m, k and n.
+//
+// Each batch matrix's start comes from offset_of once; rows, columns and k then
+// step by the views' last two strides. The product and the sum are separate
+// statements, so the compiler cannot fuse them into one rounding.
+kernel void matmul_f32(device const float* a [[buffer(0)]],
+                       device const float* b [[buffer(1)]],
+                       device float* dst [[buffer(2)]],
+                       constant View& va [[buffer(3)]],
+                       constant View& vb [[buffer(4)]],
+                       constant uint* dims [[buffer(5)]],
+                       constant uint& total [[buffer(6)]],
+                       uint i [[thread_position_in_grid]]) {
+    if (i >= total) return;
+    uint m = dims[0], k = dims[1], n = dims[2];
+    uint col = i % n;
+    uint row = (i / n) % m;
+    uint batch = i / (m * n);
+    int pa = offset_of(va, batch * m * k) + int(row) * va.strides[va.ndim - 2];
+    int pb = offset_of(vb, batch * k * n) + int(col) * vb.strides[vb.ndim - 1];
+    int sa = va.strides[va.ndim - 1];
+    int sb = vb.strides[vb.ndim - 2];
+    float acc = 0.0f;
+    for (uint s = 0; s < k; s++) {
+        float product = a[pa + int(s) * sa] * b[pb + int(s) * sb];
+        acc = acc + product;
+    }
+    dst[i] = acc;
+}

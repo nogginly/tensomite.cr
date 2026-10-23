@@ -55,7 +55,7 @@ module Tensomite
       Op::Exp => "exp_f32", Op::Log => "log_f32", Op::Tanh => "tanh_f32", Op::Sqrt => "sqrt_f32",
       Op::Copy => "copy_f32",
     }
-    private OTHER = %w[copy_into_f32 sum_f32 max_f32 gather_f32 scatter_add_f32 unview_f32]
+    private OTHER = %w[copy_into_f32 sum_f32 max_f32 gather_f32 scatter_add_f32 unview_f32 matmul_f32]
 
     # Returns true when the system has a Metal GPU. Some virtual machines, such as
     # hosted CI runners, do not.
@@ -158,6 +158,8 @@ module Tensomite
         encode_rows(node, output)
       when Op::Unview
         return false unless encode_unview(node, output)
+      when Op::MatMul
+        encode_matmul(node, output)
       else
         name = srcs.size == 2 ? BINARY[node.op]? : UNARY[node.op]?
         return false unless name
@@ -179,6 +181,13 @@ module Tensomite
       end
       name = node.op == Op::Sum ? "sum_f32" : "max_f32"
       dispatch(name, node.size, [mtl(src), output.mtl], [view_args(view), u32(run), u32(node.size)])
+    end
+
+    # MatMul: one thread per output element, a dot product over `k` in index order.
+    private def encode_matmul(node : Node, output : MetalBuffer) : Nil
+      a, b = node.srcs
+      dims = Slice[a.shape[-2].to_u32, a.shape[-1].to_u32, b.shape[-1].to_u32].to_unsafe_bytes
+      dispatch("matmul_f32", node.size, [mtl(a), mtl(b), output.mtl], [view_args(a.view), view_args(b.view), dims, u32(node.size)])
     end
 
     # Cat: one dispatch per source, copying it into its slice of the output.

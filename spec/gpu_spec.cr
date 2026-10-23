@@ -41,7 +41,11 @@ EXACT = {
     x = random(d, [3, 1, 2], 1)
     Tensomite.grad((x.expand([3, 4, 2]).permute([1, 2, 0]) * random(d, [4, 2, 3], 2)).sum, [x]).first
   },
-  "matmul" => ->(d : Device) { random(d, [2, 5, 6], 1).matmul(random(d, [6, 3], 2)) },
+  "matmul"               => ->(d : Device) { random(d, [2, 5, 6], 1).matmul(random(d, [6, 3], 2)) },
+  "matmul of transposes" => ->(d : Device) { random(d, [6, 5], 1).transpose.matmul(random(d, [7, 6], 2).transpose) },
+  "matrix by vector"     => ->(d : Device) { random(d, [1, 64], 1).matmul(random(d, [64, 33], 2)) },
+  "broadcast batch"      => ->(d : Device) { random(d, [4, 5], 1).matmul(random(d, [3, 5, 2], 2)) },
+  "attention shapes"     => ->(d : Device) { random(d, [2, 3, 8], 1).matmul(random(d, [2, 5, 8], 2).transpose) },
 }
 
 # Ops whose GPU results may differ in the last bits: division and transcendental
