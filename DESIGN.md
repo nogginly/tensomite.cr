@@ -594,11 +594,11 @@ Outside kernels             |2.7         |3%
 - **The KV cache cost the most:** every token copies the whole cache. It still does, but in runs; a preallocated cache written in place would remove the copy altogether.
 - **The matmuls are limited by memory bandwidth:** each decoded token streams all ~500 MB of weights once, and 30 ms is about 17 GB/s.
 
-**Training a character-level GPT on Tiny Shakespeare, Linux container** (`examples/shakespeare.cr`, `BLAS`, AdamW, cosine schedule from 1e-3 to 1e-4):
+**Training a character-level GPT on Tiny Shakespeare, Linux container.** The M5 exit is a validation loss below 1.8 within an hour here, and M7's is below 1.6 within an hour (Decision R). Runs use `examples/shakespeare.cr` on `BLAS`, with AdamW and a cosine schedule from 1e-3 to 1e-4:
 
-Model                                   |Params|Tokens per step|ms per step|Steps|Wall time|Validation loss, nats/char
-----------------------------------------|------|---------------|-----------|-----|---------|--------------------------
-4 layers, 4 heads, width 128, context 64|0.8M  |1,024          |720        |3,000|36 min   |1.726                     
+Model                                   |Params|Tokens per step|ms per step|Steps|Wall time|Validation loss, nats/char        
+----------------------------------------|------|---------------|-----------|-----|---------|----------------------------------
+4 layers, 4 heads, width 128, context 64|0.8M  |1,024          |720        |3,000|36 min   |1.726 (1.80 at step 2,250, 27 min)
 
 Where the time of a step went, measured over 10 steps of that model before two fixes:
 
