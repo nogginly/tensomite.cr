@@ -4,13 +4,13 @@ What the next session, or the next person, needs in order to carry on without th
 
 **Keeping it current.** Rewrite it rather than appending to it: at the end of each PR, and whenever a session's context passes about 70%. Anything that belongs in one of the other three documents goes there instead.
 
-*Last rewritten: 23 Oct 2026, with M5 open.*
+*Last rewritten: 23 Oct 2026, with M6 under way.*
 
 ## Where things stand
 
-- **On `main`:** milestones 1 to 4. That covers the lazy tensor core, the CPU op set and `SimDiscrete`, the BLAS seam, and GPT-2 inference verified against PyTorch on GPT-2 small. CI runs on Linux and macOS, and Decisions A–O are recorded in `PLAN.md`.
-- **Open PR:** M5 on `m5-autograd`: `Tensomite.grad`, `SGD`, `AdamW`, `cross_entropy`, the Shakespeare trainer in `examples/`, and host kernels that walk views in runs. Gradients pass finite-difference checks. Both exits pass: under Decision R, M5 needs a validation loss below 1.8 within an hour, and the small model reaches 1.726 in 36 minutes. The 1.6 target moved to M7.
-- **Next:** M6, the Metal backend.
+- **On `main`:** milestones 1 to 5. That covers the lazy tensor core, the CPU op set and `SimDiscrete`, the BLAS seam, GPT-2 inference verified against PyTorch, and autograd with SGD, AdamW and a Shakespeare trainer. CI runs on Linux and macOS, and Decisions A–R are recorded in `PLAN.md`.
+- **Open PR:** the first of M6, on `m6-metal-device`. It adds the Objective-C binding, a `Metal` device over shared buffers, and MSL kernels for the elementwise ops and `Copy`; every other op runs on the host over the same memory. The container is Linux, so the Metal path is only cross-compiled here. The maintainer runs `crystal spec` on the M5 Pro and reports the results.
+- **Next in M6:** port the remaining ops (reductions, `MatMul`, `Gather`, `Cat`, `Unview`, `ScatterAdd`), then the exit: GPT-2 tokens/s against `BLAS` (Decision O), bit-identical prefill and decode, and the cost of split-K matvec.
 - **Deferred:** Decision D, CPU parallelism. Profiling in M5 shows that training is bound by elementwise passes, so D now has a measured case; M7's fusion comes first.
 
 ## Working agreements

@@ -47,6 +47,7 @@ Step                                   |Linux|macOS
 ---------------------------------------|-----|-----
 `crystal spec --release`               |yes  |yes  
 Type-check `bench/`, `examples/`       |yes  |yes  
+Cross-compile the Metal path           |yes  |     
 Formatting check                       |yes  |     
 `bin/ameba src/ spec/ bench/ examples/`|yes  |     
 
@@ -69,6 +70,8 @@ src/tensomite/autograd.cr   Tensomite.grad and the chain rule for every op
 src/tensomite/optim.cr      SGD and AdamW
 src/tensomite/devices/      host.cr (shared host kernels), then one file per pure-Crystal device
 src/tensomite/blas.cr       opt-in BLAS binding and device; not required by src/tensomite.cr
+src/tensomite/metal.cr      opt-in Metal device (Apple Silicon); not required by src/tensomite.cr
+src/tensomite/metal/        objc.cr (Objective-C runtime calls), kernels.metal (MSL source)
 src/tensomite/mapped_file.cr, safetensors.cr   weight loading
 src/tensomite/bpe.cr, sampler.cr               tokeniser and sampling
 src/tensomite/models/       one file per model architecture
@@ -130,6 +133,8 @@ Benchmarks of model speed depend only on shapes, so `bench/gpt2.cr` can run on a
 - **Crystal cannot `require` an absolute path.** Scripts outside the repo cannot load it by path. Put a temporary script inside the repo, relative to `src/`, and delete it afterwards.
 - **Class variables are shared with subclasses.** A `class_getter default : CPU` on `CPU` stops a subclass from declaring its own `default` of another type. That is why `CPU` and `SimDiscrete` are siblings under `HostDevice` rather than parent and child.
 - **Generic kernels compile every branch for every dtype.** `Math.exp(x)` on an `Int32` returns `Float64`, which does not fit a `Slice(Int32)`. Wrap results in `T.new(...)` so the code compiles, and reject float-only ops when they are called, so integer kernels never run them.
+- **`Void*` is a type, not an expression.** Pass `Pointer(Void)` where a type is an argument, as in `ObjC.send(Pointer(Void), …)`.
+- **One C symbol, one signature.** A `lib` cannot declare `objc_msgSend` twice with different arguments, even under different Crystal names. Cast the function's address to a typed `Proc` instead, as `ObjC.send` does. A proc literal needs parentheses before `.pointer`: `(->LibObjC.objc_msgSend).pointer`.
 - **Methods are type-checked only when called.** A new `Tensor` method with a type error compiles silently until a spec calls it, so every new method needs a spec.
 
 ### Specs
@@ -137,6 +142,7 @@ Benchmarks of model speed depend only on shapes, so `bench/gpt2.cr` can run on a
 - **Expected values are worked out by hand,** never produced by tensomite itself. Write the intermediate result in a comment above the assertion, for example `# a.T + b = [[11, 24], [32, 45], [53, 66]]`, so a reviewer can check the arithmetic.
 - **Transcendental values come from an independent reference,** Python's `math` module, in float64, and are compared with `expect_close` (tolerance 1e-6 by default). Say so in a comment at the top of the spec file.
 - **Op specs run on every device.** Wrap them in `DEVICES.each do |device| … end` and build inputs with `tensor(device, shape, data)`. `DEVICES` holds `CPU`, `SimDiscrete` and `BLAS`. Results must be identical on all of them for the small integer inputs these specs use, so the same expectations apply. Comparisons on random data, where `BLAS` legitimately differs in the last bits, go in the device's own spec with a tolerance, as in `blas_spec.cr`. Device-specific behaviour, such as transfer counts, goes in `device_spec.cr`.
+- **GPU devices are compared with the CPU, not hand-computed values.** `GPUS` in `spec_helper.cr` lists the GPUs present (`Metal` on an Apple Silicon Mac with a GPU, otherwise none), and `gpu_spec.cr` runs every op on each of them. Exact ops (IEEE arithmetic, comparisons, data movement) must match bit for bit; division and transcendental functions within 1e-6. Without a GPU those specs are pending.
 - **Each milestone's exit criterion has its own `describe "Mn exit: …"` block.**
 - **Include non-contiguous inputs** (transposed and broadcast views) for any new op. Most indexing bugs hide there.
 - **Test the timing of errors,** as well as the fact that they are raised, when an op adds new checks.
@@ -175,6 +181,18 @@ flowchart LR
 1. **Subclass `Device` and `Buffer`** under `src/tensomite/devices/`, and require the file from `src/tensomite.cr`. A device whose kernels run on the host subclasses `HostDevice` instead and gets every kernel for free.
 2. **Implement every abstract method.** `map` returns `nil` if the device's memory isn't host-visible. Buffers record their device, and every method rejects a buffer from another device with `DeviceError`.
 3. **Run the full op suite** on the new device. Host devices join the `DEVICES` list in `spec/spec_helper.cr`. Other devices compare against the CPU, with tolerances where their order of arithmetic differs.
+
+## Working on the Metal device
+
+Metal code compiles only for macOS on Apple Silicon. On any other machine:
+
+```sh
+crystal build --cross-compile --target aarch64-apple-darwin spec/gpu_spec.cr spec/metal_spec.cr spec/gpt2_spec.cr -o /tmp/specs_darwin
+```
+
+type-checks and generates code for the Metal path without linking it, so mistakes in Crystal surface before a Mac is involved. The MSL in `metal/kernels.metal` is compiled by the driver only when a `Metal` device is created, so it is checked only on a Mac: `crystal spec spec/metal_spec.cr spec/gpu_spec.cr`. A compile error is raised as `DeviceError`, with the compiler's message.
+
+CI runs the specs on macOS too. A hosted runner may have no usable GPU, in which case the Metal specs are pending rather than failing.
 
 ## Debugging
 
