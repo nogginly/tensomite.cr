@@ -88,7 +88,7 @@ spec/                       specs, one file per type or kind of op
 spec/fixtures/              reference outputs and small reference files (see below)
 scripts/                    fixture generation and model download
 bench/                      benchmarks, run with --release
-examples/                   programs using the library, such as training on Shakespeare
+examples/                   programs using the library, such as training on Shakespeare and TUTORIAL.md's multiply.cr
 models/, data/              downloaded weights and datasets (git-ignored)
 ```
 
@@ -267,5 +267,6 @@ flowchart LR
   - `DESIGN.md` whenever the design as built changes.
   - `DEVELOPMENT.md` whenever a convention, command or gotcha is learned.
   - `PLAN.md` when a decision or milestone changes.
+  - `GUIDE.md` whenever the public API changes, with every example run and its output shown; `TUTORIAL.md` and `examples/multiply.cr` together.
   - `HANDOFF.md` at the end of each PR, rewritten rather than appended to: where things stand, working agreements, follow-ups, environment and concepts covered.
 - **AI use** follows `DISCLOSURE.md`: generated code is reviewed until it is understood as if written by hand.

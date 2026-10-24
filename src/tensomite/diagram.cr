@@ -251,7 +251,6 @@ module Tensomite
 
       private def assign(node : Node) : Nil
         if node.op.nil?
-          return if node.size == 1 && node.name.nil?
           if @params.includes?(node)
             reader = @order.find { |other| other.srcs.any?(&.node.same?(node)) }
             if reader && (group = group_for(reader))
@@ -259,6 +258,7 @@ module Tensomite
             end
             return
           end
+          return if node.size == 1 && node.name.nil?
         end
         group_for(node).try do |group|
           group.nodes << node unless group.nodes.includes?(node)
