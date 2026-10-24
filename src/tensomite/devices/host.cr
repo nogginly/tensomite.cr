@@ -14,9 +14,16 @@ module Tensomite
       super(device, @bytes.size)
     end
 
-    # Wraps host memory owned by a subclass, such as a GPU buffer the host can see.
-    protected def initialize(device : Device, @bytes : Bytes)
+    # Wraps *bytes*, memory allocated for *device* or taken from its pool, or the
+    # host-visible memory of a subclass's buffer, such as a GPU buffer.
+    def initialize(device : Device, @bytes : Bytes)
       super(device, @bytes.size)
+    end
+
+    # Gives the memory back to the device's pool, unless it belongs to a file mapping.
+    def finalize
+      return if @owner
+      device.as?(HostDevice).try(&.recycle(@bytes))
     end
   end
 
@@ -26,8 +33,18 @@ module Tensomite
   # run to run and independent of shape. Subclasses decide whether their memory is
   # host-visible through `#map`.
   abstract class HostDevice < Device
+    # Freed buffers kept for reuse; see `BufferPool`. Holds up to 1 GiB by default.
+    getter pool = BufferPool(Bytes).new(1_i64 << 30)
+
+    # Returns a buffer from the pool when one of *bytesize* is free, otherwise a
+    # new one. Its contents are undefined: kernels write every element.
     def alloc(bytesize : Int32) : Buffer
-      HostBuffer.new(self, bytesize)
+      HostBuffer.new(self, pool.take(bytesize) || Bytes.new(bytesize))
+    end
+
+    # Takes back the memory of a collected buffer.
+    protected def recycle(bytes : Bytes) : Nil
+      pool.give(bytes, bytes.size)
     end
 
     def upload(buffer : Buffer, data : Bytes) : Nil

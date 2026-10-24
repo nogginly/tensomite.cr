@@ -136,6 +136,9 @@ steps.times do |step|
   updated_matrices = matrices.step(params.select(&.ndim.==(2)), grads.each_with_index.select { |_, i| decayed[i] }.map(&.first).to_a)
   updated_vectors = vectors.step(params.reject(&.ndim.==(2)), grads.each_with_index.reject { |_, i| decayed[i] }.map(&.first).to_a)
   model.params = decayed.map { |matrix| matrix ? updated_matrices.shift : updated_vectors.shift }
+  # The step's graph is garbage now; collecting returns its buffers to the
+  # device's pool before the next step allocates.
+  GC.collect
   if step % 10 == 0 || step == steps - 1
     elapsed = (Time.instant - started).total_seconds
     puts "step #{step}: loss #{loss_value.round(4)}, lr #{rate.round(6)}, #{(elapsed / (step + 1) * 1000).round(1)} ms/step"

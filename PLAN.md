@@ -91,7 +91,7 @@ Each milestone is done when its exit criterion passes.
 7. **Kernel macros and memory planning.** `Tensomite.kernel` takes an elementwise expression block and generates, at compile time, a CPU loop and an MSL kernel, plus a backward kernel per input by symbolic differentiation. `softmax`, `log_softmax` and `layernorm` become fused row ops (Decision T). Matmul gains bias and activation epilogues. Buffers are reused through a pool (Decision U). GPT-2's and the trainer's elementwise chains (GELU, scale and mask, residual adds) move onto macros. In PRs:
    1. Profile Metal decode: GPU time per op, and the host's share of each token.
    2. Parallel reductions on Metal (Decision X): the profile put 57% of a decoded token's GPU time in one-thread-per-row sums.
-   3. A buffer pool, on host devices and Metal.
+   3. A buffer pool, on host devices and Metal, and batched commits on Metal so the GPU starts before the host has encoded the whole graph.
    4. Kernel macros for elementwise expressions, starting with a spike that settles whether Crystal's macro language can differentiate, or whether generation moves into a `{{ run(...) }}` helper.
    5. Fused row ops.
    6. GPT-2 and the trainer on fused kernels, measured.

@@ -23,8 +23,13 @@ module Tensomite
       super(device, Bytes.new(ObjC.send(Pointer(UInt8), @mtl, "contents"), bytesize))
     end
 
+    # Gives the `MTLBuffer` back to its device, which pools or releases it.
     def finalize
-      ObjC.release(@mtl)
+      if metal = device.as?(Metal)
+        metal.retire(@mtl, bytesize)
+      else
+        ObjC.release(@mtl)
+      end
     end
   end
 
@@ -147,6 +152,21 @@ module Tensomite
     @pipelines = {} of String => Void*
     @command_buffer = Pointer(Void).null
     @encoder = Pointer(Void).null
+    # Command buffers committed but not yet waited for, oldest first.
+    @in_flight = [] of Void*
+    # Dispatches encoded into the open command buffer.
+    @encoded = 0
+    # Buffers given back while GPU work was pending; they join the pool once it completes.
+    @retired = [] of {Void*, Int32}
+    @retiring = false
+
+    # Freed `MTLBuffer`s kept for reuse; see `BufferPool`. Holds up to 1 GiB by
+    # default. (`#pool`, inherited, holds host memory, which `Metal` does not use.)
+    getter buffer_pool = BufferPool(Void*).new(1_i64 << 30)
+
+    # How many dispatches go into a command buffer before it is committed, so the
+    # GPU starts on them while the host is still encoding the rest.
+    property commit_every = 64
     # Where kernels report an index out of range: a count, the first bad id, and
     # the number of rows it was checked against.
     private getter(errors : MetalBuffer) { new_buffer(12).tap(&.bytes.fill(0)) }
@@ -166,10 +186,34 @@ module Tensomite
       new_buffer(bytesize).tap { profile.alloc += (Time.instant - start).total_seconds }
     end
 
+    # Returns a buffer of *bytesize* bytes, from the pool when one is free.
     private def new_buffer(bytesize : Int32) : MetalBuffer
-      mtl = ObjC.send(Pointer(Void), @device, "newBufferWithLength:options:", Math.max(bytesize, 4).to_u64, STORAGE_SHARED)
+      mtl = buffer_pool.take(bytesize) ||
+            ObjC.send(Pointer(Void), @device, "newBufferWithLength:options:", Math.max(bytesize, 4).to_u64, STORAGE_SHARED)
       raise DeviceError.new("cannot allocate #{bytesize} bytes") if mtl.null?
       MetalBuffer.new(self, mtl, bytesize)
+    end
+
+    # Takes back the `MTLBuffer` of a collected buffer. It joins the pool at once
+    # when no GPU work is pending, otherwise when that work completes, because the
+    # GPU may still be reading it; it is released when the pool cannot take it.
+    protected def retire(mtl : Void*, bytesize : Int32) : Nil
+      if idle?
+        ObjC.release(mtl) unless buffer_pool.give(mtl, bytesize)
+      elsif @retiring
+        ObjC.release(mtl)
+      else
+        @retiring = true
+        begin
+          @retired << {mtl, bytesize}
+        ensure
+          @retiring = false
+        end
+      end
+    end
+
+    private def idle? : Bool
+      @command_buffer.null? && @in_flight.empty?
     end
 
     def upload(buffer : Buffer, data : Bytes) : Nil
@@ -382,6 +426,7 @@ module Tensomite
       grid = StaticArray[threads.to_u64, 1_u64, 1_u64]
       group = StaticArray[width, 1_u64, 1_u64]
       ObjC.send(Nil, open_encoder, "dispatchThreads:threadsPerThreadgroup:", grid.to_unsafe, group.to_unsafe)
+      dispatched
     end
 
     # Encodes one dispatch of kernel *name* over a 2-D grid of *groups*
@@ -393,6 +438,24 @@ module Tensomite
       grid = StaticArray[groups[0].to_u64, groups[1].to_u64, 1_u64]
       group = StaticArray[threads[0].to_u64, threads[1].to_u64, 1_u64]
       ObjC.send(Nil, open_encoder, "dispatchThreadgroups:threadsPerThreadgroup:", grid.to_unsafe, group.to_unsafe)
+      dispatched
+    end
+
+    # Commits the open command buffer once it holds `#commit_every` dispatches.
+    private def dispatched : Nil
+      @encoded += 1
+      commit if @encoded >= commit_every
+    end
+
+    # Ends and commits the open command buffer, if any, without waiting for it.
+    private def commit : Nil
+      return if @command_buffer.null?
+      ObjC.send(Nil, @encoder, "endEncoding")
+      ObjC.release(@encoder)
+      ObjC.send(Nil, @command_buffer, "commit")
+      @in_flight << @command_buffer
+      @encoder = @command_buffer = Pointer(Void).null
+      @encoded = 0
     end
 
     # Sets kernel *name*'s pipeline on the open encoder and binds its arguments;
@@ -445,41 +508,48 @@ module Tensomite
       @encoder
     end
 
-    # Commits the open command buffer, if any, and waits for it. Raises
-    # `ExecutionError` if the GPU reports a failure, or if a kernel reported an
-    # index out of range.
+    # Commits the open command buffer, if any, and waits for every command buffer
+    # in flight, in order. Then it moves retired buffers into the pool, and raises
+    # `ExecutionError` if the GPU reported a failure or a kernel reported an index
+    # out of range.
     #
     # With a per-kernel profile, *label* names the op whose work the command
-    # buffer holds, and its GPU time is recorded under it.
+    # buffers hold, and their GPU time is recorded under it.
     private def flush(label : String? = nil) : Nil
-      return if @command_buffer.null?
-      command_buffer = @command_buffer
-      ObjC.send(Nil, @encoder, "endEncoding")
-      ObjC.release(@encoder)
-      @encoder = @command_buffer = Pointer(Void).null
-      ObjC.send(Nil, command_buffer, "commit")
+      commit
+      return if @in_flight.empty?
+      in_flight, @in_flight = @in_flight, [] of Void*
       profile = @profile
       start = Time.instant
-      ObjC.send(Nil, command_buffer, "waitUntilCompleted")
+      in_flight.each { |command_buffer| ObjC.send(Nil, command_buffer, "waitUntilCompleted") }
       if profile
         profile.wait += (Time.instant - start).total_seconds
-        profile.command_buffers += 1
+        profile.command_buffers += in_flight.size
         if label
-          gpu = ObjC.send(Float64, command_buffer, "GPUEndTime") - ObjC.send(Float64, command_buffer, "GPUStartTime")
+          gpu = in_flight.sum { |done| ObjC.send(Float64, done, "GPUEndTime") - ObjC.send(Float64, done, "GPUStartTime") }
           profile.add_kernel(label, gpu)
         end
       end
       message = ObjC.autoreleasepool do
-        status = ObjC.send(UInt64, command_buffer, "status")
-        ObjC.describe(ObjC.send(Pointer(Void), command_buffer, "error")) unless status == STATUS_COMPLETED
+        in_flight.compact_map do |command_buffer|
+          status = ObjC.send(UInt64, command_buffer, "status")
+          ObjC.describe(ObjC.send(Pointer(Void), command_buffer, "error")) unless status == STATUS_COMPLETED
+        end.first?
       end
-      ObjC.release(command_buffer)
+      in_flight.each { |command_buffer| ObjC.release(command_buffer) }
+      recycle_retired
       raise ExecutionError.new("Metal command buffer failed: #{message}") if message
       if (reports = @errors.try(&.bytes.unsafe_slice_of(Int32))) && reports[0] != 0
         id, rows = reports[1], reports[2]
         reports.fill(0)
         raise ExecutionError.new("index #{id} out of range for #{rows} rows")
       end
+    end
+
+    # Moves the buffers retired while GPU work was pending into the pool.
+    private def recycle_retired : Nil
+      retired, @retired = @retired, [] of {Void*, Int32}
+      retired.each { |(mtl, bytesize)| ObjC.release(mtl) unless buffer_pool.give(mtl, bytesize) }
     end
 
     private def metal(buffer : Buffer) : MetalBuffer

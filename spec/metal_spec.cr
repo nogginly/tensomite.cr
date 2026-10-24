@@ -112,6 +112,26 @@ require "./spec_helper"
         profile.command_buffers.should eq 3
       end
 
+      it "commits a command buffer every commit_every dispatches" do
+        a = Tensor.from(f32(1, 2, 3, 4), [2, 2], metal)
+        metal.commit_every = 2
+        profile = Metal::Profile.new
+        metal.profile = profile
+        (((a + 1) * a - a) / a).exp.to_a(Float32)
+        metal.profile = nil
+        metal.commit_every = 64
+        profile.dispatches.should eq 5
+        profile.command_buffers.should eq 3
+      end
+
+      it "reuses the Metal buffers of collected tensors" do
+        20.times { (Tensor.from(f32(1, 2), [2], metal) * 2).realize }
+        5.times { GC.collect }
+        hits = metal.buffer_pool.hits
+        20.times { (Tensor.from(f32(1, 2), [2], metal) * 2).to_a(Float32).should eq f32(2, 4) }
+        metal.buffer_pool.hits.should be > hits
+      end
+
       it "shares memory with the host" do
         t = Tensor.from(f32(1, 2), [2], metal)
         metal.map(t.node.buffer!).should_not be_nil
