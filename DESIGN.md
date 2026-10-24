@@ -801,6 +801,20 @@ GPU time, each op alone, ms      |7.44  |6.78
 - **Metal decodes within 4% of `BLAS`** in the same run, and prefills 1.7 times as fast. `BLAS` itself varies by about 5% between runs (144 to 153 tokens/s), so the M7 exit compares the two within one run.
 - **What is left is GPU work:** matmul 3.8 ms, and about 2 ms of small elementwise dispatches, which fusion removes.
 
+**After kernel macros** (M7 part 4, M5 Pro, `gelu` as one kernel):
+
+Measure                    |Part 3|Part 4
+---------------------------|------|------
+Dispatches per token       |710   |614   
+Wall per decoded token, ms |6.98  |6.72  
+GPU time, each op alone, ms|6.78  |6.48  
+of which `MatMul`          |3.82  |3.80  
+of which `Sum` and `Max`   |1.21  |1.21  
+of which the 12 `gelu`s    |≈0.30 |0.04  
+
+- **`gelu` went from nine dispatches per layer to one,** and from about 25 µs of GPU time per layer to about 3.
+- **The rest of the non-matmul time is mostly inside `layernorm` and `softmax`:** their sums and maxima, and the `Sub`, `Div`, `Sqrt`, `Exp` and `Mul` around them. The fused row ops (part 5) replace each of them with one kernel.
+
 **Training a character-level GPT on Tiny Shakespeare, Linux container.** The M5 exit is a validation loss below 1.8 within an hour here, and M7's is below 1.6 within an hour (Decision R). Runs use `examples/shakespeare.cr` on `BLAS`, with AdamW and a cosine schedule from 1e-3 to 1e-4:
 
 Model                                   |Params|Tokens per step|ms per step|Steps|Wall time|Validation loss, nats/char        
