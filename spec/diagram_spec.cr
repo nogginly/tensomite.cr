@@ -116,6 +116,16 @@ describe "Tensor#to_mermaid" do
       MERMAID
   end
 
+  it "counts one-element params, though it leaves out other scalars" do
+    x = Tensor.from(random_values(4, 1), [2, 2])
+    w = Tensor.from(random_values(2, 1), [2, 1])
+    b = Tensor.from(f32(0.5), [1])
+    y = Tensomite.scope("layer") { x.matmul(w) + b * 2 }
+    text = y.to_mermaid(depth: 1, params: [w, b])
+    text.should contain %(["layer<br/>3 ops · 3 params"])
+    text.should_not contain "leaf []"
+  end
+
   it "draws outer scopes as subgraphs at greater depths" do
     loss, weights = scoped_blocks
     text = loss.to_mermaid(depth: 2, params: weights)
