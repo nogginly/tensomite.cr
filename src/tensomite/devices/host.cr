@@ -105,34 +105,23 @@ module Tensomite
       in Op::GreaterEqual then binary(T, node, dst) { |x, y| x >= y ? T.new(1) : T.zero }
       in Op::Unview       then unview(T, node, dst)
       in Op::ScatterAdd   then scatter_add(T, node, dst)
-      in Nil              then raise Error.new("leaf nodes are created realised")
+      in Op::Kernel
+        kernel = node.kernel || raise Error.new("kernel node without a kernel")
+        kernel.host(Slice.new(dst.to_unsafe.as(Float32*), dst.size), node.srcs.map { |src| elements(Float32, src) }, node.srcs.map(&.view))
+      in Nil then raise Error.new("leaf nodes are created realised")
       end
-    end
-
-    # Returns the length of the runs of consecutive logical indices that a kernel
-    # can walk with a fixed stride in every one of *views*, which share a shape of
-    # *size* elements: all of them when each view is dense or constant, otherwise
-    # the last dimension.
-    private def run_length(size : Int32, views : Enumerable(View)) : Int32
-      return size if views.all? { |view| view.dense? || view.constant? }
-      views.first.shape.last? || 1
-    end
-
-    # Returns the step between the positions of consecutive elements of a run.
-    private def run_stride(view : View) : Int32
-      view.strides.last? || 0
     end
 
     # Applies the block to each pair of elements; sources already have the output shape.
     #
-    # Walks the output in runs (see `#run_length`), finding each source's position
+    # Walks the output in runs (see `View.run_length`), finding each source's position
     # through its view once per run and stepping by its stride within it.
     private def binary(type : T.class, node : Node, dst : Slice(T), & : T, T -> T) : Nil forall T
       return if dst.empty?
       a, b = node.srcs
       xs, ys = elements(T, a), elements(T, b)
-      run = run_length(dst.size, {a.view, b.view})
-      sa, sb = run_stride(a.view), run_stride(b.view)
+      run = View.run_length(dst.size, {a.view, b.view})
+      sa, sb = a.view.run_stride, b.view.run_stride
       (dst.size // run).times do |run_index|
         base = run_index * run
         pa, pb = a.view.offset_of(base), b.view.offset_of(base)
@@ -145,8 +134,8 @@ module Tensomite
       return if dst.empty?
       src = node.srcs.first
       xs = elements(T, src)
-      run = run_length(dst.size, {src.view})
-      stride = run_stride(src.view)
+      run = View.run_length(dst.size, {src.view})
+      stride = src.view.run_stride
       (dst.size // run).times do |run_index|
         base = run_index * run
         pos = src.view.offset_of(base)
@@ -174,8 +163,8 @@ module Tensomite
         dst.fill(init || T.zero)
         return
       end
-      run = run_length(n, {view})
-      stride = run_stride(view)
+      run = View.run_length(n, {view})
+      stride = view.run_stride
       dst.size.times do |row|
         acc = init || xs[view.offset_of(row * n)]
         (n // run).times do |run_index|
@@ -199,8 +188,8 @@ module Tensomite
       xs = elements(T, src)
       dst.fill(T.zero)
       return if src.size == 0
-      run = run_length(src.size, {view, src.view})
-      sv, ss = run_stride(view), run_stride(src.view)
+      run = View.run_length(src.size, {view, src.view})
+      sv, ss = view.run_stride, src.view.run_stride
       (src.size // run).times do |run_index|
         base = run_index * run
         pv, ps = view.offset_of(base), src.view.offset_of(base)
@@ -218,7 +207,7 @@ module Tensomite
       ids.size.times do |i|
         id = idx[ids.view.offset_of(i)]
         raise ExecutionError.new("index #{id} out of range for #{rows} rows") unless 0 <= id < rows
-        pos, stride = rows_src.view.offset_of(i * width), run_stride(rows_src.view)
+        pos, stride = rows_src.view.offset_of(i * width), rows_src.view.run_stride
         width.times { |j| dst[id * width + j] += xs[pos + j * stride] }
       end
     end
@@ -233,8 +222,8 @@ module Tensomite
         stop = start + src.shape[axis]
         region = out_view.slice(axis, start, stop)
         if src.size > 0
-          run = run_length(src.size, {region, src.view})
-          sr, ss = run_stride(region), run_stride(src.view)
+          run = View.run_length(src.size, {region, src.view})
+          sr, ss = region.run_stride, src.view.run_stride
           (src.size // run).times do |run_index|
             base = run_index * run
             pr, ps = region.offset_of(base), src.view.offset_of(base)
@@ -256,7 +245,7 @@ module Tensomite
         unless 0 <= id < rows
           raise ExecutionError.new("index #{id} out of range for #{rows} rows")
         end
-        pos, stride = table.view.offset_of(id * width), run_stride(table.view)
+        pos, stride = table.view.offset_of(id * width), table.view.run_stride
         width.times { |j| dst[i * width + j] = xs[pos + j * stride] }
       end
     end

@@ -48,7 +48,8 @@ module Tensomite
   # may `MatMul`, which splits `k` across threads (`#matmul_mode`); all of them
   # repeat exactly from run to run and are shape-invariant (Decisions K and S).
   class Metal < HostDevice
-    private SOURCE           = {{ read_file("#{__DIR__}/metal/kernels.metal") }}
+    private PRELUDE          = {{ read_file("#{__DIR__}/metal/prelude.metal") }}
+    private SOURCE           = PRELUDE + {{ read_file("#{__DIR__}/metal/kernels.metal") }}
     private MAX_DIMS         =     8
     private STORAGE_SHARED   = 0_u64
     private STATUS_COMPLETED = 4_u64
@@ -281,6 +282,8 @@ module Tensomite
         return false unless encode_unview(node, output)
       when Op::MatMul
         encode_matmul(node, output)
+      when Op::Kernel
+        encode_kernel(node, output)
       else
         name = srcs.size == 2 ? BINARY[node.op]? : UNARY[node.op]?
         return false unless name
@@ -395,18 +398,26 @@ module Tensomite
       args.to_unsafe_bytes
     end
 
-    # Compiles the kernel source and builds a compute pipeline for every kernel in it.
+    # Compiles the hand-written kernels and builds a compute pipeline for each.
     private def compile : Nil
+      build(SOURCE, BINARY.values + UNARY.values + OTHER, OPTIONAL)
+    end
+
+    # Compiles *source*, with fast math off, and adds a pipeline to the cache for
+    # each function named in *names*, and in *optional* when the source has it.
+    # Raises `DeviceError` with the compiler's message when the source does not
+    # compile.
+    private def build(source : String, names : Array(String), optional = [] of String) : Nil
       ObjC.autoreleasepool do
         options = ObjC.send(Pointer(Void), ObjC.send(Pointer(Void), ObjC.cls("MTLCompileOptions"), "alloc"), "init")
         ObjC.send(Nil, options, "setFastMathEnabled:", 0_u32)
         error = Pointer(Void*).malloc(1)
-        library = ObjC.send(Pointer(Void), @device, "newLibraryWithSource:options:error:", ObjC.string(SOURCE), options, error)
+        library = ObjC.send(Pointer(Void), @device, "newLibraryWithSource:options:error:", ObjC.string(source), options, error)
         ObjC.release(options)
         raise DeviceError.new("cannot compile Metal kernels: #{ObjC.describe(error.value)}") if library.null?
-        (BINARY.values + UNARY.values + OTHER + OPTIONAL).each do |name|
+        (names + optional).each do |name|
           function = ObjC.send(Pointer(Void), library, "newFunctionWithName:", ObjC.string(name))
-          next if function.null? && OPTIONAL.includes?(name)
+          next if function.null? && optional.includes?(name)
           raise DeviceError.new("no Metal kernel #{name}") if function.null?
           pipeline = ObjC.send(Pointer(Void), @device, "newComputePipelineStateWithFunction:error:", function, error)
           ObjC.release(function)
@@ -415,6 +426,16 @@ module Tensomite
         end
         ObjC.release(library)
       end
+    end
+
+    # Kernel: one thread per element, running the kernel's generated MSL, which is
+    # compiled the first time the kernel runs on this device.
+    private def encode_kernel(node : Node, output : MetalBuffer) : Nil
+      kernel = node.kernel || raise Error.new("kernel node without a kernel")
+      build(PRELUDE + kernel.msl, [kernel.msl_name]) unless @pipelines.has_key?(kernel.msl_name)
+      srcs = node.srcs
+      dispatch(kernel.msl_name, node.size, srcs.map { |src| mtl(src) } << output.mtl,
+        srcs.map { |src| view_args(src.view) } << u32(node.size))
     end
 
     # Encodes one dispatch of kernel *name* over *threads* threads, binding

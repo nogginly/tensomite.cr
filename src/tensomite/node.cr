@@ -39,6 +39,8 @@ module Tensomite
     # Rows of source 0 added into output rows selected by the `I32` indices in
     # source 1; the adjoint of `Gather`. Rows no index selects are zero.
     ScatterAdd
+    # `Node#kernel` applied elementwise to the sources, which have the output shape.
+    Kernel
   end
 
   # A vertex of the compute graph, producing one contiguous array of `shape`.
@@ -54,9 +56,11 @@ module Tensomite
     getter axis : Int32?
     # The view an `Unview` node inverts.
     getter source_view : View?
+    # The fused kernel a `Kernel` node runs.
+    getter kernel : Kernel?
     getter buffer : Buffer?
 
-    def initialize(@op : Op, @srcs : Array(Tensor), @shape, @dtype, @device, @axis = nil, @source_view = nil)
+    def initialize(@op : Op, @srcs : Array(Tensor), @shape, @dtype, @device, @axis = nil, @source_view = nil, @kernel = nil)
     end
 
     def initialize(buffer : Buffer, @shape, @dtype, @device)

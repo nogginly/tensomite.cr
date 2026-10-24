@@ -11,6 +11,7 @@ end
 # host's order. Inputs cover dense, transposed,
 # broadcast and sliced views.
 EXACT = {
+  "kernel"               => ->(d : Device) { Kernels::SPEC_AXPB.call(random(d, [3, 4], 1), random(d, [4], 2), random(d, [3, 1], 3)) },
   "add"                  => ->(d : Device) { random(d, [5, 7], 1) + random(d, [7], 2) },
   "sub"                  => ->(d : Device) { random(d, [7, 5], 1).transpose - random(d, [5, 1], 2) },
   "mul"                  => ->(d : Device) { random(d, [5, 9], 1).slice(1, 2, 9) * random(d, [5, 7], 2) },
@@ -64,15 +65,16 @@ SPLIT = {
 # Ops whose GPU results may differ in the last bits: division and transcendental
 # functions, whose rounding is the GPU maths library's (Decision K, level 3).
 CLOSE = {
-  "div"       => ->(d : Device) { random(d, [5, 7], 1) / random(d, [5, 7], 2, 0.5f32, 2f32) },
-  "exp"       => ->(d : Device) { random(d, [5, 7], 1, -4f32, 4f32).exp },
-  "log"       => ->(d : Device) { random(d, [7, 5], 1, 0.01f32, 10f32).transpose.log },
-  "tanh"      => ->(d : Device) { random(d, [5, 7], 1, -3f32, 3f32).tanh },
-  "sqrt"      => ->(d : Device) { random(d, [5, 7], 1, 0f32, 10f32).sqrt },
-  "softmax"   => ->(d : Device) { random(d, [4, 9], 1, -5f32, 5f32).softmax },
-  "layernorm" => ->(d : Device) { random(d, [4, 8], 1).layernorm(random(d, [8], 2), random(d, [8], 3)) },
-  "gelu"      => ->(d : Device) { random(d, [4, 8], 1, -3f32, 3f32).gelu },
-  "gradient"  => ->(d : Device) {
+  "div"                           => ->(d : Device) { random(d, [5, 7], 1) / random(d, [5, 7], 2, 0.5f32, 2f32) },
+  "exp"                           => ->(d : Device) { random(d, [5, 7], 1, -4f32, 4f32).exp },
+  "log"                           => ->(d : Device) { random(d, [7, 5], 1, 0.01f32, 10f32).transpose.log },
+  "tanh"                          => ->(d : Device) { random(d, [5, 7], 1, -3f32, 3f32).tanh },
+  "sqrt"                          => ->(d : Device) { random(d, [5, 7], 1, 0f32, 10f32).sqrt },
+  "softmax"                       => ->(d : Device) { random(d, [4, 9], 1, -5f32, 5f32).softmax },
+  "layernorm"                     => ->(d : Device) { random(d, [4, 8], 1).layernorm(random(d, [8], 2), random(d, [8], 3)) },
+  "gelu"                          => ->(d : Device) { random(d, [4, 8], 1, -3f32, 3f32).gelu },
+  "kernel with exp, log and sqrt" => ->(d : Device) { Kernels::SPEC_MIXED.call(random(d, [4, 5], 1), random(d, [5, 4], 2).transpose) },
+  "gradient"                      => ->(d : Device) {
     w = random(d, [4, 3], 1)
     Tensomite.grad((random(d, [2, 4], 2).matmul(w).tanh * 3).sum, [w]).first
   },

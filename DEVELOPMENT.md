@@ -69,6 +69,9 @@ src/tensomite/tensor.cr     Tensor: construction, views, transfers, reading data
 src/tensomite/tensor/       Tensor ops by kind: elementwise, reduce, structural, composite
 src/tensomite/scheduler.cr  realisation
 src/tensomite/autograd.cr   Tensomite.grad and the chain rule for every op
+src/tensomite/kernel.cr     the Tensomite.kernel macro and the Kernel class
+src/tensomite/kernels.cr    the kernels tensomite's own ops use, such as gelu
+src/tensomite/buffer_pool.cr  BufferPool
 src/tensomite/optim.cr      SGD and AdamW
 src/tensomite/devices/      host.cr (shared host kernels), then one file per pure-Crystal device
 src/tensomite/blas.cr       opt-in BLAS binding and device; not required by src/tensomite.cr
@@ -136,6 +139,7 @@ Benchmarks of model speed depend only on shapes, so `bench/gpt2.cr` can run on a
 - **Class variables are shared with subclasses.** A `class_getter default : CPU` on `CPU` stops a subclass from declaring its own `default` of another type. That is why `CPU` and `SimDiscrete` are siblings under `HostDevice` rather than parent and child.
 - **Generic kernels compile every branch for every dtype.** `Math.exp(x)` on an `Int32` returns `Float64`, which does not fit a `Slice(Int32)`. Wrap results in `T.new(...)` so the code compiles, and reject float-only ops when they are called, so integer kernels never run them.
 - **`Void*` is a type, not an expression.** Pass `Pointer(Void)` where a type is an argument, as in `ObjC.send(Pointer(Void), …)`.
+- **The macro language is small.** `ArrayLiteral` has no `pop`, `reverse` or `index`: use `last` with a slice (`a[0...-1]`), a loop over indices, or a `HashLiteral`. An empty array literal passed to another macro needs a type (`[] of String`). There is no recursion that returns a value and no `while`, so tree walks use an explicit stack in a bounded `for` loop, as `Tensomite.kernel` does.
 - **One C symbol, one signature.** A `lib` cannot declare `objc_msgSend` twice with different arguments, even under different Crystal names. Cast the function's address to a typed `Proc` instead, as `ObjC.send` does. A proc literal needs parentheses before `.pointer`: `(->LibObjC.objc_msgSend).pointer`.
 - **Methods are type-checked only when called.** A new `Tensor` method with a type error compiles silently until a spec calls it, so every new method needs a spec.
 
@@ -170,6 +174,12 @@ flowchart LR
 4. **Add its chain rule** to `Tensor.backward` in `autograd.cr`: one gradient per source, in the source's shape, or `nil` for a source without one. That `case` is exhaustive too.
 5. **Write specs** with hand-computed values over contiguous, transposed and broadcast inputs, and a finite-difference check of the gradient in `autograd_spec.cr`.
 6. **Update `DESIGN.md`** if the op adds a concept, such as a new node field or a new kind of view.
+
+### Adding a fused kernel
+
+1. **Define it** with `Tensomite.kernel(:name) { |x, y| ... }` in `kernels.cr`, using only the operations listed under "Kernel macros" in `DESIGN.md`. This defines `Tensomite::Kernels::NAME`.
+2. **Write the expression in the same order as the composite it replaces,** operation for operation, so the two give the same bits on the CPU.
+3. **Spec it** in `kernel_spec.cr`: bit-for-bit against the composite on every device, a finite-difference check of its gradients, and a case in `gpu_spec.cr`.
 
 ### Adding a dtype
 

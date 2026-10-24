@@ -10,7 +10,8 @@ What the next session, or the next person, needs in order to carry on without th
 
 - **On `main`:** milestones 1 to 6. That covers the lazy tensor core, the CPU op set and `SimDiscrete`, the BLAS seam, GPT-2 inference verified against PyTorch, autograd with SGD, AdamW and a Shakespeare trainer, and the `Metal` device with every `F32` op on the GPU and split-K matmul. CI runs on Linux and macOS (the macOS runner has a GPU), and Decisions A–X are recorded in `PLAN.md`.
 - **M7 plan:** seven PRs, listed under M7 in `PLAN.md`, with Decisions T (row ops are hand-written fused ops), U (a finalizer-fed buffer pool), V (GLSL waits for M8) and W (threads only if training is still too slow).
-- **Open PR:** M7 part 3 on `m7-buffer-pool`: a finalizer-fed `BufferPool` on host devices and `Metal` (Decision U), and batched commits on Metal. On the Linux container a training step fell from 744 to 470 ms, with a `GC.collect` per step in the trainer. On the M5 Pro, Metal decode rose from 105 to 139 tokens/s, against BLAS's 144 in the same run, with 12 command buffers per token.
+- **Open PR:** M7 part 4 on `m7-kernel-macros`: `Tensomite.kernel`, `Op::Kernel`, host and Metal execution, generated gradients, and `gelu` as the first kernel, bit-identical to its composite on the CPU.
+- **Part 3 (merged):** buffer pool and batched commits; Metal decodes at 139 tokens/s against BLAS's 144 in the same run.
 - **Part 2 (merged):** parallel reductions lifted Metal decode from 64 to 105 tokens/s; BLAS is at 152. A decoded token is 10.1 ms, of which 3.2 ms is host work the GPU waits for.
 - **The profile (part 1, M5 Pro):** of 15.7 ms per decoded token, 13.2 ms is waiting for the GPU, of which `Sum` is 7.8 and `MatMul` 3.8; allocation is 1.0, graph building 1.2, encoding 710 dispatches only 0.26.
 - **Deferred:** Decision D, CPU parallelism. Profiling in M5 shows that training is bound by elementwise passes, so D now has a measured case; M7's fusion comes first.
