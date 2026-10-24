@@ -131,6 +131,14 @@ module Tensomite
       in Op::ScatterAdd then [g.gather(b), nil] of Tensor?
       in Op::Unview
         [through(g, node.source_view || raise Error.new("unview needs a source view"))] of Tensor?
+      in Op::Softmax
+        # dx = y · (g - Σ g·y), per row.
+        [result * (g - (g * result).sum(-1, keepdims: true))] of Tensor?
+      in Op::LogSoftmax
+        # dx = g - exp(y) · Σ g, per row.
+        [g - result.exp * g.sum(-1, keepdims: true)] of Tensor?
+      in Op::LayerNorm
+        layernorm_backward(node, g)
       in Op::Kernel
         kernel = node.kernel || raise Error.new("kernel node without a kernel")
         srcs.map_with_index do |_, i|
@@ -142,6 +150,23 @@ module Tensomite
       in Nil
         raise Error.new("leaf nodes have no sources")
       end
+    end
+
+    # Returns the gradients of a fused layer norm's input, weight and bias, from
+    # the normalised input `x̂ = (x - mean) / σ` recomputed by primitives:
+    #
+    # - weight: `g · x̂`, and bias: `g`, each in the expanded shape, so that
+    #   accumulating them sums over the rows;
+    # - input: `(ĝ - mean(ĝ) - x̂ · mean(ĝ · x̂)) / σ`, where `ĝ = g · weight`.
+    private def self.layernorm_backward(node : Node, g : Tensor) : Array(Tensor?)
+      x, weight, _ = node.srcs
+      epsilon = node.epsilon || raise Error.new("layernorm needs an epsilon")
+      centred = x - x.mean(-1, keepdims: true)
+      std = ((centred * centred).mean(-1, keepdims: true) + epsilon).sqrt
+      normalised = centred / std
+      scaled = g * weight
+      dx = (scaled - scaled.mean(-1, keepdims: true) - normalised * (scaled * normalised).mean(-1, keepdims: true)) / std
+      [dx, g * normalised, g] of Tensor?
     end
 
     # Returns *g*, the result of reducing over *axis* (all axes when `nil`), broadcast

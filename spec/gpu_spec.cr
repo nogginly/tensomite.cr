@@ -8,7 +8,7 @@ end
 
 # Ops whose GPU results must equal the CPU's bit for bit: IEEE arithmetic and
 # comparisons are exact whatever the device, and these GPU kernels add in the
-# host's order. Inputs cover dense, transposed,
+# host's order. A sum is exact only over one chunk (16 elements) or less. Inputs cover dense, transposed,
 # broadcast and sliced views.
 EXACT = {
   "kernel"               => ->(d : Device) { Kernels::SPEC_AXPB.call(random(d, [3, 4], 1), random(d, [4], 2), random(d, [3, 1], 3)) },
@@ -20,7 +20,7 @@ EXACT = {
   "copy"                 => ->(d : Device) { random(d, [4, 5, 6], 1).permute([2, 0, 1]).contiguous },
   "scalar"               => ->(d : Device) { random(d, [5, 5], 1) * 0.5 - 2 },
   "sum"                  => ->(d : Device) { random(d, [6, 7], 1).transpose.sum(1) },
-  "sum over all"         => ->(d : Device) { random(d, [3, 4, 5], 1).slice(2, 1, 4).sum },
+  "short sum over all"   => ->(d : Device) { random(d, [2, 2, 4], 1).slice(2, 1, 4).sum },
   "max"                  => ->(d : Device) { random(d, [6, 7], 1).max(0, keepdims: true) },
   "max over all"         => ->(d : Device) { random(d, [4, 6], 1).transpose.max },
   "max of long rows"     => ->(d : Device) { random(d, [3, 1000], 1).max(1) },
@@ -51,6 +51,7 @@ EXACT = {
 # order (Decisions S and X). The inputs give sums of hundreds of terms, hence
 # the wider bound.
 SPLIT = {
+  "sum over 36 elements"  => ->(d : Device) { random(d, [3, 4, 5], 1).slice(2, 1, 4).sum },
   "sum of long rows"      => ->(d : Device) { random(d, [3, 768], 1).sum(1) },
   "sum over all"          => ->(d : Device) { random(d, [50, 100], 1).transpose.sum },
   "mean of a long column" => ->(d : Device) { random(d, [500, 4], 1).mean(0) },
@@ -73,6 +74,9 @@ CLOSE = {
   "softmax"                       => ->(d : Device) { random(d, [4, 9], 1, -5f32, 5f32).softmax },
   "layernorm"                     => ->(d : Device) { random(d, [4, 8], 1).layernorm(random(d, [8], 2), random(d, [8], 3)) },
   "gelu"                          => ->(d : Device) { random(d, [4, 8], 1, -3f32, 3f32).gelu },
+  "log_softmax"                   => ->(d : Device) { random(d, [4, 9], 1, -5f32, 5f32).log_softmax },
+  "long rows"                     => ->(d : Device) { random(d, [3, 700], 1, -5f32, 5f32).softmax },
+  "long layernorm"                => ->(d : Device) { random(d, [3, 768], 1).layernorm(random(d, [768], 2), random(d, [768], 3)) },
   "kernel with exp, log and sqrt" => ->(d : Device) { Kernels::SPEC_MIXED.call(random(d, [4, 5], 1), random(d, [5, 4], 2).transpose) },
   "gradient"                      => ->(d : Device) {
     w = random(d, [4, 3], 1)

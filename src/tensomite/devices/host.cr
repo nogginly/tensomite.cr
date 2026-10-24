@@ -105,6 +105,8 @@ module Tensomite
       in Op::GreaterEqual then binary(T, node, dst) { |x, y| x >= y ? T.new(1) : T.zero }
       in Op::Unview       then unview(T, node, dst)
       in Op::ScatterAdd   then scatter_add(T, node, dst)
+      in Op::Softmax, Op::LogSoftmax, Op::LayerNorm
+        rows(node, Slice.new(dst.to_unsafe.as(Float32*), dst.size))
       in Op::Kernel
         kernel = node.kernel || raise Error.new("kernel node without a kernel")
         kernel.host(Slice.new(dst.to_unsafe.as(Float32*), dst.size), node.srcs.map { |src| elements(Float32, src) }, node.srcs.map(&.view))
@@ -194,6 +196,58 @@ module Tensomite
         base = run_index * run
         pv, ps = view.offset_of(base), src.view.offset_of(base)
         run.times { |j| dst[pv + j * sv] += xs[ps + j * ss] }
+      end
+    end
+
+    # The fused row ops, one row of the last axis at a time. Each does the
+    # composite's operations in the composite's order, rounding each to `Float32`,
+    # so it gives the composite's bits:
+    #
+    # - Softmax: the maximum, folded from the first element; then `e = exp(x - max)`
+    #   and their sum, folded from zero; then `e / sum`.
+    # - LogSoftmax: `shifted = x - max`; the sum of `exp(shifted)`; then
+    #   `shifted - log(sum)`.
+    # - LayerNorm: `mean = sum / n`; `centred = x - mean`; `variance =
+    #   sum(centred²) / n`; then `centred / sqrt(variance + epsilon) * weight + bias`.
+    #
+    # A row lies along the last axis, so it is one run (see `View.run_length`): its
+    # elements are found from the row's start and the view's stride.
+    private def rows(node : Node, dst : Slice(Float32)) : Nil
+      src = node.srcs.first
+      n = node.shape.last
+      xs, stride = elements(Float32, src), src.view.run_stride
+      count = n.to_f32
+      (dst.size // n).times do |row|
+        base = row * n
+        pos = src.view.offset_of(base)
+        case node.op
+        when Op::Softmax
+          top = xs[pos]
+          (1...n).each { |j| top = (v = xs[pos + j * stride]) > top ? v : top }
+          total = 0f32
+          n.times { |j| total += (dst[base + j] = Math.exp(xs[pos + j * stride] - top)) }
+          n.times { |j| dst[base + j] = dst[base + j] / total }
+        when Op::LogSoftmax
+          top = xs[pos]
+          (1...n).each { |j| top = (v = xs[pos + j * stride]) > top ? v : top }
+          total = 0f32
+          n.times { |j| total += Math.exp(dst[base + j] = xs[pos + j * stride] - top) }
+          log_total = Math.log(total)
+          n.times { |j| dst[base + j] = dst[base + j] - log_total }
+        else
+          weight, bias = node.srcs[1], node.srcs[2]
+          ws, bs = elements(Float32, weight), elements(Float32, bias)
+          pw, sw = weight.view.offset_of(base), weight.view.run_stride
+          pb, sb = bias.view.offset_of(base), bias.view.run_stride
+          epsilon = node.epsilon || raise Error.new("layernorm needs an epsilon")
+          total = 0f32
+          n.times { |j| total += xs[pos + j * stride] }
+          mean = total / count
+          squares = 0f32
+          n.times { |j| squares += (centred = dst[base + j] = xs[pos + j * stride] - mean) * centred }
+          std = Math.sqrt(squares / count + epsilon)
+          n.times { |j| dst[base + j] = dst[base + j] / std * ws[pw + j * sw] + bs[pb + j * sb] }
+        end
       end
     end
 

@@ -41,6 +41,14 @@ module Tensomite
     ScatterAdd
     # `Node#kernel` applied elementwise to the sources, which have the output shape.
     Kernel
+    # Softmax of each row along the last axis, fused.
+    Softmax
+    # Log of the softmax of each row along the last axis, fused.
+    LogSoftmax
+    # Layer normalisation of each row along the last axis, by `Node#epsilon`, then
+    # scaled and offset by sources 1 and 2 (weight and bias, expanded to the
+    # output shape), fused.
+    LayerNorm
   end
 
   # A vertex of the compute graph, producing one contiguous array of `shape`.
@@ -58,9 +66,11 @@ module Tensomite
     getter source_view : View?
     # The fused kernel a `Kernel` node runs.
     getter kernel : Kernel?
+    # The epsilon a `LayerNorm` node adds to each row's variance.
+    getter epsilon : Float32?
     getter buffer : Buffer?
 
-    def initialize(@op : Op, @srcs : Array(Tensor), @shape, @dtype, @device, @axis = nil, @source_view = nil, @kernel = nil)
+    def initialize(@op : Op, @srcs : Array(Tensor), @shape, @dtype, @device, @axis = nil, @source_view = nil, @kernel = nil, @epsilon = nil)
     end
 
     def initialize(buffer : Buffer, @shape, @dtype, @device)

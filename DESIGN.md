@@ -206,6 +206,7 @@ Reduction |`Sum`, `Max`                          |`sum`, `max`, with optional `a
 Structural|`Copy`, `Cat`, `Gather`, `MatMul`     |`contiguous`, `Tensor.cat`, `gather`, `matmul`                        
 Adjoint   |`GreaterEqual`, `Unview`, `ScatterAdd`|`greater_equal`; the other two only through `Tensomite.grad`          
 Fused     |`Kernel`                              |any `Tensomite.kernel`, such as `gelu`                                
+Row       |`Softmax`, `LogSoftmax`, `LayerNorm`  |`softmax`, `log_softmax` and `layernorm` along the last axis          
 Composite |none: built from the rows above       |`mean`, `softmax`, `log_softmax`, `cross_entropy`, `layernorm`, `gelu`
 
 - **Scalars** become rank-0 leaf tensors of the operand's dtype (`Tensor.scalar`), which then broadcast like any other tensor. So `x * 0.5` is `Mul` of `x` and a broadcast scalar.
@@ -323,13 +324,13 @@ flowchart TD
 
 Op          |Threads                                                                                  |Each thread                                                                                      
 ------------|-----------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------
-`Sum`, `Max`|one threadgroup per output, a thread per chunk of 64 (one thread for a run of 64 or less)|folds whole chunks in index order; the first thread folds the chunk results in chunk order       
+`Sum`, `Max`|one threadgroup per output, a thread per chunk of 16 (one thread for a run of 16 or less)|folds whole chunks in index order; the first thread folds the chunk results in chunk order       
 `ScatterAdd`|one per column                                                                           |zeroes its column, then adds the source rows into the rows their ids select, in order            
 `Unview`    |one per output position                                                                  |inverts the view to find which logical elements read the position, and adds them in logical order
 
 `Unview` inverts a view by decomposing `position - offset` over the dimensions with a nonzero stride, largest first. The dimensions with stride 0 are the ones that repeat a position: their indices are walked in row-major order, which is logical order. The decomposition is unique when each stride exceeds the furthest the smaller ones can reach together. Every view tensomite builds satisfies that, and a view that did not would run on the host.
 
-**Reductions in chunks (Decision X).** One thread per output made a long reduction slow: each of a GPT-2 layer norm's means was a single thread adding 768 numbers one after another, 126 µs each and 57% of a decoded token's GPU time. Each output now has a threadgroup, with each thread folding chunks of 64 at fixed offsets. As with split-K, chunk boundaries never depend on the run's length or on the number of threads, so a row padded with zeros (or, for `Max`, with -∞), as a masked attention row is, keeps its bits, and prefill still equals decode. `Max` is exact in any order and still matches the host bit for bit. `Sum` of more than one chunk adds in a different order from the host's and is compared within 1e-5. A run of one chunk or less keeps one thread per output, which is the host's arithmetic exactly.
+**Reductions in chunks (Decision X).** One thread per output made a long reduction slow: each of a GPT-2 layer norm's means was a single thread adding 768 numbers one after another, 126 µs each and 57% of a decoded token's GPU time. Each output now has a threadgroup, with each thread folding chunks of 16 at fixed offsets. As with split-K, chunk boundaries never depend on the run's length or on the number of threads, so a row padded with zeros (or, for `Max`, with -∞), as a masked attention row is, keeps its bits, and prefill still equals decode. `Max` is exact in any order and still matches the host bit for bit. `Sum` of more than one chunk adds in a different order from the host's and is compared within 1e-5. A run of one chunk or less (16 elements) keeps one thread per output, which is the host's arithmetic exactly. Within a run along the last axis, threads step by the view's stride rather than calling `offset_of` for every element.
 
 **Errors.** A GPU kernel cannot raise. `Gather` and `ScatterAdd` report an id out of range through a small shared error buffer, and `flush` raises the host's `ExecutionError` when it finds a report. The error therefore surfaces when the command buffer completes, at `realize`, as it does on the host. One difference remains: the nodes encoded before the error are marked realised, with undefined contents for the failing one.
 
@@ -467,6 +468,22 @@ flowchart LR
 5. **Gradients.** A reverse sweep over the tape applies each operation's chain rule: the output's gradient spreads to its operands, and contributions to one value are added in the order the sweep meets them. Each input gets its own gradient kernel, whose inputs are the output's gradient followed by the kernel's inputs. Autograd's rule for `Op::Kernel` applies them, so a kernel needs no hand-written backward. Gradient kernels have no gradients of their own.
 
 The expression language is deliberately small: `+`, `-` (binary and unary), `*`, `/`, number literals, constant paths such as `Math::PI`, and `tanh`, `exp`, `log` and `sqrt`. Anything else fails at compile time with the offending expression. Inputs broadcast like a binary op's, and must be `F32` on one device.
+
+## Fused row ops
+
+`softmax`, `log_softmax` and `layernorm` along the last axis are one primitive each (Decision T), in place of five to eight. Along another axis, or with weights of another shape, they fall back to their composites.
+
+- **On host devices,** each row is one loop that does the composite's operations in the composite's order, so a fused op gives the composite's bits. The composites in `spec/row_ops_spec.cr` are the oracles.
+- **On Metal,** each row gets a threadgroup that makes three passes over it: reduce, write, normalise. The reductions are the chunked ones of "Reductions in chunks", so a softmax row padded with -∞, as a masked attention row is, keeps its bits, and prefill still equals decode. In the last pass, each thread rewrites only the elements it wrote itself.
+- **Backward rules** are built from primitives and checked by finite differences:
+
+  Op         |Gradient of the input
+  -----------|-----------------------------------------------------------------------
+  `Softmax`  |`y · (g - Σ g·y)`, per row
+  `LogSoftmax`|`g - exp(y) · Σ g`, per row
+  `LayerNorm`|`(ĝ - mean(ĝ) - x̂ · mean(ĝ · x̂)) / σ`, with `ĝ = g · weight` and `x̂ = (x - mean) / σ`
+
+  The weight's gradient is `g · x̂` and the bias's is `g`, in the expanded shape, so that accumulating them sums over the rows.
 
 ## Autograd
 
@@ -815,6 +832,51 @@ of which the 12 `gelu`s    |≈0.30 |0.04
 - **`gelu` went from nine dispatches per layer to one,** and from about 25 µs of GPU time per layer to about 3.
 - **The rest of the non-matmul time is mostly inside `layernorm` and `softmax`:** their sums and maxima, and the `Sub`, `Div`, `Sqrt`, `Exp` and `Mul` around them. The fused row ops (part 5) replace each of them with one kernel.
 
+**After fused row ops** (M7 part 5, M5 Pro, first version):
+
+Measure                          |Part 4|Part 5
+---------------------------------|------|------
+Dispatches per token             |614   |316   
+Metal decode, tokens/s           |—     |150.95
+`BLAS` decode, tokens/s, same run|—     |167.82
+Wall per decoded token, ms       |6.72  |6.54  
+GPU time, each op alone, ms      |6.48  |6.33  
+of which `MatMul`                |3.80  |3.74  
+of which `LayerNorm` (25)        |—     |1.42  
+of which `Softmax` (12)          |—     |0.51  
+
+Fusing saved dispatches but little GPU time: a layer norm of one row of 768 took 57 µs. With chunks of 64 it had only 12 threads, each reading 64 elements in turn through `offset_of`, whose integer division and remainder per dimension are slow on a GPU. So reductions and row ops now use chunks of 16, giving a row of 768 48 threads, and step through a run by its stride; `offset_of` returns `offset + i` at once for a dense view, which every kernel benefits from.
+
+**After more threads per row and stride indexing** (M7 part 5, M5 Pro):
+
+Measure                          |Part 5, first|Part 5    
+---------------------------------|-------------|----------
+Metal decode, tokens/s (split)   |150.95       |**187.63**
+`BLAS` decode, tokens/s, same run|167.82       |160.26    
+Metal prefill, tokens/s (split)  |1,552        |1,642     
+`BLAS` prefill, tokens/s         |1,285        |1,240     
+Wall per decoded token, ms       |6.54         |4.95      
+GPU time, each op alone, ms      |6.33         |4.74      
+of which `MatMul`                |3.74         |3.73      
+of which `LayerNorm` (25)        |1.42         |0.28      
+of which `Softmax` (12)          |0.51         |0.08      
+
+- **Metal decodes 17% faster than `BLAS`** in the same run, and prefills a third faster: what Decision O requires of M7.
+- **A layer norm of one row now takes 11 µs, not 57.** Four times the threads, and no integer division per element.
+- **Matmul is 79% of the GPU's time.** The rest is the residual and bias adds, the KV cache's `Cat` and `Copy`, and the fused ops.
+- **Atomic matmul is now slower than the deterministic split in decode** (182.9 against 187.6 tokens/s), so determinism costs nothing there.
+
+**Training step in the Linux container through M7** (the 0.8M-param model, 30 steps, identical losses):
+
+Build                             |ms per step
+----------------------------------|-----------
+M6                                |744        
+buffer pool, a collection per step|470        
+`gelu` as one kernel              |387        
+fused row ops                     |293        
+
+The larger model Decision R's 1.6 target needs (4 layers, 6 heads, width 192, context 128) went from 1.6 s to 1.1 s a step: about 90 minutes for 5,000 steps, still short of the hour.
+
 **Training a character-level GPT on Tiny Shakespeare, Linux container.** The M5 exit is a validation loss below 1.8 within an hour here, and M7's is below 1.6 within an hour (Decision R). Runs use `examples/shakespeare.cr` on `BLAS`, with AdamW and a cosine schedule from 1e-3 to 1e-4:
 
 Model                                   |Params|Tokens per step|ms per step|Steps|Wall time|Validation loss, nats/char        
@@ -841,7 +903,7 @@ Allocation, with `GC_UNMAP_THRESHOLD` unset|3.6 s              |0.9 s, with `GC_
 - **Model weights load as `F32` only.** `F16` and quantised weights arrive with M9.
 - **The KV cache grows by copying** (`Tensor.cat`), which is quadratic over a long generation and is half of decode time on `BLAS`.
 - **One device per op.** Moving data needs an explicit `to`, which goes through host memory.
-- **Only what is written as a kernel is fused.** `gelu` is one kernel; `softmax`, `layernorm` and the attention's scale and mask are still several primitives each, until the fused row ops (M7 part 5) and the models' move onto kernels (M7 part 6).
+- **Only what is written as a kernel or a fused row op is fused.** `gelu`, `softmax`, `log_softmax` and `layernorm` are one op each; the attention's scale and mask, residual adds and biases are still separate primitives, until the models move onto kernels (M7 part 6).
 - **Each scalar operand is a new leaf,** uploaded to the device once per use.
 - **Buffer reuse waits for the collector.** A freed buffer returns to its pool only when the collector finalizes it, so a loop that does not collect between steps reuses less (see "Buffer pool").
 - **Gradients of gradients** are built by the same rules, but are not tested.

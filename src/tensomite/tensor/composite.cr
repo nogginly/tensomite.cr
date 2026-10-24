@@ -2,13 +2,19 @@ module Tensomite
   struct Tensor
     # Returns the softmax along *axis*: `exp(x - max) / sum(exp(x - max))`.
     # Subtracting the maximum keeps `exp` from overflowing without changing the result.
+    #
+    # Along the last axis it is one fused op (`Op::Softmax`), which computes what
+    # the composite computes, operation for operation, on host devices.
     def softmax(axis : Int32 = -1) : Tensor
+      return row_op(Op::Softmax) if fusable_row?(axis)
       e = (self - max(axis, keepdims: true)).exp
       e / e.sum(axis, keepdims: true)
     end
 
     # Returns the log of the softmax along *axis*: `x - max - log(sum(exp(x - max)))`.
+    # Fused along the last axis, as `#softmax` is.
     def log_softmax(axis : Int32 = -1) : Tensor
+      return row_op(Op::LogSoftmax) if fusable_row?(axis)
       shifted = self - max(axis, keepdims: true)
       shifted - shifted.exp.sum(axis, keepdims: true).log
     end
@@ -34,7 +40,16 @@ module Tensomite
     # Returns layer normalisation over the last axis: each row is shifted to mean 0,
     # scaled to variance 1, then multiplied by *weight* and offset by *bias*, both of
     # shape `[last]`.
+    #
+    # With `F32` data and *weight* and *bias* of shape `[last]`, it is one fused op
+    # (`Op::LayerNorm`), which computes what the composite computes, operation for
+    # operation, on host devices.
     def layernorm(weight : Tensor, bias : Tensor, eps : Number = 1e-5) : Tensor
+      if fusable_row?(-1) && weight.shape == [shape[-1]] && bias.shape == [shape[-1]]
+        check_compatible("layernorm", {weight, bias})
+        srcs = [self, weight.expand(shape), bias.expand(shape)]
+        return Tensor.lazy(Node.new(Op::LayerNorm, srcs, shape, dtype, device, epsilon: eps.to_f32))
+      end
       centred = self - mean(-1, keepdims: true)
       variance = (centred * centred).mean(-1, keepdims: true)
       centred / (variance + eps).sqrt * weight + bias
@@ -62,6 +77,16 @@ module Tensomite
         j > i + past ? -Float32::INFINITY : 0f32
       end
       from(data, [rows, cols], device)
+    end
+
+    # True when an op along *axis* can be fused: `F32` data, the last axis, and a
+    # row with at least one element.
+    private def fusable_row?(axis : Int32) : Bool
+      dtype.f32? && ndim > 0 && view.normalize_axis(axis) == ndim - 1 && shape[-1] > 0
+    end
+
+    private def row_op(op : Op) : Tensor
+      Tensor.lazy(Node.new(op, [self], shape, dtype, device))
     end
   end
 end
