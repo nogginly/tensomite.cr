@@ -967,6 +967,20 @@ all GPU work                    |69.0      |22.1     |             |
 - **64×64 blocks win everywhere it matters.** In `bench/matmul.cr`, 32×32 and 32×64 blocks were slower on every large product, including the narrow ones.
 - **Products with 768 output columns are the gap left** (Decision AG). A 128 × 768 output is 24 blocks of 64×64, too few to occupy the GPU, and each walks all of `k` alone; mlp out and attention out are 43% of the prefill now. Splitting `k` across threadgroups would fill the GPU, but split-K's left fold, `((c0 + c1) + c2) + …`, means each chunk's sum would have to be stored and folded by a second kernel, about 19 MB of scratch for mlp out, for an estimated 3 of 22 ms.
 
+**M7's exit runs** (M5 Pro, `main` after part 8; `bench/gpt2.cr` times prefill warm, as the median of five):
+
+Device                 |Prefill of 64 tokens, tokens/s|Decode, tokens/s
+-----------------------|------------------------------|----------------
+`BLAS`                 |2,419                         |166.4           
+Metal, `Split`         |1,732                         |198.5           
+Metal, `Atomic`        |1,988                         |186.6           
+Metal, `Tiled`         |3,681                         |65.9            
+Metal, `Auto` (default)|**3,684**                     |**186.1**       
+
+- **Metal now leads on both counts:** 1.12 times `BLAS` at decode and 1.52 times at a 64-token prefill. At 128 tokens, where the tiled matmul has more rows to share, `bench/profile_gpt2.cr --prefill 128` gives 5,296 tokens/s.
+- **A decoded token takes 5.07 ms** of wall time, 4.77 ms of it GPU work, in 316 dispatches and 5 command buffers.
+- **`Tiled` alone decodes slowly** (66 tokens/s), because one row fills a sixty-fourth of a block; `Auto` sends such products to `Split`. The spread between `Split`, `Atomic` and `Auto` at decode, 186 to 199 tokens/s, is mostly run-to-run noise: they run the same kernels there.
+
 **Training step in the Linux container through M7** (the 0.8M-param model, 30 steps, identical losses):
 
 Build                             |ms per step

@@ -4,17 +4,20 @@ What the next session, or the next person, needs in order to carry on without th
 
 **Keeping it current.** Rewrite it rather than appending to it: at the end of each PR, and whenever a session's context passes about 70%. Anything that belongs in one of the other three documents goes there instead.
 
-*Last rewritten: 24 Oct 2026, with M7 part 8 open.*
+*Last rewritten: 24 Oct 2026, with M7's exit recorded and M8 next.*
 
 ## Where things stand
 
-- **On `main`:** milestones 1 to 6, and M7 parts 1 to 7. That covers the lazy tensor core, the CPU op set and `SimDiscrete`, the BLAS seam, GPT-2 inference verified against PyTorch, autograd with SGD, AdamW and a Shakespeare trainer, and the `Metal` device. From M7 it adds parallel reductions on Metal, a thread-safe buffer pool with batched commits, kernel macros, fused row ops, vectorised host loops with tensomite's own `exp`, `log` and `tanh`, and graph diagrams with scopes. CI runs on Linux and macOS (the macOS runner has a GPU), and Decisions A–AG are recorded in `PLAN.md`.
-- **M7 exit criteria:** fewer dispatches per token (met: 710 down to 316), Metal beating BLAS at decode (met on the M5 Pro: 188 against 160 tokens/s), macro kernels matching their oracles and passing finite differences (met), and Shakespeare below 1.6 nats/char within an hour in the Linux container (Decision R; met in part 6: 1.573 at step 2,749, 20 minutes).
-- **Open PR:** M7 part 8 on `m7-matmul`: a tiled Metal matmul that adds in split-K's order, so the two give the same bits (Decision AD), chosen automatically for products of 16 rows or more. A 128-token prefill fell from 69 to 22 ms of GPU time: 5,539 tokens/s against BLAS's 2,010 (Decision AF met). Products with 768 output columns stay slower than Accelerate (Decision AG). Prefill can now be profiled by shape (`bench/profile_gpt2.cr --prefill N`).
-- **A race fixed in part 6:** finalizers run on Crystal's monitor thread as well as the main one, and the buffer pools (host and Metal) were not safe across threads. It crashed an exit run at step 749, and `gpt2_spec` about once in 30 runs; with an atomic try-lock, 210 runs passed.
+- **On `main`:** milestones 1 to 7. That covers the lazy tensor core, the CPU op set and `SimDiscrete`, the BLAS seam, GPT-2 inference verified against PyTorch, autograd with SGD, AdamW and a Shakespeare trainer, and the `Metal` device. M7 added parallel reductions on Metal, a thread-safe buffer pool with batched commits, kernel macros, fused row ops, vectorised host loops with tensomite's own `exp`, `log` and `tanh`, graph diagrams with scopes, and a tiled matmul with split-K's bits. CI runs on Linux and macOS (the macOS runner has a GPU), and Decisions A–AG are recorded in `PLAN.md`.
+- **M7's exit, met** (evidence under M7 in `PLAN.md`):
+  - 316 dispatches per decoded GPT-2 token, from 710;
+  - Metal decodes at 186 tokens/s against BLAS's 166, and prefills 64 tokens at 3,684 against 2,419;
+  - macro kernels match their oracles and their gradients pass finite differences;
+  - Shakespeare reached 1.573 nats/char in 20 minutes in the Linux container.
+- **Open PR:** M7 part 9 on `m7-exit`: the exit record, this rewrite, and `scripts/emulate_metal/`, a reference for checking Metal kernels on the CPU.
+- **Next: M8, Vulkan.** Before planning it, settle where its kernels run. Its exit needs a Linux machine with a discrete GPU, and neither the cloud container (no GPU) nor the maintainer's Mac has one. The options to weigh include a cloud GPU runner for CI, a machine of the maintainer's, and MoltenVK on the Mac for development (Decision G chose native Metal for macOS, but that does not forbid testing Vulkan code there).
 - **A long-term goal:** inspecting running models (activations, attention, gradients) by the names of their parts; see "Inspectable" in `PLAN.md` and "Towards inspection" in `DESIGN.md`. Scopes are its first piece, and Decision AA must keep inspected nodes alive.
-- **Left in M7:** part 9, recording the exits: fewer dispatches per token (710 to 316), Metal faster than BLAS at decode (184–188 against 172–178 tokens/s) and now at prefill, macro kernels matching their oracles, and training below 1.6 nats/char in 20 minutes. The rest of part 6's fusions are optional (Decision Z), and epilogues were dropped (Decision AE). After M7: Decision AA, planned buffer release.
-- **Deferred:** Decision D, CPU threads: not needed for M7. Decision AA, planned buffer release: after part 8.
+- **Deferred:** Decision D, CPU threads (not needed for M7's exits). Decision AA, releasing buffers as soon as their last reader has run.
 
 ## Working agreements
 
@@ -32,13 +35,16 @@ Claims              |Measured before stated. Several assumptions were wrong when
 
 ## Follow-ups found on the way
 
-Item                                   |Why                                                                                                    |Where it fits                    
----------------------------------------|-------------------------------------------------------------------------------------------------------|---------------------------------
-Preallocated KV cache, written in place|`Cat` still copies the whole cache every token, though in runs now                                     |Any time; small                  
-Fewer passes over memory               |A pass costs 0.7 ns per element in training now, against 2.8 before part 6; fusion still saves the pass|M7 (fusion)                      
-Parallel host kernels                  |Training is bound by elementwise passes                                                                |Decision D                       
-Reuse scalar leaves                    |Each `x * 0.5` uploads a new rank-0 tensor                                                             |M7 (kernel macros remove most)   
-`Int32` element counts                 |Caps one tensor at 2 GiB                                                                               |Before models with larger tensors
+Item                                   |Why                                                                                                                                                                            |Where it fits                                         
+---------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------
+Preallocated KV cache, written in place|`Cat` still copies the whole cache every token, though in runs now                                                                                                             |Any time; small                                       
+Narrow Metal matmuls                   |Products with 768 output columns run at about 950 GFLOP/s, Accelerate's half; splitting `k` across threadgroups in split-K's order means storing each chunk's sum (Decision AG)|When prefill matters again                            
+Hardware matrix instructions           |`simdgroup_matrix` (and the M5's GPU matrix units, I think) could beat the tiled kernel, but their order of addition is unspecified                                            |An opt-in mode with relaxed determinism, like `Atomic`
+Planned buffer release                 |Lower peak memory, and buffer lifetimes independent of the collector (Decision AA)                                                                                             |After M7                                              
+Fewer passes over memory               |A host pass costs 0.7 ns per element in training; the remaining fusions (attention's scale and mask, AdamW, bias adds) would save some                                         |Optional (Decision Z)                                 
+Parallel host kernels                  |Training is bound by elementwise passes                                                                                                                                        |Decision D                                            
+Reuse scalar leaves                    |Each `x * 0.5` uploads a new rank-0 tensor                                                                                                                                     |Any time; kernel macros removed most                  
+`Int32` element counts                 |Caps one tensor at 2 GiB                                                                                                                                                       |Before models with larger tensors                     
 
 ## Environment
 
@@ -52,12 +58,15 @@ Nothing persists between containers except what is pushed. Setting one up from s
 4. **Python, for fixtures only:** a venv with Python 3.13 (PyTorch has no wheels for 3.15), then `pip install torch transformers tokenizers safetensors`. Keep the venv in the scratchpad, not the repo.
 5. **GPT-2 small:** `scripts/fetch_gpt2.sh models/gpt2`.
 6. **Diagram checks:** `PUPPETEER_EXECUTABLE_PATH=/opt/pw-browsers/chromium PUPPETEER_SKIP_DOWNLOAD=1 scripts/check_diagrams.sh`.
+7. **Metal kernels without a Mac:** `scripts/emulate_metal/run.sh` compiles the matmul kernels as C++ and checks the tiled ones against split-K. The Metal compiler itself runs only on macOS: in CI's macOS job, or on the maintainer's machine. CI runs only on pull requests, so open a draft PR to get a kernel compiled early.
 
 **Network.** Outbound HTTPS goes through a policy proxy. A 403 means the host is not allowed, so don't retry; ask for it to be added. Hugging Face needs all three entries: `huggingface.co`, `*.huggingface.co` and `*.hf.co`. A wildcard does not cover the bare domain, and large files redirect to a `*.hf.co` CDN. PyPI and GitHub are allowed by default.
 
 **Training data:** `scripts/fetch_shakespeare.sh` (from GitHub raw, allowed by default).
 
 **High `sys` time** in training is OpenBLAS's threads busy-waiting, not the collector; `OPENBLAS_NUM_THREADS=1` removes it.
+
+**Specs run in random order** (`ops test_specs`); a run ends with `Randomized with seed: N`, and `crystal spec --order N` replays it.
 
 **Long runs.** Start them with `nohup … &` and a log in the scratchpad, then wait with a background `until grep -q … log; do sleep 30; done`; a foreground `sleep` is blocked. The container is reclaimed when the session goes idle, which kills background jobs: a run of several hours survives only while the session is active, so run those on the maintainer's machine.
 

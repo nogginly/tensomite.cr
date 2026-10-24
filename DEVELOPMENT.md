@@ -86,7 +86,7 @@ src/tensomite/bpe.cr, sampler.cr               tokeniser and sampling
 src/tensomite/models/       one file per model architecture
 spec/                       specs, one file per type or kind of op
 spec/fixtures/              reference outputs and small reference files (see below)
-scripts/                    fixture generation and model download
+scripts/                    fixture generation, model download, document checks, and emulate_metal/ (Metal kernels on the CPU)
 bench/                      benchmarks, run with --release
 examples/                   programs using the library, such as training on Shakespeare and TUTORIAL.md's multiply.cr
 models/, data/              downloaded weights and datasets (git-ignored)
@@ -210,7 +210,7 @@ crystal build --cross-compile --target aarch64-apple-darwin spec/gpu_spec.cr spe
 
 type-checks and generates code for the Metal path without linking it, so mistakes in Crystal surface before a Mac is involved. The MSL in `metal/kernels.metal` is compiled by the driver only when a `Metal` device is created, so it is checked only on a Mac: `crystal spec spec/metal_spec.cr spec/gpu_spec.cr`. A compile error is raised as `DeviceError`, with the compiler's message.
 
-**Kernels on Linux.** MSL is close enough to C++ that a kernel can be run on the CPU before it reaches a GPU: compile its source with `g++ -std=c++20` behind a few defines (`kernel`, `device` and `constant` empty, `threadgroup` as `static`), run each threadgroup's threads as `std::thread`s, and make `threadgroup_barrier` a `std::barrier`. That checks indexing and order of arithmetic, though not MSL's own rules, such as matching widths of position attributes.
+**Kernels on Linux.** MSL is close enough to C++ that a kernel can be run on the CPU before it reaches a GPU: compile its source with `g++ -std=c++20` behind a few defines (`kernel`, `device` and `constant` empty, `threadgroup` as `static`), run each threadgroup's threads as `std::thread`s, and make `threadgroup_barrier` a `std::barrier`. That checks indexing and order of arithmetic, though not MSL's own rules, such as matching widths of position attributes. `scripts/emulate_metal/run.sh` does this for the matmul kernels, checking every tiled variant against split-K bit for bit; it is a reference, not part of CI, and the pattern carries over to other kernels.
 
 CI runs the specs on macOS too. A hosted runner may have no usable GPU, in which case the Metal specs are pending rather than failing.
 
