@@ -236,6 +236,7 @@ flowchart TD
 
 ## Documents
 
+- **`GUIDE.md` and `TUTORIAL.md` explain plainly,** for people using the library: no analogies or figurative wording, only what the code does and why.
 - **Tables** have no outer pipes, with columns padded to equal width:
 
   ```
