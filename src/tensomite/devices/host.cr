@@ -129,8 +129,8 @@ module Tensomite
       (dst.size // run).times do |run_index|
         base = run_index * run
         pa, pb = a.view.offset_of(base), b.view.offset_of(base)
-        raise IndexError.new unless 0 <= pa && 0 <= pa + (run - 1) * sa < xs.size
-        raise IndexError.new unless 0 <= pb && 0 <= pb + (run - 1) * sb < ys.size
+        HostDevice.check_run(pa, run, sa, xs.size) { describe(node) }
+        HostDevice.check_run(pb, run, sb, ys.size) { describe(node) }
         left, right, output = xs.to_unsafe + pa, ys.to_unsafe + pb, dst.to_unsafe + base
         if sa == 1 && sb == 1
           run.times { |j| output[j] = yield left[j], right[j] }
@@ -153,7 +153,7 @@ module Tensomite
       (dst.size // run).times do |run_index|
         base = run_index * run
         pos = src.view.offset_of(base)
-        raise IndexError.new unless 0 <= pos && 0 <= pos + (run - 1) * stride < xs.size
+        HostDevice.check_run(pos, run, stride, xs.size) { describe(node) }
         input, output = xs.to_unsafe + pos, dst.to_unsafe + base
         if stride == 1
           run.times { |j| output[j] = yield input[j] }
@@ -213,8 +213,8 @@ module Tensomite
       (src.size // run).times do |run_index|
         base = run_index * run
         pv, ps = view.offset_of(base), src.view.offset_of(base)
-        raise IndexError.new unless 0 <= pv && 0 <= pv + (run - 1) * sv < dst.size
-        raise IndexError.new unless 0 <= ps && 0 <= ps + (run - 1) * ss < xs.size
+        HostDevice.check_run(pv, run, sv, dst.size) { describe(node) }
+        HostDevice.check_run(ps, run, ss, xs.size) { describe(node) }
         output, input = dst.to_unsafe + pv, xs.to_unsafe + ps
         if sv == 1 && ss == 1
           run.times { |j| output[j] += input[j] }
@@ -247,7 +247,7 @@ module Tensomite
         pos = src.view.offset_of(base)
         case node.op
         when Op::Softmax, Op::LogSoftmax
-          raise IndexError.new unless 0 <= pos && 0 <= pos + (n - 1) * stride < xs.size
+          HostDevice.check_run(pos, n, stride, xs.size) { describe(node) }
           row_in, row_out = xs.to_unsafe + pos, dst.to_unsafe + base
           top = row_in[0]
           (1...n).each { |j| top = (v = row_in[j * stride]) > top ? v : top }
@@ -362,6 +362,18 @@ module Tensomite
           end
         end
       end
+    end
+
+    # Raises `IndexError`, described by the block, unless every element of a run of
+    # *count* from *start*, *stride* apart, lies within a buffer of *size* elements.
+    # Kernels check each run once, then read it through pointers.
+    def self.check_run(start : Int32, count : Int32, stride : Int32, size : Int32, & : -> String) : Nil
+      return if 0 <= start && 0 <= start + (count - 1) * stride < size
+      raise IndexError.new("#{yield}: a run of #{count} from #{start}, stride #{stride}, leaves a buffer of #{size}")
+    end
+
+    private def describe(node : Node) : String
+      "#{node.op} #{node.shape} from #{node.srcs.map { |src| "#{src.shape} #{src.view.inspect}" }.join(", ")}"
     end
 
     private def elements(type : T.class, tensor : Tensor) : Slice(T) forall T

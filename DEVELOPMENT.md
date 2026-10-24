@@ -127,6 +127,7 @@ Benchmarks of model speed depend only on shapes, so `bench/gpt2.cr` can run on a
 
 ### Crystal gotchas met so far
 
+- **Finalizers can run on another thread,** concurrently with the main fiber: in Crystal 1.22 the execution-context monitor thread invokes them when it allocates. Anything a finalizer touches needs an atomic guard, and must never wait for it, because a finalizer can also interrupt the holder on its own thread (see `BufferPool`).
 - **`out` is a reserved word** (used for C out-parameters). Don't use it as a variable name. Kernels use `dst`.
 - **Array literals mixing types become unions.** `[1f32, 2, 3]` is `Array(Float32 | Int32)`, which `Tensor.from` rejects. In specs, use the `f32(1, 2, 3)` helper. Elsewhere, use `[1, 2, 3].map(&.to_f32)`.
 - **`Bytes#unsafe_slice_of(T)`** reinterprets a buffer's bytes as `Slice(T)` without copying. It works for structs too: a packed block struct of 18 bytes reads straight out of a buffer.

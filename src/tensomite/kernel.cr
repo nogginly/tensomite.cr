@@ -270,21 +270,19 @@ module Tensomite
           # Checks each run's extent once, then reads through pointers, so that
           # unit-stride runs vectorise.
           base = run_index * run
-          out = dst.to_unsafe + base
+          output = dst.to_unsafe + base
           {% for input, i in inputs %}
             pos{{ i }} = views[{{ i }}].offset_of(base)
-            unless 0 <= pos{{ i }} && 0 <= pos{{ i }} + (run - 1) * stride{{ i }} < xs{{ i }}.size
-              raise IndexError.new
-            end
+            ::Tensomite::HostDevice.check_run(pos{{ i }}, run, stride{{ i }}, xs{{ i }}.size) { "kernel #{name} source {{ i }} #{views[{{ i }}].inspect}" }
             p{{ i }} = xs{{ i }}.to_unsafe + pos{{ i }}
           {% end %}
           if unit
             run.times do |j|
-              out[j] = self.class.eval({{ inputs.map_with_index { |_, i| "p#{i}[j]".id }.splat }})
+              output[j] = self.class.eval({{ inputs.map_with_index { |_, i| "p#{i}[j]".id }.splat }})
             end
           else
             run.times do |j|
-              out[j] = self.class.eval({{ inputs.map_with_index { |_, i| "p#{i}[j * stride#{i}]".id }.splat }})
+              output[j] = self.class.eval({{ inputs.map_with_index { |_, i| "p#{i}[j * stride#{i}]".id }.splat }})
             end
           end
         end
