@@ -59,8 +59,9 @@ module Tensomite
   # At compile time the macro flattens the block into a tape of single
   # operations, in Crystal's own order of evaluation, then generates:
   #
-  # 1. a host loop that computes each operation in `Float32`, as the equivalent
-  #    composite of primitive ops does, so the two give the same bits;
+  # 1. a host loop that computes each operation in `Float32`, with the same
+  #    functions (`Tensomite::Maths`, and `Math.sqrt`) as the host kernels, as the
+  #    equivalent composite of primitive ops does, so the two give the same bits;
   # 2. MSL source with one statement per operation;
   # 3. one gradient kernel per input, by a reverse sweep over the tape.
   #
@@ -250,7 +251,7 @@ module Tensomite
           {% if s[1] == "neg" %}
             {{ s[0].id }} = -{{ operands[0].id }}
           {% elsif %w[tanh exp log sqrt].includes?(s[1]) %}
-            {{ s[0].id }} = Math.{{ s[1].id }}({{ operands[0].id }})
+            {{ s[0].id }} = {{ (s[1] == "sqrt" ? "Math" : "::Tensomite::Maths").id }}.{{ s[1].id }}({{ operands[0].id }})
           {% else %}
             {{ s[0].id }} = {{ operands[0].id }} {{ s[1].id }} {{ operands[1].id }}
           {% end %}
@@ -264,13 +265,27 @@ module Tensomite
         {% for input, i in inputs %}
           xs{{ i }}, stride{{ i }} = srcs[{{ i }}], views[{{ i }}].run_stride
         {% end %}
+        unit = {{ inputs.map_with_index { |_, i| "stride#{i} == 1".id }.join(" && ").id }}
         (dst.size // run).times do |run_index|
+          # Checks each run's extent once, then reads through pointers, so that
+          # unit-stride runs vectorise.
           base = run_index * run
+          out = dst.to_unsafe + base
           {% for input, i in inputs %}
             pos{{ i }} = views[{{ i }}].offset_of(base)
+            unless 0 <= pos{{ i }} && 0 <= pos{{ i }} + (run - 1) * stride{{ i }} < xs{{ i }}.size
+              raise IndexError.new
+            end
+            p{{ i }} = xs{{ i }}.to_unsafe + pos{{ i }}
           {% end %}
-          run.times do |j|
-            dst[base + j] = self.class.eval({{ inputs.map_with_index { |_, i| "xs#{i}[pos#{i} + j * stride#{i}]".id }.splat }})
+          if unit
+            run.times do |j|
+              out[j] = self.class.eval({{ inputs.map_with_index { |_, i| "p#{i}[j]".id }.splat }})
+            end
+          else
+            run.times do |j|
+              out[j] = self.class.eval({{ inputs.map_with_index { |_, i| "p#{i}[j * stride#{i}]".id }.splat }})
+            end
           end
         end
       end

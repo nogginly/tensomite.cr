@@ -4,18 +4,15 @@ What the next session, or the next person, needs in order to carry on without th
 
 **Keeping it current.** Rewrite it rather than appending to it: at the end of each PR, and whenever a session's context passes about 70%. Anything that belongs in one of the other three documents goes there instead.
 
-*Last rewritten: 23 Oct 2026, with M7 under way.*
+*Last rewritten: 24 Oct 2026, with M7 under way.*
 
 ## Where things stand
 
-- **On `main`:** milestones 1 to 6. That covers the lazy tensor core, the CPU op set and `SimDiscrete`, the BLAS seam, GPT-2 inference verified against PyTorch, autograd with SGD, AdamW and a Shakespeare trainer, and the `Metal` device with every `F32` op on the GPU and split-K matmul. CI runs on Linux and macOS (the macOS runner has a GPU), and Decisions A–X are recorded in `PLAN.md`.
-- **M7 plan:** seven PRs, listed under M7 in `PLAN.md`, with Decisions T (row ops are hand-written fused ops), U (a finalizer-fed buffer pool), V (GLSL waits for M8) and W (threads only if training is still too slow).
-- **Open PR:** M7 part 5 on `m7-row-ops`: fused `softmax`, `log_softmax` and `layernorm` (Decision T), bit-identical to their composites on host devices, chunked on Metal, with chunks of 16 and stride indexing on the GPU. On the M5 Pro, Metal decodes at 188 tokens/s against BLAS's 160 in the same run (Decision O's requirement met). A training step fell from 387 to 293 ms; the larger model for Decision R takes 1.1 s a step, about 90 minutes for 5,000 steps.
-- **Part 4 (merged):** kernel macros; `gelu` is one kernel, and decode needs 614 dispatches per token.
-- **Part 3 (merged):** buffer pool and batched commits; Metal decodes at 139 tokens/s against BLAS's 144 in the same run.
-- **Part 2 (merged):** parallel reductions lifted Metal decode from 64 to 105 tokens/s; BLAS is at 152. A decoded token is 10.1 ms, of which 3.2 ms is host work the GPU waits for.
-- **The profile (part 1, M5 Pro):** of 15.7 ms per decoded token, 13.2 ms is waiting for the GPU, of which `Sum` is 7.8 and `MatMul` 3.8; allocation is 1.0, graph building 1.2, encoding 710 dispatches only 0.26.
-- **Deferred:** Decision D, CPU parallelism. Profiling in M5 shows that training is bound by elementwise passes, so D now has a measured case; M7's fusion comes first.
+- **On `main`:** milestones 1 to 6, and M7 parts 1 to 5. That covers the lazy tensor core, the CPU op set and `SimDiscrete`, the BLAS seam, GPT-2 inference verified against PyTorch, autograd with SGD, AdamW and a Shakespeare trainer, and the `Metal` device. From M7 it adds parallel reductions on Metal, a buffer pool with batched commits, kernel macros (`gelu` is one kernel) and fused row ops. CI runs on Linux and macOS (the macOS runner has a GPU), and Decisions A–X are recorded in `PLAN.md`.
+- **M7 exit criteria:** fewer dispatches per token (met: 710 down to 316), Metal beating BLAS at decode (met on the M5 Pro: 188 against 160 tokens/s), macro kernels matching their oracles and passing finite differences (met), and Shakespeare below 1.6 nats/char within an hour in the Linux container (Decision R; not yet run).
+- **Open PR:** M7 part 6 on `m7-fused-models`: tensomite's own `exp`, `log` and `tanh` (Decision Y), and host loops that read through pointers after one bounds check per run, so they vectorise. A training step on the small model fell from 313 to 133 ms; the larger model for Decision R from 1,130 to 542 ms, about 45 minutes for 5,000 steps. The first attempt, own maths alone, made training *slower*; the profile showed why (see "Performance baselines" in `DESIGN.md`).
+- **Left in M7:** the rest of part 6 (attention's scale and mask, AdamW, bias adds as kernels) now looks optional for Decision R; part 7, matmul epilogues and tiling; part 8, the exit runs.
+- **Deferred:** Decision D, CPU threads, for which Decision W waits on part 6's measurements. At 45 minutes it may not be needed for M7.
 
 ## Working agreements
 
@@ -27,20 +24,19 @@ Stacked PRs         |When asked. The later PR's base is the earlier branch; GitH
 Merging             |The maintainer merges, by squash or by merge commit. After a squash, merge `main` into a stacked branch and resolve conflicts with the branch's side; never rewrite history or force-push (the session blocks it anyway).
 Milestones          |Each ends with its exit criterion passing, with the evidence (numbers, logs) in the PR description.                                                                                                                      
 Documents           |Updated in the same PR as the code (see "Workflow" in `DEVELOPMENT.md`). Tables and diagrams follow "Documents" in `DEVELOPMENT.md`; check them with `scripts/format_tables.py` and `scripts/check_diagrams.sh`.         
-Decisions           |Labelled with letters and recorded in `PLAN.md`. The next is **Y**; T to X shape M7. P (how to get GPT-2 small's fixtures) was settled by allowing Hugging Face; Q made this document committed.                         
+Decisions           |Labelled with letters and recorded in `PLAN.md`. The next is **Z**; T to Y shape M7. P (how to get GPT-2 small's fixtures) was settled by allowing Hugging Face; Q made this document committed.                         
 Understanding checks|Short questions labelled Q-A, Q-B and so on, after explaining something new. The next is **Q-T**.                                                                                                                        
 Claims              |Measured before stated. Several assumptions were wrong when checked: decode time was dominated by the KV cache, not host kernels; GPT-2's file was unaligned. Say "I think" when something is unverified.                
 
 ## Follow-ups found on the way
 
-Item                                   |Why                                                                           |Where it fits                    
----------------------------------------|------------------------------------------------------------------------------|---------------------------------
-Preallocated KV cache, written in place|`Cat` still copies the whole cache every token, though in runs now            |Any time; small                  
-Buffer reuse                           |Training allocates hundreds of MB per step; the GC's unmapping doubled a step |M7 (memory planning)             
-Fewer passes over memory               |A dense pass costs 2.4 ns per element in training, against 0.45 ns when cached|M7 (fusion)                      
-Parallel host kernels                  |Training is bound by elementwise passes                                       |Decision D                       
-Reuse scalar leaves                    |Each `x * 0.5` uploads a new rank-0 tensor                                    |M7 (kernel macros remove most)   
-`Int32` element counts                 |Caps one tensor at 2 GiB                                                      |Before models with larger tensors
+Item                                   |Why                                                                                                    |Where it fits                    
+---------------------------------------|-------------------------------------------------------------------------------------------------------|---------------------------------
+Preallocated KV cache, written in place|`Cat` still copies the whole cache every token, though in runs now                                     |Any time; small                  
+Fewer passes over memory               |A pass costs 0.7 ns per element in training now, against 2.8 before part 6; fusion still saves the pass|M7 (fusion)                      
+Parallel host kernels                  |Training is bound by elementwise passes                                                                |Decision D                       
+Reuse scalar leaves                    |Each `x * 0.5` uploads a new rank-0 tensor                                                             |M7 (kernel macros remove most)   
+`Int32` element counts                 |Caps one tensor at 2 GiB                                                                               |Before models with larger tensors
 
 ## Environment
 
@@ -83,7 +79,7 @@ Matmul and fusion            |Matmul reuses inputs, so it is tiled; only its epi
 Online softmax               |A running maximum with rescaling by `exp(m − m')` lets softmax work tile by tile, as in FlashAttention.                           |Q-G            
 Associativity and determinism|Float addition order changes the bits. Levels 1, 2 and 3 of Decision K.                                                           |Q-H, Q-I       
 Prefix caching               |Why level 2 matters: a cache hit must give the same bits as recomputing.                                                          |Q-I            
-Auto-vectorisation           |`Slice` vectorises and `Array` does not; float sums do not reorder; integer sums do.                                              |none           
+Auto-vectorisation           |Loops over `Slice` vectorise only without per-element bounds checks or opaque calls (libm); float sums do not reorder.            |none           
 Loop-carried dependencies    |Vectorise across independent outputs; a running total can't be split without reordering.                                          |Q-O            
 Quantised dot products       |Q4 × Q8 in integers vectorises and is exact within a block.                                                                       |none           
 Where BLAS's speed comes from|Bookkeeping, loop order, register and cache blocking, threads, matrix units: factors that multiply.                               |Q-N            
