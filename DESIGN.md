@@ -759,6 +759,24 @@ GPU time in elementwise ops and `Cat`, ms                  |1.76  |2.10
 - **Matmul is now the largest GPU cost, at 54%.** Elementwise ops, about 2 ms over 500 dispatches, are what fusion removes.
 - **`BLAS` decodes at 6.6 ms per token.** Metal is at 9.5, so about 3 ms is left to find.
 
+**After the buffer pool and batched commits** (M7 part 3, M5 Pro):
+
+Measure                          |Part 2|Part 3
+---------------------------------|------|------
+Metal decode, tokens/s (split)   |104.9 |138.6 
+`BLAS` decode, tokens/s, same run|151.7 |144.0 
+Metal prefill, tokens/s (split)  |1,279 |1,521 
+Wall per decoded token, ms       |10.14 |6.98  
+of which waiting for the GPU     |6.98  |5.23  
+allocating buffers               |1.29  |0.60  
+everything else on the host      |1.53  |0.78  
+Command buffers per token        |1     |12    
+GPU time, each op alone, ms      |7.44  |6.78  
+
+- **The host now overlaps the GPU.** The wall time (6.98 ms) is less than the GPU's own work timed op by op (6.78 ms) plus the host's (1.74 ms), because the GPU starts on each batch of 64 dispatches while the host encodes the next.
+- **Metal decodes within 4% of `BLAS`** in the same run, and prefills 1.7 times as fast. `BLAS` itself varies by about 5% between runs (144 to 153 tokens/s), so the M7 exit compares the two within one run.
+- **What is left is GPU work:** matmul 3.8 ms, and about 2 ms of small elementwise dispatches, which fusion removes.
+
 **Training a character-level GPT on Tiny Shakespeare, Linux container.** The M5 exit is a validation loss below 1.8 within an hour here, and M7's is below 1.6 within an hour (Decision R). Runs use `examples/shakespeare.cr` on `BLAS`, with AdamW and a cosine schedule from 1e-3 to 1e-4:
 
 Model                                   |Params|Tokens per step|ms per step|Steps|Wall time|Validation loss, nats/char        
