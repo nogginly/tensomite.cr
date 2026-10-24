@@ -594,11 +594,33 @@ flowchart LR
 ```
 
 - **`SGD`**: `p - lr·v`, where `v` is `g` or, with momentum, `momentum·v + g`.
-- **`AdamW`**: Adam with decoupled weight decay and bias correction. `lr` can be changed between steps for a schedule. Params that should not decay, such as norms and biases, are given to a second `AdamW` with `weight_decay: 0`.
+- **`AdamW`**: Adam with decoupled weight decay and bias correction. `lr` can be changed between steps for a schedule. Given tensors, every param decays, so params that should not, such as norms and biases, go to a second `AdamW` with `weight_decay: 0`; given `Parameter`s, each one's `decay?` flag decides.
+- **Over parameters.** Created with a model's `Parameter`s (see "Modules"), an optimizer's `step(loss)` does the whole loop in the diagram's order: lazy gradients, then reading the loss, then the update, stored back into each parameter's slot. It is the same arithmetic as `step(params, grads)`, to the bit (`spec/module_spec.cr`).
 
 ### Cross-entropy
 
 `logits.cross_entropy(targets)` is the mean of `-log_softmax(logits)[row, target]` over rows. `log_softmax` is `x - max - log(Σ exp(x - max))`, which never takes the log of an underflowed probability. The entries are picked by `gather` from the log-probabilities flattened to a `[rows × classes, 1]` table, with indices `row × classes + target` computed on the host. So the targets are realised when the op is built, and the gradient arrives through the `Gather` rule.
+
+## Modules
+
+`Tensomite::Module` (`src/tensomite/module.cr`) is how models are written: a class whose instance variables hold its parts and whose `forward` combines them (Decisions AH to AM). The built-in parts are in `src/tensomite/modules.cr`.
+
+```mermaid
+flowchart TB
+    Model["Multiplier < Module"] --> H1["@hidden1 : Linear"]
+    Model --> H2["@hidden2 : Linear"]
+    Model --> Out["@output : Linear"]
+    H1 --> W1["@weight : Parameter [2, 64]"]
+    H1 --> B1["@bias : Parameter? [64]"]
+```
+
+- **Parameters are slots (Decision AI).** A `Parameter` holds a tensor, a name and a weight-decay flag. Tensors stay immutable; an optimizer replaces the tensor in each slot. Setting a value names the tensor after the parameter, so diagrams show `hidden1.weight`.
+- **Parts are found at compile time (Decision AJ).** `Module#each_child` is a macro loop over the subclass's instance variables, as `JSON::Serializable` loops over fields. Variables typed `Parameter`, `Module`, `Array` of either, or nilable versions, are parts, named after the variable, with `.i` for array members. Crystal lists declared variables (`@blocks : Array(Block)`) before inferred ones, which fixes the order of `params`; arrays need such a declaration, because Crystal cannot infer a type from `Array.new(n) { ... }`.
+- **Names and tied weights.** `named_params` walks the tree depth first and names each parameter by its path. A parameter reached twice, as tied embeddings are, is listed once, under its first path.
+- **`call` and scopes.** `call(*args, **options)` names each child module's scope after its variable, without an array index, so the members of an array share a name and fold in diagrams. Then it runs `forward` inside the module's own scope; the root module has none. `Sequential` names its steps' scopes by kind instead (`linear`, `gelu`).
+- **`Layer`** is a `Module` whose `forward` takes one tensor and returns one, which is what `Sequential` holds. A method called on a value of the base type is compiled for every subclass, so `Sequential` cannot hold any `Module`: a transformer block's `forward(x, mask)` would fail to compile there.
+- **Initialisation (Decision AK).** Modules draw from `rng:`, by default `Tensomite.rng`, seeded with 0, so a program builds the same model every run. `Linear` draws uniformly from ±1/√inputs, PyTorch's default, and `Embedding` from a normal distribution with standard deviation 0.02, GPT-2's. Normal values use the Box–Muller transform exactly as `examples/shakespeare.cr` does, so that model can move onto modules with the same weights.
+- **Bit-identical to hand-written models.** The tutorial's model, rewritten on modules, gives the same loss bits for all 2,000 steps, and the same answers, as the tensor version: the operations and the draws from the generator are the same, in the same order.
 
 ## Graph diagrams
 

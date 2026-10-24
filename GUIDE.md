@@ -201,6 +201,87 @@ flowchart LR
 
 A long training run should call `GC.collect` once per step. Freed device memory goes back to a pool when the collector runs, so collecting once per step lets the next step reuse the last one's buffers.
 
+## Models from modules
+
+Writing a model as tensors means keeping a list of parameters and remembering their order. `Tensomite::Module` does that bookkeeping. A model is a class whose instance variables hold its parts, and whose `forward` combines them:
+
+```crystal
+class Multiplier < Tensomite::Module
+  def initialize
+    @hidden = Linear.new(2, 64)
+    @output = Linear.new(64, 1)
+  end
+
+  def forward(x : Tensor) : Tensor
+    @output.call(@hidden.call(x).gelu)
+  end
+end
+
+model = Multiplier.new
+model.call(Tensor.zeros([3, 2])).shape   # => [3, 1]
+model.named_params.keys                  # => ["hidden.weight", "hidden.bias", "output.weight", "output.bias"]
+```
+
+- **Parts are found at compile time.** Any instance variable holding a `Parameter`, a `Module`, an `Array` of either, or a nilable one, is part of the model, named after the variable. Members of an array are named by position: `blocks.0.norm.weight`.
+- **`forward` defines; `call` runs.** `call` runs `forward` with the same arguments, inside a scope named after the module's place in its parent, so diagrams show one box per part. `forward` can take any arguments.
+- **A `Parameter` is a slot** holding a tensor (`param.value`), with a name and a flag for weight decay. Tensors never change; training replaces the tensor in each slot.
+- **Weights are drawn from `Tensomite.rng`,** a generator seeded with 0, so the same program builds the same model on every run. Each built-in module also takes `rng:` and `device:` arguments.
+
+Built-in module                          |Parameters                                            |`forward`                                            
+-----------------------------------------|------------------------------------------------------|-----------------------------------------------------
+`Linear.new(inputs, outputs, bias: true)`|`weight [inputs, outputs]` (decayed), `bias [outputs]`|`x.matmul(weight) + bias`                            
+`Embedding.new(count, width)`            |`weight [count, width]` (decayed)                     |rows of the weight selected by `I32` ids of any shape
+`LayerNorm.new(width, eps: 1e-5)`        |`weight`, `bias`                                      |`x.layernorm(weight, bias, eps)`                     
+`Activation.gelu`, `Activation.tanh`     |none                                                  |the function                                         
+`Sequential.new(layer, layer, ...)`      |its steps'                                            |each step in turn                                    
+
+`Linear` draws its weight uniformly from ±1/√inputs, and `Embedding` from a normal distribution with standard deviation 0.02. Either takes `init:` to change that: `Init.uniform(bound)`, `Init.normal(std)` or `Init.constant(value)`.
+
+```crystal
+mlp = Sequential.new(Linear.new(2, 64), Activation.gelu, Linear.new(64, 1))
+mlp.named_params.keys   # => ["steps.0.weight", "steps.0.bias", "steps.2.weight", "steps.2.bias"]
+```
+
+`Sequential` holds `Layer`s, modules whose `forward` takes one tensor and returns one. Every built-in module is a `Layer`. A model whose `forward` takes more, such as a transformer block that also takes a mask, inherits from `Module` instead.
+
+**Repeated parts** go in an array, which needs its type declared, because Crystal cannot infer it from `Array.new`:
+
+```crystal
+class Stack < Tensomite::Module
+  @blocks : Array(Block)
+
+  def initialize(layers : Int32, width : Int32)
+    @embed = Embedding.new(100, width)
+    @blocks = Array.new(layers) { Block.new(width) }
+  end
+
+  def forward(ids : Tensor) : Tensor
+    @blocks.reduce(@embed.call(ids)) { |x, block| block.call(x) }
+  end
+end
+```
+
+Parameters are listed in the order the class declares its variables, so `@blocks`, declared above `initialize`, comes before `@embed`. Code that needs a particular parameter should look it up by name.
+
+**Training a module.** Give the optimizer the model's parameters once; then `step(loss)` computes the gradients, reads the loss, replaces each parameter's value, and returns the loss's value:
+
+```crystal
+line = Linear.new(1, 1, bias: false, init: Init.constant(0))
+optimizer = SGD.new(line.params, lr: 0.02)
+100.times do
+  error = line.call(xs) - ys
+  optimizer.step((error * error).mean)
+end
+line.weight.value.to_a(Float32)   # => [2.9999998]
+```
+
+This is the same fit as in "Training", with the same result. `AdamW` applies weight decay only to parameters flagged for it: weight matrices and embeddings, not biases or normalisation parameters.
+
+**Other things modules do:**
+
+- `model.to(device)` moves every parameter to another device.
+- `tensor.to_mermaid(model: model, depth: 1)` draws a summary of the model's parts, with their parameter counts. [The tutorial](TUTORIAL.md) shows one.
+
 ## Devices
 
 Each tensor lives on a device, given by the `device:` argument when it is created. All of an operation's operands must be on the same device; `t.to(device)` copies a tensor to another.
@@ -292,7 +373,7 @@ All of them are subclasses of `Tensomite::Error`.
 ## Current limits
 
 - **Two dtypes:** `F32` and `I32`. Half precision and quantised weights are planned.
-- **No saving yet.** Weights can be read from safetensors files but not written. To keep a trained model, write each parameter's `shape` and `to_a(Float32)` to a file and rebuild them with `Tensor.from`, as [the tutorial](TUTORIAL.md) does with JSON.
+- **No saving yet.** Weights can be read from safetensors files but not written. To keep a trained model, write each named parameter's `shape` and values to a file and load them back by name, as [the tutorial](TUTORIAL.md) does with JSON.
 - **Numbers go on the right** of an operator: `x * 2` works, `2 * x` does not.
 - **One device per operation.** Move tensors with `to` first.
 - **A tensor holds at most about 2 GB,** because element counts are `Int32`.
