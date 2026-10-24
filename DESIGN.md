@@ -868,6 +868,19 @@ of which `Softmax` (12)          |0.51         |0.08
 - **Matmul is 79% of the GPU's time.** The rest is the residual and bias adds, the KV cache's `Cat` and `Copy`, and the fused ops.
 - **Atomic matmul is now slower than the deterministic split in decode** (182.9 against 187.6 tokens/s), so determinism costs nothing there.
 
+**After vectorised host loops and own maths** (M7 part 6, M5 Pro): Metal's kernels are unchanged, but `BLAS` runs every op except matmul on host kernels, which now vectorise.
+
+Measure                          |Part 5|Part 6    
+---------------------------------|------|----------
+Metal decode, tokens/s (split)   |187.63|**183.80**
+`BLAS` decode, tokens/s, same run|160.26|171.56    
+Metal prefill, tokens/s (split)  |1,642 |1,590     
+`BLAS` prefill, tokens/s         |1,240 |**2,349** 
+Wall per decoded token, ms       |4.95  |4.98      
+
+- **Metal still decodes faster, by 7% rather than 17%.** Decision O's requirement holds, with less room.
+- **`BLAS` now prefills half as fast again as Metal.** Prefill is a few large matmuls, where Accelerate is strong and Metal's untiled matmul is not; tiling is M7 part 7.
+
 **Training step in the Linux container through M7** (the 0.8M-param model, 30 steps, identical losses):
 
 Build                             |ms per step
