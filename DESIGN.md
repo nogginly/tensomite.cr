@@ -206,6 +206,7 @@ Reduction |`Sum`, `Max`                          |`sum`, `max`, with optional `a
 Structural|`Copy`, `Cat`, `Gather`, `MatMul`     |`contiguous`, `Tensor.cat`, `gather`, `matmul`                        
 Adjoint   |`GreaterEqual`, `Unview`, `ScatterAdd`|`greater_equal`; the other two only through `Tensomite.grad`          
 Fused     |`Kernel`                              |any `Tensomite.kernel`, such as `gelu`                                
+Row       |`Softmax`, `LogSoftmax`, `LayerNorm`  |`softmax`, `log_softmax` and `layernorm` along the last axis          
 Composite |none: built from the rows above       |`mean`, `softmax`, `log_softmax`, `cross_entropy`, `layernorm`, `gelu`
 
 - **Scalars** become rank-0 leaf tensors of the operand's dtype (`Tensor.scalar`), which then broadcast like any other tensor. So `x * 0.5` is `Mul` of `x` and a broadcast scalar.
@@ -467,6 +468,22 @@ flowchart LR
 5. **Gradients.** A reverse sweep over the tape applies each operation's chain rule: the output's gradient spreads to its operands, and contributions to one value are added in the order the sweep meets them. Each input gets its own gradient kernel, whose inputs are the output's gradient followed by the kernel's inputs. Autograd's rule for `Op::Kernel` applies them, so a kernel needs no hand-written backward. Gradient kernels have no gradients of their own.
 
 The expression language is deliberately small: `+`, `-` (binary and unary), `*`, `/`, number literals, constant paths such as `Math::PI`, and `tanh`, `exp`, `log` and `sqrt`. Anything else fails at compile time with the offending expression. Inputs broadcast like a binary op's, and must be `F32` on one device.
+
+## Fused row ops
+
+`softmax`, `log_softmax` and `layernorm` along the last axis are one primitive each (Decision T), in place of five to eight. Along another axis, or with weights of another shape, they fall back to their composites.
+
+- **On host devices,** each row is one loop that does the composite's operations in the composite's order, so a fused op gives the composite's bits. The composites in `spec/row_ops_spec.cr` are the oracles.
+- **On Metal,** each row gets a threadgroup that makes three passes over it: reduce, write, normalise. The reductions are the chunked ones of "Reductions in chunks", so a softmax row padded with -∞, as a masked attention row is, keeps its bits, and prefill still equals decode. In the last pass, each thread rewrites only the elements it wrote itself.
+- **Backward rules** are built from primitives and checked by finite differences:
+
+  Op         |Gradient of the input
+  -----------|-----------------------------------------------------------------------
+  `Softmax`  |`y · (g - Σ g·y)`, per row
+  `LogSoftmax`|`g - exp(y) · Σ g`, per row
+  `LayerNorm`|`(ĝ - mean(ĝ) - x̂ · mean(ĝ · x̂)) / σ`, with `ĝ = g · weight` and `x̂ = (x - mean) / σ`
+
+  The weight's gradient is `g · x̂` and the bias's is `g`, in the expanded shape, so that accumulating them sums over the rows.
 
 ## Autograd
 
@@ -815,6 +832,17 @@ of which the 12 `gelu`s    |≈0.30 |0.04
 - **`gelu` went from nine dispatches per layer to one,** and from about 25 µs of GPU time per layer to about 3.
 - **The rest of the non-matmul time is mostly inside `layernorm` and `softmax`:** their sums and maxima, and the `Sub`, `Div`, `Sqrt`, `Exp` and `Mul` around them. The fused row ops (part 5) replace each of them with one kernel.
 
+**Training step in the Linux container through M7** (the 0.8M-param model, 30 steps, identical losses):
+
+Build                             |ms per step
+----------------------------------|-----------
+M6                                |744        
+buffer pool, a collection per step|470        
+`gelu` as one kernel              |387        
+fused row ops                     |293        
+
+The larger model Decision R's 1.6 target needs (4 layers, 6 heads, width 192, context 128) went from 1.6 s to 1.1 s a step: about 90 minutes for 5,000 steps, still short of the hour.
+
 **Training a character-level GPT on Tiny Shakespeare, Linux container.** The M5 exit is a validation loss below 1.8 within an hour here, and M7's is below 1.6 within an hour (Decision R). Runs use `examples/shakespeare.cr` on `BLAS`, with AdamW and a cosine schedule from 1e-3 to 1e-4:
 
 Model                                   |Params|Tokens per step|ms per step|Steps|Wall time|Validation loss, nats/char        
@@ -841,7 +869,7 @@ Allocation, with `GC_UNMAP_THRESHOLD` unset|3.6 s              |0.9 s, with `GC_
 - **Model weights load as `F32` only.** `F16` and quantised weights arrive with M9.
 - **The KV cache grows by copying** (`Tensor.cat`), which is quadratic over a long generation and is half of decode time on `BLAS`.
 - **One device per op.** Moving data needs an explicit `to`, which goes through host memory.
-- **Only what is written as a kernel is fused.** `gelu` is one kernel; `softmax`, `layernorm` and the attention's scale and mask are still several primitives each, until the fused row ops (M7 part 5) and the models' move onto kernels (M7 part 6).
+- **Only what is written as a kernel or a fused row op is fused.** `gelu`, `softmax`, `log_softmax` and `layernorm` are one op each; the attention's scale and mask, residual adds and biases are still separate primitives, until the models move onto kernels (M7 part 6).
 - **Each scalar operand is a new leaf,** uploaded to the device once per use.
 - **Buffer reuse waits for the collector.** A freed buffer returns to its pool only when the collector finalizes it, so a loop that does not collect between steps reuses less (see "Buffer pool").
 - **Gradients of gradients** are built by the same rules, but are not tested.

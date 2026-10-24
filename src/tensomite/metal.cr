@@ -62,7 +62,7 @@ module Tensomite
       Op::Exp => "exp_f32", Op::Log => "log_f32", Op::Tanh => "tanh_f32", Op::Sqrt => "sqrt_f32",
       Op::Copy => "copy_f32",
     }
-    private OTHER          = %w[copy_into_f32 sum_f32 max_f32 sum_short_f32 max_short_f32 gather_f32 scatter_add_f32 unview_f32 matmul_f32 matmul_split_f32]
+    private OTHER          = %w[copy_into_f32 sum_f32 max_f32 sum_short_f32 max_short_f32 gather_f32 scatter_add_f32 unview_f32 matmul_f32 matmul_split_f32 softmax_f32 log_softmax_f32 layernorm_f32]
     private OPTIONAL       = %w[fill_zero_f32 matmul_atomic_f32]
     private COLS           =  32
     private SLICES         =   8
@@ -270,26 +270,27 @@ module Tensomite
     # than 8 dimensions, or a view `Unview` cannot invert.
     private def encode(node : Node, output : MetalBuffer) : Bool
       return false unless node.dtype.f32? && node.srcs.all? { |src| src.ndim <= MAX_DIMS }
-      srcs = node.srcs
       case node.op
-      when Op::Sum, Op::Max
-        encode_reduce(node, output)
-      when Op::Cat
-        encode_cat(node, output)
-      when Op::Gather, Op::ScatterAdd
-        encode_rows(node, output)
-      when Op::Unview
-        return false unless encode_unview(node, output)
-      when Op::MatMul
-        encode_matmul(node, output)
-      when Op::Kernel
-        encode_kernel(node, output)
-      else
-        name = srcs.size == 2 ? BINARY[node.op]? : UNARY[node.op]?
-        return false unless name
-        dispatch(name, node.size, srcs.map { |src| mtl(src) } << output.mtl,
-          srcs.map { |src| view_args(src.view) } << u32(node.size))
+      when Op::Sum, Op::Max                           then encode_reduce(node, output)
+      when Op::Cat                                    then encode_cat(node, output)
+      when Op::Gather, Op::ScatterAdd                 then encode_rows(node, output)
+      when Op::Unview                                 then return encode_unview(node, output)
+      when Op::MatMul                                 then encode_matmul(node, output)
+      when Op::Kernel                                 then encode_kernel(node, output)
+      when Op::Softmax, Op::LogSoftmax, Op::LayerNorm then encode_row_op(node, output)
+      else                                                 return encode_elementwise(node, output)
       end
+      true
+    end
+
+    # The elementwise primitives: one thread per element. Returns false for an op
+    # with no elementwise kernel.
+    private def encode_elementwise(node : Node, output : MetalBuffer) : Bool
+      srcs = node.srcs
+      name = srcs.size == 2 ? BINARY[node.op]? : UNARY[node.op]?
+      return false unless name
+      dispatch(name, node.size, srcs.map { |src| mtl(src) } << output.mtl,
+        srcs.map { |src| view_args(src.view) } << u32(node.size))
       true
     end
 
@@ -425,6 +426,25 @@ module Tensomite
           @pipelines[name] = pipeline
         end
         ObjC.release(library)
+      end
+    end
+
+    # Softmax, LogSoftmax and LayerNorm: one threadgroup per row, with a thread per
+    # chunk of the row up to `REDUCE_THREADS`.
+    private def encode_row_op(node : Node, output : MetalBuffer) : Nil
+      n = node.shape.last
+      rows = node.size // n
+      threads = Math.min((n + REDUCE_CHUNK - 1) // REDUCE_CHUNK, REDUCE_THREADS)
+      src = node.srcs.first
+      case node.op
+      when Op::LayerNorm
+        weight, bias = node.srcs[1], node.srcs[2]
+        epsilon = node.epsilon || raise Error.new("layernorm needs an epsilon")
+        dispatch_groups("layernorm_f32", {rows, 1}, {threads, 1}, [mtl(src), mtl(weight), mtl(bias), output.mtl],
+          [view_args(src.view), view_args(weight.view), view_args(bias.view), u32(n), Slice[epsilon].to_unsafe_bytes])
+      else
+        name = node.op == Op::Softmax ? "softmax_f32" : "log_softmax_f32"
+        dispatch_groups(name, {rows, 1}, {threads, 1}, [mtl(src), output.mtl], [view_args(src.view), u32(n)])
       end
     end
 

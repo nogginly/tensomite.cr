@@ -386,3 +386,130 @@ kernel void matmul_atomic_f32(device const float* a [[buffer(0)]],
     atomic_fetch_add_explicit(&dst[out_row * n + col], acc, memory_order_relaxed);
 }
 #endif
+
+// Fused row ops: one threadgroup per row along the last axis. Each pass folds the
+// row's chunks of REDUCE_CHUNK at fixed offsets, a thread per chunk, and the
+// first thread folds the chunk results in chunk order, as the reductions above
+// do, so a row padded with -inf (softmax) keeps its bits. Each thread then
+// rewrites only the chunks it wrote itself.
+//
+// Returns the maximum of row `base` of `n` elements of `a` through `v`.
+static float row_max(device const float* a, constant View& v, uint base, uint n,
+                     threadgroup float* partial, threadgroup float* shared,
+                     uint t, uint threads) {
+    uint chunks = (n + REDUCE_CHUNK - 1) / REDUCE_CHUNK;
+    float top = a[offset_of(v, base)];
+    for (uint first = 0; first < chunks; first += threads) {
+        uint c = first + t;
+        if (c < chunks) {
+            uint stop = min(n, (c + 1) * REDUCE_CHUNK);
+            float acc = a[offset_of(v, base + c * REDUCE_CHUNK)];
+            for (uint s = c * REDUCE_CHUNK + 1; s < stop; s++) {
+                float x = a[offset_of(v, base + s)];
+                acc = x > acc ? x : acc;
+            }
+            partial[t] = acc;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (t == 0) {
+            uint m = min(threads, chunks - first);
+            for (uint k = 0; k < m; k++) top = partial[k] > top ? partial[k] : top;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (t == 0) *shared = top;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    return *shared;
+}
+
+// Returns the sum, in chunk order, of the partial sums each thread puts in
+// `partial` for the chunks it owns, one pass of `threads` chunks at a time.
+#define ROW_SUM(total, chunk_sum)                                              \
+    {                                                                          \
+        uint chunks = (n + REDUCE_CHUNK - 1) / REDUCE_CHUNK;                   \
+        total = 0.0f;                                                          \
+        for (uint first = 0; first < chunks; first += threads) {               \
+            uint c = first + t;                                                \
+            float acc = 0.0f;                                                  \
+            if (c < chunks) {                                                  \
+                uint stop = min(n, (c + 1) * REDUCE_CHUNK);                    \
+                for (uint s = c * REDUCE_CHUNK; s < stop; s++) { chunk_sum }   \
+            }                                                                  \
+            partial[t] = acc;                                                  \
+            threadgroup_barrier(mem_flags::mem_threadgroup);                   \
+            if (t == 0) {                                                      \
+                uint m = min(threads, chunks - first);                         \
+                for (uint k = 0; k < m; k++) total = total + partial[k];       \
+            }                                                                  \
+            threadgroup_barrier(mem_flags::mem_threadgroup);                   \
+        }                                                                      \
+        if (t == 0) shared = total;                                           \
+        threadgroup_barrier(mem_flags::mem_threadgroup);                       \
+        total = shared;                                                       \
+    }
+
+// Visits every element of the chunks this thread owns.
+#define OWN_ELEMENTS(body)                                                     \
+    for (uint c = t; c < (n + REDUCE_CHUNK - 1) / REDUCE_CHUNK; c += threads) {\
+        uint stop = min(n, (c + 1) * REDUCE_CHUNK);                            \
+        for (uint s = c * REDUCE_CHUNK; s < stop; s++) { body }                \
+    }
+
+kernel void softmax_f32(device const float* a [[buffer(0)]],
+                        device float* dst [[buffer(1)]],
+                        constant View& v [[buffer(2)]],
+                        constant uint& n [[buffer(3)]],
+                        uint row [[threadgroup_position_in_grid]],
+                        uint t [[thread_position_in_threadgroup]],
+                        uint threads [[threads_per_threadgroup]]) {
+    threadgroup float partial[REDUCE_THREADS];
+    threadgroup float shared;
+    uint base = row * n;
+    float top = row_max(a, v, base, n, partial, &shared, t, threads);
+    float total;
+    ROW_SUM(total, float e = precise::exp(a[offset_of(v, base + s)] - top); dst[base + s] = e; acc = acc + e;)
+    OWN_ELEMENTS(dst[base + s] = dst[base + s] / total;)
+}
+
+kernel void log_softmax_f32(device const float* a [[buffer(0)]],
+                            device float* dst [[buffer(1)]],
+                            constant View& v [[buffer(2)]],
+                            constant uint& n [[buffer(3)]],
+                            uint row [[threadgroup_position_in_grid]],
+                            uint t [[thread_position_in_threadgroup]],
+                            uint threads [[threads_per_threadgroup]]) {
+    threadgroup float partial[REDUCE_THREADS];
+    threadgroup float shared;
+    uint base = row * n;
+    float top = row_max(a, v, base, n, partial, &shared, t, threads);
+    float total;
+    ROW_SUM(total, float shifted = a[offset_of(v, base + s)] - top; dst[base + s] = shifted; acc = acc + precise::exp(shifted);)
+    float log_total = precise::log(total);
+    OWN_ELEMENTS(dst[base + s] = dst[base + s] - log_total;)
+}
+
+kernel void layernorm_f32(device const float* a [[buffer(0)]],
+                          device const float* w [[buffer(1)]],
+                          device const float* b [[buffer(2)]],
+                          device float* dst [[buffer(3)]],
+                          constant View& v [[buffer(4)]],
+                          constant View& vw [[buffer(5)]],
+                          constant View& vb [[buffer(6)]],
+                          constant uint& n [[buffer(7)]],
+                          constant float& epsilon [[buffer(8)]],
+                          uint row [[threadgroup_position_in_grid]],
+                          uint t [[thread_position_in_threadgroup]],
+                          uint threads [[threads_per_threadgroup]]) {
+    threadgroup float partial[REDUCE_THREADS];
+    threadgroup float shared;
+    uint base = row * n;
+    float count = float(n);
+    float total;
+    ROW_SUM(total, acc = acc + a[offset_of(v, base + s)];)
+    float mean = total / count;
+    float squares;
+    ROW_SUM(squares, float centred = a[offset_of(v, base + s)] - mean; dst[base + s] = centred; float sq = centred * centred; acc = acc + sq;)
+    float variance = squares / count;
+    float deviation = precise::sqrt(variance + epsilon);
+    OWN_ELEMENTS(float scaled = dst[base + s] / deviation; float weighted = scaled * w[offset_of(vw, base + s)]; dst[base + s] = weighted + b[offset_of(vb, base + s)];)
+}

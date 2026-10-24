@@ -53,6 +53,13 @@ require "./spec_helper"
           maxima.call(pad.call(-Float32::INFINITY, 211), 511).should eq maxima.call(xs, 300)
         end
 
+        it "keeps each softmax value when a long row is padded with -inf" do
+          # Masked attention rows differ between prefill and decode only by such padding.
+          padded = pad.call(-Float32::INFINITY, 211)
+          Tensor.from(padded, [3, 511], metal).softmax.slice(1, 0, 300).to_a(Float32)
+            .should eq Tensor.from(xs, [3, 300], metal).softmax.to_a(Float32)
+        end
+
         it "matches the host's maximum exactly" do
           maxima.call(xs, 300).should eq Tensor.from(xs, [3, 300]).max(1).to_a(Float32)
         end
