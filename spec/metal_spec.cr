@@ -177,11 +177,15 @@ require "./spec_helper"
       end
 
       it "reuses the Metal buffers of collected tensors" do
-        20.times { (Tensor.from(f32(1, 2), [2], metal) * 2).realize }
-        5.times { GC.collect }
+        # Collection is conservative and finalizers can run on another thread,
+        # so memory comes back after some collection, not after a known one.
         hits = metal.buffer_pool.hits
-        20.times { (Tensor.from(f32(1, 2), [2], metal) * 2).to_a(Float32).should eq f32(2, 4) }
-        metal.buffer_pool.hits.should be > hits
+        reused = (1..10).any? do
+          20.times { (Tensor.from(f32(1, 2), [2], metal) * 2).to_a(Float32).should eq f32(2, 4) }
+          GC.collect
+          metal.buffer_pool.hits > hits
+        end
+        reused.should be_true
       end
 
       it "shares memory with the host" do
