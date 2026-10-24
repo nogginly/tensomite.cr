@@ -95,6 +95,51 @@ module Tensomite
     # How `MatMul` divides its work; see `MatMulMode`.
     property matmul_mode = MatMulMode::Split
 
+    # Where a `Metal` device's time goes, collected while `Metal#profile` is set.
+    #
+    # ```
+    # metal.profile = Metal::Profile.new
+    # model.forward(ids, cache)
+    # metal.profile.try(&.encode) # => seconds spent encoding dispatches
+    # ```
+    class Profile
+      # True when every op is committed and timed on the GPU on its own. That gives
+      # GPU time per kernel, but adds a round trip per op to the wall time.
+      getter? per_kernel : Bool
+
+      # Count and GPU seconds per kernel; filled only when `#per_kernel?`.
+      getter kernels = Hash(String, {Int32, Float64}).new({0, 0.0})
+
+      # Count and wall seconds per op run on the host.
+      getter host_ops = Hash(String, {Int32, Float64}).new({0, 0.0})
+
+      # Seconds spent encoding dispatches, allocating buffers, and waiting for
+      # command buffers to complete.
+      property encode = 0.0
+      property alloc = 0.0
+      property wait = 0.0
+
+      # Dispatches encoded and command buffers committed.
+      property dispatches = 0
+      property command_buffers = 0
+
+      def initialize(@per_kernel = false)
+      end
+
+      protected def add_kernel(name : String, seconds : Float64) : Nil
+        count, total = kernels[name]
+        kernels[name] = {count + 1, total + seconds}
+      end
+
+      protected def add_host_op(name : String, seconds : Float64) : Nil
+        count, total = host_ops[name]
+        host_ops[name] = {count + 1, total + seconds}
+      end
+    end
+
+    # The profile being collected, or `nil` (the default) for none.
+    property profile : Profile? = nil
+
     @device : Void*
     @queue : Void*
     @pipelines = {} of String => Void*
@@ -114,7 +159,9 @@ module Tensomite
     end
 
     def alloc(bytesize : Int32) : Buffer
-      new_buffer(bytesize)
+      return new_buffer(bytesize) unless profile = @profile
+      start = Time.instant
+      new_buffer(bytesize).tap { profile.alloc += (Time.instant - start).total_seconds }
     end
 
     private def new_buffer(bytesize : Int32) : MetalBuffer
@@ -154,12 +201,20 @@ module Tensomite
     end
 
     def execute(node : Node, output : Buffer) : Nil
+      profile = @profile
+      start = Time.instant if profile
       if encode(node, metal(output))
         @gpu_ops += 1
+        if profile && start
+          profile.encode += (Time.instant - start).total_seconds
+          flush(node.op.to_s) if profile.per_kernel?
+        end
       else
         flush
+        start = Time.instant if profile
         super
         @host_ops += 1
+        profile.add_host_op("#{node.op} #{node.dtype}", (Time.instant - start).total_seconds) if profile && start
       end
     end
 
@@ -334,6 +389,7 @@ module Tensomite
     # Sets kernel *name*'s pipeline on the open encoder and binds its arguments;
     # returns the pipeline.
     private def bind(name : String, buffers : Array(Void*), constants : Array(Bytes)) : Void*
+      @profile.try { |profile| profile.dispatches += 1 }
       pipeline = @pipelines[name]
       encoder = open_encoder
       ObjC.send(Nil, encoder, "setComputePipelineState:", pipeline)
@@ -383,14 +439,27 @@ module Tensomite
     # Commits the open command buffer, if any, and waits for it. Raises
     # `ExecutionError` if the GPU reports a failure, or if a kernel reported an
     # index out of range.
-    private def flush : Nil
+    #
+    # With a per-kernel profile, *label* names the op whose work the command
+    # buffer holds, and its GPU time is recorded under it.
+    private def flush(label : String? = nil) : Nil
       return if @command_buffer.null?
       command_buffer = @command_buffer
       ObjC.send(Nil, @encoder, "endEncoding")
       ObjC.release(@encoder)
       @encoder = @command_buffer = Pointer(Void).null
       ObjC.send(Nil, command_buffer, "commit")
+      profile = @profile
+      start = Time.instant
       ObjC.send(Nil, command_buffer, "waitUntilCompleted")
+      if profile
+        profile.wait += (Time.instant - start).total_seconds
+        profile.command_buffers += 1
+        if label
+          gpu = ObjC.send(Float64, command_buffer, "GPUEndTime") - ObjC.send(Float64, command_buffer, "GPUStartTime")
+          profile.add_kernel(label, gpu)
+        end
+      end
       message = ObjC.autoreleasepool do
         status = ObjC.send(UInt64, command_buffer, "status")
         ObjC.describe(ObjC.send(Pointer(Void), command_buffer, "error")) unless status == STATUS_COMPLETED

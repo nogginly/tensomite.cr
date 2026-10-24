@@ -352,6 +352,8 @@ flowchart LR
 - **Decision S.** Splitting changes the order of additions, so `Split` no longer matches the host bit for bit: `spec/gpu_spec.cr` compares matmuls within 1e-5. Levels 1 and 2 of Decision K still hold, which is what caching and reproducibility need.
 - **No fused multiply-add.** Each product and running sum are separate statements, so the compiler cannot fuse them into one rounding. That is what keeps `Serial` identical to the host.
 
+**Profiling.** Setting `Metal#profile` to a `Metal::Profile` collects where time goes: seconds spent encoding dispatches, allocating and waiting for the GPU, the number of dispatches and command buffers, and the wall time of each op that ran on the host. With `per_kernel: true`, every op is committed alone and its GPU time recorded under its op's name, which slows the run but shows the GPU's own cost per op. `bench/profile_gpt2.cr` prints both for a decoded GPT-2 token.
+
 The atomic kernel needs `atomic_float`, from Metal 3. Without it the device still works, and only `Atomic` raises.
 
 Every op now has an `F32` Metal kernel. `I32` ops, views of more than 8 dimensions and overlapping views run on the host.
@@ -700,6 +702,31 @@ prefill MLP up, 64 rows     |11.851|12.574|11.537|8%
 - **Square matmuls barely change, at 99 GFLOP/s** against Accelerate's 1.3 TFLOP/s on the CPU's matrix units. They already had enough outputs to fill the GPU; they need tiling in threadgroup memory, which comes with M7's matmul epilogues.
 - **About 0.3 ms per realise is fixed cost:** committing a command buffer and waiting for it. It dominates small matrices, and is paid once per decoded token.
 - **With one thread per output (serial), decode left most of the GPU idle:** a 768-wide layer launched 768 threads, each looping over all of `k`.
+
+**Where a decoded token's time goes on Metal** (`bench/profile_gpt2.cr`, M5 Pro, M7 part 1):
+
+Part of the 15.65 ms wall time                                          |ms   |Share
+------------------------------------------------------------------------|-----|-----
+Waiting for the GPU                                                     |13.19|84%  
+Everything else on the host (graph building, scheduling, reading logits)|1.19 |8%   
+Allocating buffers                                                      |1.00 |6%   
+Encoding 710 dispatches                                                 |0.26 |2%   
+
+GPU time per op, each committed alone (13.75 ms in all):
+
+Op        |Per token|GPU ms|Share
+----------|---------|------|-----
+`Sum`     |62       |7.81  |57%  
+`MatMul`  |73       |3.81  |28%  
+`Add`     |159      |0.49  |4%   
+`Mul`     |134      |0.40  |3%   
+`Max`     |12       |0.36  |3%   
+`Div`     |87       |0.30  |2%   
+all others|151      |0.57  |4%   
+
+- **One thread per output is what makes `Sum` slow.** Fifty of the 62 sums are the means inside the 25 layer norms, each a single row of 768: one GPU thread adds 768 numbers in turn, waiting on memory for each, about 126 µs per sum. The other 12 are softmax denominators.
+- **Dispatch overhead is not the problem.** Encoding 710 dispatches costs 0.26 ms, and a small elementwise op about 3 µs of GPU time.
+- **Allocation costs 1 ms a token**, which the buffer pool (Decision U) targets.
 
 **Training a character-level GPT on Tiny Shakespeare, Linux container.** The M5 exit is a validation loss below 1.8 within an hour here, and M7's is below 1.6 within an hour (Decision R). Runs use `examples/shakespeare.cr` on `BLAS`, with AdamW and a cosine schedule from 1e-3 to 1e-4:
 
