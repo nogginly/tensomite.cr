@@ -31,6 +31,33 @@ require "./spec_helper"
         a.gather(ids).matmul(a).sum(1).to_a(Float32).should eq f32(37, 17)
       end
 
+      describe "reductions" do
+        rng = Random.new(9)
+        xs = Array(Float32).new(3 * 300) { rng.rand(-1f32...1f32) }
+        sums = ->(data : Array(Float32), width : Int32) { Tensor.from(data, [3, width], metal).sum(1).to_a(Float32) }
+        maxima = ->(data : Array(Float32), width : Int32) { Tensor.from(data, [3, width], metal).max(1).to_a(Float32) }
+        # Each row of xs, followed by *count* copies of *value*.
+        pad = ->(value : Float32, count : Int32) { xs.each_slice(300).to_a.flat_map { |row| row + Array.new(count, value) } }
+
+        it "gives the same bits on every run" do
+          first = sums.call(xs, 300)
+          3.times { sums.call(xs, 300).should eq first }
+        end
+
+        it "keeps the bits of each sum when a row is padded with zeros" do
+          # Masked attention rows differ between prefill and decode only by such padding.
+          sums.call(pad.call(0f32, 211), 511).should eq sums.call(xs, 300)
+        end
+
+        it "keeps each maximum when a row is padded with -inf" do
+          maxima.call(pad.call(-Float32::INFINITY, 211), 511).should eq maxima.call(xs, 300)
+        end
+
+        it "matches the host's maximum exactly" do
+          maxima.call(xs, 300).should eq Tensor.from(xs, [3, 300]).max(1).to_a(Float32)
+        end
+      end
+
       describe "matmul modes" do
         rng = Random.new(5)
         xs = Array(Float32).new(3 * 200) { rng.rand(-1f32...1f32) }

@@ -11,22 +11,24 @@ end
 # host's order. Inputs cover dense, transposed,
 # broadcast and sliced views.
 EXACT = {
-  "add"            => ->(d : Device) { random(d, [5, 7], 1) + random(d, [7], 2) },
-  "sub"            => ->(d : Device) { random(d, [7, 5], 1).transpose - random(d, [5, 1], 2) },
-  "mul"            => ->(d : Device) { random(d, [5, 9], 1).slice(1, 2, 9) * random(d, [5, 7], 2) },
-  "maximum"        => ->(d : Device) { random(d, [3, 4, 5], 1).maximum(random(d, [4, 5], 2)) },
-  "greater_equal"  => ->(d : Device) { random(d, [6, 6], 1).greater_equal(random(d, [6, 6], 2).transpose) },
-  "copy"           => ->(d : Device) { random(d, [4, 5, 6], 1).permute([2, 0, 1]).contiguous },
-  "scalar"         => ->(d : Device) { random(d, [5, 5], 1) * 0.5 - 2 },
-  "sum"            => ->(d : Device) { random(d, [6, 7], 1).transpose.sum(1) },
-  "sum over all"   => ->(d : Device) { random(d, [3, 4, 5], 1).slice(2, 1, 4).sum },
-  "max"            => ->(d : Device) { random(d, [6, 7], 1).max(0, keepdims: true) },
-  "max over all"   => ->(d : Device) { random(d, [4, 6], 1).transpose.max },
-  "cat"            => ->(d : Device) { Tensor.cat([random(d, [2, 3], 1), random(d, [4, 3], 2)], 0) },
-  "cat of views"   => ->(d : Device) { Tensor.cat([random(d, [3, 2], 1).transpose, random(d, [2], 2).reshape([2, 1]).expand([2, 3])], 1) },
-  "gather"         => ->(d : Device) { random(d, [5, 4], 1).gather(Tensor.from([4, 0, 2, 2], [4], d)) },
-  "gather 2-D ids" => ->(d : Device) { random(d, [6, 3], 1).transpose.contiguous.transpose.gather(Tensor.from([5, 1, 0, 5], [2, 2], d)) },
-  "scatter_add"    => ->(d : Device) {
+  "add"                  => ->(d : Device) { random(d, [5, 7], 1) + random(d, [7], 2) },
+  "sub"                  => ->(d : Device) { random(d, [7, 5], 1).transpose - random(d, [5, 1], 2) },
+  "mul"                  => ->(d : Device) { random(d, [5, 9], 1).slice(1, 2, 9) * random(d, [5, 7], 2) },
+  "maximum"              => ->(d : Device) { random(d, [3, 4, 5], 1).maximum(random(d, [4, 5], 2)) },
+  "greater_equal"        => ->(d : Device) { random(d, [6, 6], 1).greater_equal(random(d, [6, 6], 2).transpose) },
+  "copy"                 => ->(d : Device) { random(d, [4, 5, 6], 1).permute([2, 0, 1]).contiguous },
+  "scalar"               => ->(d : Device) { random(d, [5, 5], 1) * 0.5 - 2 },
+  "sum"                  => ->(d : Device) { random(d, [6, 7], 1).transpose.sum(1) },
+  "sum over all"         => ->(d : Device) { random(d, [3, 4, 5], 1).slice(2, 1, 4).sum },
+  "max"                  => ->(d : Device) { random(d, [6, 7], 1).max(0, keepdims: true) },
+  "max over all"         => ->(d : Device) { random(d, [4, 6], 1).transpose.max },
+  "max of long rows"     => ->(d : Device) { random(d, [3, 1000], 1).max(1) },
+  "max of a long column" => ->(d : Device) { random(d, [700, 3], 1).max(0) },
+  "cat"                  => ->(d : Device) { Tensor.cat([random(d, [2, 3], 1), random(d, [4, 3], 2)], 0) },
+  "cat of views"         => ->(d : Device) { Tensor.cat([random(d, [3, 2], 1).transpose, random(d, [2], 2).reshape([2, 1]).expand([2, 3])], 1) },
+  "gather"               => ->(d : Device) { random(d, [5, 4], 1).gather(Tensor.from([4, 0, 2, 2], [4], d)) },
+  "gather 2-D ids"       => ->(d : Device) { random(d, [6, 3], 1).transpose.contiguous.transpose.gather(Tensor.from([5, 1, 0, 5], [2, 2], d)) },
+  "scatter_add"          => ->(d : Device) {
     table = random(d, [5, 3], 1)
     Tensomite.grad((table.gather(Tensor.from([1, 3, 1, 4, 1], [5], d)) * random(d, [5, 3], 2)).sum, [table]).first
   },
@@ -44,15 +46,19 @@ EXACT = {
   },
 }
 
-# Matrix products, which GPUs may split over k and so add in a different order
-# (Decision S). The inputs give sums of up to 300 terms, hence the wider bound.
-MATMUL = {
-  "matmul"               => ->(d : Device) { random(d, [2, 5, 6], 1).matmul(random(d, [6, 3], 2)) },
-  "matmul of transposes" => ->(d : Device) { random(d, [6, 5], 1).transpose.matmul(random(d, [7, 6], 2).transpose) },
-  "matrix by vector"     => ->(d : Device) { random(d, [1, 64], 1).matmul(random(d, [64, 33], 2)) },
-  "broadcast batch"      => ->(d : Device) { random(d, [4, 5], 1).matmul(random(d, [3, 5, 2], 2)) },
-  "attention shapes"     => ->(d : Device) { random(d, [2, 3, 8], 1).matmul(random(d, [2, 5, 8], 2).transpose) },
-  "long k"               => ->(d : Device) { random(d, [3, 300], 1).matmul(random(d, [300, 40], 2)) },
+# Matrix products and long sums, which GPUs may split and so add in a different
+# order (Decisions S and X). The inputs give sums of hundreds of terms, hence
+# the wider bound.
+SPLIT = {
+  "sum of long rows"      => ->(d : Device) { random(d, [3, 768], 1).sum(1) },
+  "sum over all"          => ->(d : Device) { random(d, [50, 100], 1).transpose.sum },
+  "mean of a long column" => ->(d : Device) { random(d, [500, 4], 1).mean(0) },
+  "matmul"                => ->(d : Device) { random(d, [2, 5, 6], 1).matmul(random(d, [6, 3], 2)) },
+  "matmul of transposes"  => ->(d : Device) { random(d, [6, 5], 1).transpose.matmul(random(d, [7, 6], 2).transpose) },
+  "matrix by vector"      => ->(d : Device) { random(d, [1, 64], 1).matmul(random(d, [64, 33], 2)) },
+  "broadcast batch"       => ->(d : Device) { random(d, [4, 5], 1).matmul(random(d, [3, 5, 2], 2)) },
+  "attention shapes"      => ->(d : Device) { random(d, [2, 3, 8], 1).matmul(random(d, [2, 5, 8], 2).transpose) },
+  "long k"                => ->(d : Device) { random(d, [3, 300], 1).matmul(random(d, [300, 40], 2)) },
 }
 
 # Ops whose GPU results may differ in the last bits: division and transcendental
@@ -86,7 +92,7 @@ describe "GPU devices against the CPU" do
         end
       end
 
-      MATMUL.each do |name, build|
+      SPLIT.each do |name, build|
         it "matches #{name} within 1e-5 relative error" do
           actual = build.call(gpu).to_a(Float32)
           expected = build.call(CPU.default).to_a(Float32)

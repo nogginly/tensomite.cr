@@ -90,12 +90,13 @@ Each milestone is done when its exit criterion passes.
    - Exit: every op matches the CPU oracle, GPT-2 tokens/s is recorded against BLAS (Decision O), prefill and decode logits are bit-identical on Metal, and the cost of the deterministic split-K matvec against an atomic version is measured.
 7. **Kernel macros and memory planning.** `Tensomite.kernel` takes an elementwise expression block and generates, at compile time, a CPU loop and an MSL kernel, plus a backward kernel per input by symbolic differentiation. `softmax`, `log_softmax` and `layernorm` become fused row ops (Decision T). Matmul gains bias and activation epilogues. Buffers are reused through a pool (Decision U). GPT-2's and the trainer's elementwise chains (GELU, scale and mask, residual adds) move onto macros. In PRs:
    1. Profile Metal decode: GPU time per op, and the host's share of each token.
-   2. A buffer pool, on host devices and Metal.
-   3. Kernel macros for elementwise expressions, starting with a spike that settles whether Crystal's macro language can differentiate, or whether generation moves into a `{{ run(...) }}` helper.
-   4. Fused row ops.
-   5. GPT-2 and the trainer on fused kernels, measured.
-   6. Matmul epilogues, and tiling for square products on Metal.
-   7. The exit runs.
+   2. Parallel reductions on Metal (Decision X): the profile put 57% of a decoded token's GPU time in one-thread-per-row sums.
+   3. A buffer pool, on host devices and Metal.
+   4. Kernel macros for elementwise expressions, starting with a spike that settles whether Crystal's macro language can differentiate, or whether generation moves into a `{{ run(...) }}` helper.
+   5. Fused row ops.
+   6. GPT-2 and the trainer on fused kernels, measured.
+   7. Matmul epilogues, and tiling for square products on Metal.
+   8. The exit runs.
    - Exit: dispatch count per GPT-2 token falls measurably, GPT-2 tokens/s on Metal beats BLAS (Decision O), macro kernels match their hand-written CPU oracles, macro gradients pass finite-difference checks, and the char-level Shakespeare model reaches a validation loss below 1.6 nats/char within an hour of training in the 4-core Linux container (Decision R).
 8. **Vulkan backend.** Bind Vulkan compute, and port the hand-written kernels to GLSL compiled at build time. Kernel macros gain a GLSL backend beside Crystal and MSL (Decision V), so fused kernels come with it.
    - Exit: the full op suite matches the oracle on a Linux discrete GPU, and GPT-2 runs there.
@@ -144,6 +145,7 @@ Each milestone is done when its exit criterion passes.
 - **Decision U, how buffers are reused:** a pool fed by finalizers (decided). When the collector frees a buffer, its memory joins a free list by size, and allocation takes from that list first. On Metal, a buffer re-enters the pool only after the command buffer that last used it has completed. Freeing intermediates at their last use within a realisation would be tighter, but is unsafe while a user can hold a `Tensor` over any node.
 - **Decision V, when kernel macros emit GLSL:** in M8, when a Vulkan device can run it (decided). Emitting code that nothing runs invites drift. The emitter is designed with GLSL as a third backend.
 - **Decision W, if M7's training is still too slow:** decided after the fused models are measured in M7. The next lever would be Decision D, CPU threads, with work split independently of thread count.
+- **Decision X, Metal reductions against the CPU's bits:** Metal's `Sum` of a long run folds it in chunks of 64 in parallel, so it may differ from the CPU in the last bits (decided). The rules of Decision S apply: chunks sit at fixed offsets and combine in chunk order, so bits repeat from run to run and do not change when a row is padded with zeros. `Max` is exact in any order, and runs of one chunk keep the host's arithmetic.
 
 ## Risks
 

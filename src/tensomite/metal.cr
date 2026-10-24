@@ -56,10 +56,12 @@ module Tensomite
       Op::Exp => "exp_f32", Op::Log => "log_f32", Op::Tanh => "tanh_f32", Op::Sqrt => "sqrt_f32",
       Op::Copy => "copy_f32",
     }
-    private OTHER    = %w[copy_into_f32 sum_f32 max_f32 gather_f32 scatter_add_f32 unview_f32 matmul_f32 matmul_split_f32]
-    private OPTIONAL = %w[fill_zero_f32 matmul_atomic_f32]
-    private COLS     = 32
-    private SLICES   =  8
+    private OTHER          = %w[copy_into_f32 sum_f32 max_f32 sum_short_f32 max_short_f32 gather_f32 scatter_add_f32 unview_f32 matmul_f32 matmul_split_f32]
+    private OPTIONAL       = %w[fill_zero_f32 matmul_atomic_f32]
+    private COLS           =  32
+    private SLICES         =   8
+    private REDUCE_THREADS = 256
+    private REDUCE_CHUNK   =  64
 
     # How `MatMul` divides its work.
     enum MatMulMode
@@ -244,8 +246,9 @@ module Tensomite
       true
     end
 
-    # Sum and Max: one thread per output, folding a run of the source permuted so
-    # the reduced axis is last, as the host kernel does.
+    # Sum and Max, folding each output's run of the source permuted so the reduced
+    # axis is last: one threadgroup per output, with a thread per chunk of the run
+    # up to `REDUCE_THREADS`, or one thread per output when the run is one chunk.
     private def encode_reduce(node : Node, output : MetalBuffer) : Nil
       src = node.srcs.first
       view = src.view
@@ -254,8 +257,14 @@ module Tensomite
         view = view.permute((0...view.ndim).reject(axis) + [axis])
         run = view.shape.last
       end
-      name = node.op == Op::Sum ? "sum_f32" : "max_f32"
-      dispatch(name, node.size, [mtl(src), output.mtl], [view_args(view), u32(run), u32(node.size)])
+      name = node.op == Op::Sum ? "sum" : "max"
+      chunks = (run + REDUCE_CHUNK - 1) // REDUCE_CHUNK
+      if chunks <= 1
+        dispatch("#{name}_short_f32", node.size, [mtl(src), output.mtl], [view_args(view), u32(run), u32(node.size)])
+      else
+        threads = Math.min(chunks, REDUCE_THREADS)
+        dispatch_groups("#{name}_f32", {node.size, 1}, {threads, 1}, [mtl(src), output.mtl], [view_args(view), u32(run)])
+      end
     end
 
     # MatMul, divided as `#matmul_mode` says.

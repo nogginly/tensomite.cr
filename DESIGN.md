@@ -316,17 +316,17 @@ flowchart TD
 
 **Calling Objective-C from Crystal.** Metal has no C API, so `metal/objc.cr` sends messages through `objc_msgSend`. That function must be called with the exact C signature of the method it reaches, and Crystal does not allow one C symbol to be declared with several signatures. So `ObjC.send(ReturnType, receiver, "selector:", args...)` casts its address to a `Proc` typed by its arguments, one type per call site. `NSUInteger` is `UInt64`, `BOOL` is passed as `UInt32`, and `MTLSize`, a 24-byte struct, is passed as a pointer, as arm64 passes structs over 16 bytes. Objects the runtime autoreleases are created inside `ObjC.autoreleasepool`, and those kept beyond it are retained.
 
-**Kernels that add.** Each kernel that adds does so in the host's order, so its results are bit-identical to the host's, not merely close:
+**Kernels that add.** Each of these kernels combines in a fixed order. `ScatterAdd` and `Unview` add in the host's order and are bit-identical to it; `Sum` and `Max` work in chunks (below):
 
-Op          |Threads                |Each thread                                                                                      
-------------|-----------------------|-------------------------------------------------------------------------------------------------
-`Sum`, `Max`|one per output         |folds its run of the source, permuted so the reduced axis is last, in index order                
-`ScatterAdd`|one per column         |zeroes its column, then adds the source rows into the rows their ids select, in order            
-`Unview`    |one per output position|inverts the view to find which logical elements read the position, and adds them in logical order
+Op          |Threads                                                                                  |Each thread                                                                                      
+------------|-----------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------
+`Sum`, `Max`|one threadgroup per output, a thread per chunk of 64 (one thread for a run of 64 or less)|folds whole chunks in index order; the first thread folds the chunk results in chunk order       
+`ScatterAdd`|one per column                                                                           |zeroes its column, then adds the source rows into the rows their ids select, in order            
+`Unview`    |one per output position                                                                  |inverts the view to find which logical elements read the position, and adds them in logical order
 
 `Unview` inverts a view by decomposing `position - offset` over the dimensions with a nonzero stride, largest first. The dimensions with stride 0 are the ones that repeat a position: their indices are walked in row-major order, which is logical order. The decomposition is unique when each stride exceeds the furthest the smaller ones can reach together. Every view tensomite builds satisfies that, and a view that did not would run on the host.
 
-One thread per output is simple but slow for a long reduction, such as the sum of a whole tensor. Faster strategies, in which threads share a reduction, change the order of additions; they belong with the matmul work, where the cost of a deterministic split is measured (the M6 exit).
+**Reductions in chunks (Decision X).** One thread per output made a long reduction slow: each of a GPT-2 layer norm's means was a single thread adding 768 numbers one after another, 126 µs each and 57% of a decoded token's GPU time. Each output now has a threadgroup, with each thread folding chunks of 64 at fixed offsets. As with split-K, chunk boundaries never depend on the run's length or on the number of threads, so a row padded with zeros (or, for `Max`, with -∞), as a masked attention row is, keeps its bits, and prefill still equals decode. `Max` is exact in any order and still matches the host bit for bit. `Sum` of more than one chunk adds in a different order from the host's and is compared within 1e-5. A run of one chunk or less keeps one thread per output, which is the host's arithmetic exactly.
 
 **Errors.** A GPU kernel cannot raise. `Gather` and `ScatterAdd` report an id out of range through a small shared error buffer, and `flush` raises the host's `ExecutionError` when it finds a report. The error therefore surfaces when the command buffer completes, at `realize`, as it does on the host. One difference remains: the nodes encoded before the error are marked realised, with undefined contents for the failing one.
 
@@ -727,6 +727,23 @@ all others|151      |0.57  |4%
 - **One thread per output is what makes `Sum` slow.** Fifty of the 62 sums are the means inside the 25 layer norms, each a single row of 768: one GPU thread adds 768 numbers in turn, waiting on memory for each, about 126 µs per sum. The other 12 are softmax denominators.
 - **Dispatch overhead is not the problem.** Encoding 710 dispatches costs 0.26 ms, and a small elementwise op about 3 µs of GPU time.
 - **Allocation costs 1 ms a token**, which the buffer pool (Decision U) targets.
+
+**After parallel reductions** (M7 part 2, M5 Pro):
+
+Measure                                                    |Part 1|Part 2
+-----------------------------------------------------------|------|------
+Metal decode, tokens/s (split)                             |63.6  |104.9 
+Metal prefill, tokens/s (split)                            |1,149 |1,279 
+Wall per decoded token, ms                                 |15.65 |10.14 
+of which waiting for the GPU                               |13.19 |6.98  
+of which on the host: allocating, encoding, everything else|2.45  |3.16  
+GPU time in `Sum`, ms                                      |7.81  |1.03  
+GPU time in `MatMul`, ms                                   |3.81  |4.04  
+GPU time in elementwise ops and `Cat`, ms                  |1.76  |2.10  
+
+- **Host work is now about a third of a decoded token's 10 ms.** The host builds the graph, allocates buffers and encodes every dispatch before the command buffer is committed, so the GPU waits for all of it. The buffer pool (part 3) removes most of the allocation. Committing in batches as encoding proceeds would let the GPU start before the host finishes.
+- **Matmul is now the largest GPU cost, at 54%.** Elementwise ops, about 2 ms over 500 dispatches, are what fusion removes.
+- **`BLAS` decodes at 6.6 ms per token.** Metal is at 9.5, so about 3 ms is left to find.
 
 **Training a character-level GPT on Tiny Shakespeare, Linux container.** The M5 exit is a validation loss below 1.8 within an hour here, and M7's is below 1.6 within an hour (Decision R). Runs use `examples/shakespeare.cr` on `BLAS`, with AdamW and a cosine schedule from 1e-3 to 1e-4:
 
