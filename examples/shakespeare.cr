@@ -47,14 +47,16 @@ class CharGPT
   def forward(ids : Tensor) : Tensor
     batch, length = ids.shape
     wte, wpe = params[0], params[1]
-    x = (wte.gather(ids) + wpe.slice(0, 0, length)).reshape([batch * length, width])
-    mask = Tensor.causal_mask(length, length, ids.device)
+    x = Tensomite.scope("embedding") { (wte.gather(ids) + wpe.slice(0, 0, length)).reshape([batch * length, width]) }
+    mask = Tensor.causal_mask(length, length, ids.device).named("causal mask")
     layers.times do |layer|
       ln1_w, ln1_b, attn_w, proj_w, ln2_w, ln2_b, fc_w, out_w = params[2 + 8 * layer, 8]
-      x = x + attention(x.layernorm(ln1_w, ln1_b).matmul(attn_w), batch, length, mask).matmul(proj_w)
-      x = x + x.layernorm(ln2_w, ln2_b).matmul(fc_w).gelu.matmul(out_w)
+      x = Tensomite.scope("block") do
+        x = x + Tensomite.scope("attention") { attention(x.layernorm(ln1_w, ln1_b).matmul(attn_w), batch, length, mask).matmul(proj_w) }
+        x + Tensomite.scope("mlp") { x.layernorm(ln2_w, ln2_b).matmul(fc_w).gelu.matmul(out_w) }
+      end
     end
-    x.layernorm(params[-2], params[-1]).matmul(wte.transpose)
+    Tensomite.scope("head") { x.layernorm(params[-2], params[-1]).matmul(wte.transpose) }
   end
 
   # Returns causal self-attention `[batch * length, width]` from the joined
@@ -73,6 +75,7 @@ end
 steps, batch, layers, heads, width, context = 2000, 16, 4, 4, 128, 64
 lr, min_lr, warmup, eval_every, eval_batches, seed = 1e-3, 1e-4, 100, 250, 20, 1337
 device_name, data_path, sample_length = "blas", "data/shakespeare/input.txt", 300
+diagram_depth = nil.as(Int32?)
 OptionParser.parse do |parser|
   parser.banner = "Usage: shakespeare [options]"
   parser.on("--steps N", "Training steps (#{steps})") { |value| steps = value.to_i }
@@ -90,6 +93,7 @@ OptionParser.parse do |parser|
   parser.on("--seed N", "Random seed (#{seed})") { |value| seed = value.to_i }
   parser.on("--device NAME", "cpu or blas (#{device_name})") { |name| device_name = name }
   parser.on("--data PATH", "Training text (#{data_path})") { |path| data_path = path }
+  parser.on("--diagram DEPTH", "Print a Mermaid summary of the loss's graph at DEPTH, or every op at 0, and exit") { |value| diagram_depth = value.to_i }
   parser.on("-h", "--help", "Show this help") { puts parser; exit }
 end
 device = device_name == "cpu" ? CPU.default : BLAS.default
@@ -107,13 +111,21 @@ sample_batch = ->(data : Array(Int32)) do
   starts = Array.new(batch) { rng.rand(data.size - context) }
   inputs = starts.flat_map { |start| data[start, context] }
   targets = starts.flat_map { |start| data[start + 1, context] }
-  {Tensor.from(inputs, [batch, context], device), Tensor.from(targets, [batch * context], device)}
+  {Tensor.from(inputs, [batch, context], device).named("ids"), Tensor.from(targets, [batch * context], device).named("targets")}
 end
 
 model = CharGPT.new(layers, heads, width, context, chars.size, device, seed)
 count = model.params.sum(&.size)
 puts "#{chars.size} characters, #{train.size} training and #{val.size} validation"
 puts "#{layers} layers, #{heads} heads, width #{width}, context #{context}, batch #{batch}: #{count} params on #{device_name}"
+
+if depth = diagram_depth
+  inputs, targets = sample_batch.call(train)
+  logits = model.forward(inputs)
+  loss = Tensomite.scope("loss") { logits.cross_entropy(targets) }
+  puts depth > 0 ? loss.to_mermaid(depth: depth, params: model.params) : loss.to_mermaid(max_nodes: 400)
+  exit
+end
 
 decayed = model.params.map { |param| param.ndim == 2 }
 matrices = AdamW.new(lr: lr, beta2: 0.99, weight_decay: 0.1)

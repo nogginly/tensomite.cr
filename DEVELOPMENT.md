@@ -69,6 +69,8 @@ src/tensomite/tensor.cr     Tensor: construction, views, transfers, reading data
 src/tensomite/tensor/       Tensor ops by kind: elementwise, reduce, structural, composite
 src/tensomite/scheduler.cr  realisation
 src/tensomite/autograd.cr   Tensomite.grad and the chain rule for every op
+src/tensomite/scope.cr      Tensomite.scope and Scope
+src/tensomite/diagram.cr    Tensor#to_mermaid: graphs and summaries as Mermaid
 src/tensomite/kernel.cr     the Tensomite.kernel macro and the Kernel class
 src/tensomite/kernels.cr    the kernels tensomite's own ops use, such as gelu
 src/tensomite/buffer_pool.cr  BufferPool
@@ -222,6 +224,7 @@ flowchart TD
     style KernelBug stroke:#d9480f,stroke-width:3px
 ```
 
+- **Draw it.** `puts t.to_mermaid` shows every op behind `t`, and `t.to_mermaid(depth: 2, params: params)` a model's parts; paste either into any Mermaid viewer. `examples/shakespeare.cr --diagram 2` and `examples/gpt2_diagram.cr` print the two models'.
 - **Inspect before realising.** An unrealised tensor's graph is all there: `t.node.op`, `t.node.srcs`, `t.node.shape`, and each source's `view`.
 - **Check the view first** when a result is wrong for transposed or broadcast inputs but right for contiguous ones. `View#offset_of(i)` shows where element `i` is read from.
 - **`node.realized?`** shows whether work has run. A realised node has no sources left to inspect, so inspect before realising.

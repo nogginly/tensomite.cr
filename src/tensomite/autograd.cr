@@ -26,7 +26,8 @@ module Tensomite
     # 2. Marks the nodes that lead to a param; only these receive gradients.
     # 3. Seeds the loss node with ones, then walks the order backwards. Each node's
     #    accumulated gradient, in the node's shape, is turned into one gradient per
-    #    marked source by the op's chain rule, and added to that source's node.
+    #    marked source by the op's chain rule, and added to that source's node. The
+    #    nodes a chain rule builds are in the scope of the node it differentiates.
     # 4. Reads each param's gradient through the param's view of its node.
     def self.grad(loss : Tensor, params : Array(Tensor)) : Array(Tensor)
       raise ShapeError.new("grad needs a one-element loss, not #{loss.shape}") unless loss.size == 1
@@ -43,9 +44,11 @@ module Tensomite
       end
       order.reverse_each do |node|
         next unless (g = grads[node]?) && node.op
-        backward(node, g).each_with_index do |src_grad, i|
-          src = node.srcs[i]
-          accumulate(grads, src, src_grad) if src_grad && needed.includes?(src.node)
+        Scope.within(node.scope) do
+          backward(node, g).each_with_index do |src_grad, i|
+            src = node.srcs[i]
+            accumulate(grads, src, src_grad) if src_grad && needed.includes?(src.node)
+          end
         end
       end
       params.map do |param|

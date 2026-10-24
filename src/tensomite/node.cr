@@ -69,6 +69,10 @@ module Tensomite
     # The epsilon a `LayerNorm` node adds to each row's variance.
     getter epsilon : Float32?
     getter buffer : Buffer?
+    # The scope the node was built in (see `Tensomite.scope`).
+    getter scope : Scope? = Scope.current
+    # A name for diagrams, usually given to leaves such as a model's weights.
+    property name : String?
 
     def initialize(@op : Op, @srcs : Array(Tensor), @shape, @dtype, @device, @axis = nil, @source_view = nil, @kernel = nil, @epsilon = nil)
     end
