@@ -847,6 +847,25 @@ of which `Softmax` (12)          |—     |0.51
 
 Fusing saved dispatches but little GPU time: a layer norm of one row of 768 took 57 µs. With chunks of 64 it had only 12 threads, each reading 64 elements in turn through `offset_of`, whose integer division and remainder per dimension are slow on a GPU. So reductions and row ops now use chunks of 16, giving a row of 768 48 threads, and step through a run by its stride; `offset_of` returns `offset + i` at once for a dense view, which every kernel benefits from.
 
+**After more threads per row and stride indexing** (M7 part 5, M5 Pro):
+
+Measure                          |Part 5, first|Part 5    
+---------------------------------|-------------|----------
+Metal decode, tokens/s (split)   |150.95       |**187.63**
+`BLAS` decode, tokens/s, same run|167.82       |160.26    
+Metal prefill, tokens/s (split)  |1,552        |1,642     
+`BLAS` prefill, tokens/s         |1,285        |1,240     
+Wall per decoded token, ms       |6.54         |4.95      
+GPU time, each op alone, ms      |6.33         |4.74      
+of which `MatMul`                |3.74         |3.73      
+of which `LayerNorm` (25)        |1.42         |0.28      
+of which `Softmax` (12)          |0.51         |0.08      
+
+- **Metal decodes 17% faster than `BLAS`** in the same run, and prefills a third faster: what Decision O requires of M7.
+- **A layer norm of one row now takes 11 µs, not 57.** Four times the threads, and no integer division per element.
+- **Matmul is 79% of the GPU's time.** The rest is the residual and bias adds, the KV cache's `Cat` and `Copy`, and the fused ops.
+- **Atomic matmul is now slower than the deterministic split in decode** (182.9 against 187.6 tokens/s), so determinism costs nothing there.
+
 **Training step in the Linux container through M7** (the 0.8M-param model, 30 steps, identical losses):
 
 Build                             |ms per step
