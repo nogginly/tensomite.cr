@@ -27,7 +27,7 @@ include Tensomite
 
 A tensor in tensomite is **lazy**. Writing `a * 2 + 1` does no arithmetic. It records what you asked for, as a node in a graph. The work happens when you ask for the numbers, with `to_a` or `realize`.
 
-*Analogy:* a recipe card versus cooking. Each operation adds a line to the card; `to_a` hands the card to the kitchen. Because the kitchen sees the whole card at once, it can plan: fuse steps, reuse pans, and work out gradients.
+Because the whole graph exists before anything runs, tensomite can work out gradients from it, combine operations into fewer passes over memory, and reuse memory between them.
 
 ```mermaid
 flowchart LR
@@ -274,7 +274,7 @@ sampler = Sampler.new(temperature: 0.8, top_k: 40, seed: 1)
 puts bpe.decode(model.generate(bpe.encode("Once upon a time"), 10, sampler))
 ```
 
-`generate` returns only the new tokens. Without a sampler it picks the likeliest token each time (greedy), so the output is always the same. With a `Sampler` it draws from the probabilities, flattened or sharpened by `temperature` and limited to the `top_k` likeliest tokens. The same seed gives the same text.
+`generate` returns only the new tokens. Without a sampler it picks the likeliest token each time (greedy), so the output is always the same. With a `Sampler` it picks at random, in proportion to each token's probability, among the `top_k` likeliest tokens (all of them when `top_k` is 0, the default). A `temperature` above 1 makes unlikely tokens more likely to be picked, and below 1 less likely. The same seed gives the same text.
 
 For other weights in safetensors files, `SafeTensors.open(path)` lists them (`names`) and loads each as a tensor (`file["name", device]`).
 

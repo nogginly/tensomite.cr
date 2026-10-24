@@ -39,7 +39,7 @@ flowchart LR
     Out --> Answer["× 100 = a × b"]
 ```
 
-Why the non-linearity? Without it, three matrix products in a row are just one matrix product: a straight-line function of `a` and `b`. `a × b` is a curved surface, and `gelu` is what lets the layers bend.
+Why the non-linear function? Without it, three matrix products in a row equal a single matrix product, which can only compute a linear function of `a` and `b`, of the form `p·a + q·b + r`. `a × b` is not linear, so the network needs `gelu` between the layers to represent it.
 
 ```crystal
 class Multiplier
@@ -74,7 +74,7 @@ end
 
 Three details:
 
-1. **Random starting weights.** If every weight began equal, every hidden unit would compute the same thing and learn the same thing. Random weights break the tie. The `1/√rows` scale keeps the numbers from growing or shrinking layer by layer.
+1. **Random starting weights.** If every weight began equal, every hidden unit would compute the same value and receive the same gradient, so they would stay identical. Random weights make them differ from the start. The `1/√rows` scale keeps the numbers from growing or shrinking layer by layer.
 2. **Broadcasting does the bias.** `x.matmul(w1)` is `[batch, 64]` and `b1` is `[64]`, so `+ b1` adds the bias to every row.
 3. **`Tensomite.scope`** names each layer. It changes nothing in the arithmetic; it is for the diagram in step 7.
 
@@ -112,7 +112,7 @@ end
 3. **Read the loss,** for the log. This runs the forward graph.
 4. **Step:** `AdamW` computes new parameters from the gradients, which runs the rest of the graph. Tensors never change in place, so the model keeps the new ones.
 
-`AdamW` adapts the step size of each weight to the history of its gradients, which makes it forgiving about the learning rate (`lr`). Weight decay, a pull towards zero that helps large models generalise, is switched off: a model this small has nothing to gain from it.
+`AdamW` adapts the step size of each weight to the history of its gradients, so it works well over a wider range of learning rates (`lr`) than plain gradient descent. Weight decay, which shrinks every weight slightly at each step and helps large models generalise, is switched off: a model this small does not need it.
 
 ## 5. Watching it learn
 
@@ -128,7 +128,7 @@ step 1750: loss 2.0e-6
 step 1999: loss 2.0e-6
 ```
 
-The loss falls by a factor of 3,000 in the first 250 steps, then creeps. A loss of 2e-6 on the scaled targets is a root-mean-square error of about `√(2e-6) × 100 ≈ 0.14` in the products: on average, the network is off by about a seventh.
+The loss falls by a factor of 3,000 in the first 250 steps, then falls slowly. A loss of 2e-6 on the scaled targets is a root-mean-square error of about `√(2e-6) × 100 ≈ 0.14` in the products: on average, the network is off by about a seventh.
 
 ## 6. Asking questions
 
@@ -152,8 +152,8 @@ end
 
 The first three are good: pairs it never saw, answered to within a few tenths. The last two show what the network has really learned:
 
-- **`0.5 × 0.5` comes out negative.** The loss counts *absolute* errors, so an error of 0.37 costs the same at 0.25 as at 56, where it is invisible. The network has no reason to be precise about small products. Training on the error relative to the product would change that.
-- **`12 × 12` is outside the training range,** and the answer is off by 6. The network learned a surface over the square from 0 to 10, not the rule of multiplication; beyond the square it extends the surface as best it can. This is the most important lesson of the tutorial: a network interpolates within its data and guesses outside it.
+- **`0.5 × 0.5` comes out negative.** The loss counts *absolute* errors, so an error of 0.37 costs the same whether the true product is 0.25 or 56, though it is large relative to 0.25 and small relative to 56. The network has no reason to be precise about small products. Training on the error relative to the product would change that.
+- **`12 × 12` is outside the training range,** and the answer is off by 6. The network learned to approximate `a × b` for inputs between 0 and 10, not the rule of multiplication. Outside that range nothing was trained, and its answers become less accurate the further out the inputs are. This is the main lesson of the tutorial: a network is reliable within the range of its training data, and not outside it.
 
 ## 7. Saving, loading and drawing the model
 
@@ -199,7 +199,7 @@ flowchart TB
     class b3 root
 ```
 
-The counts check out by hand: the first layer has a `2 × 64` weight and 64 biases (192), the second `64 × 64 + 64` (4,160), and the output `64 × 1 + 1` (65). That is 4,417 numbers in all, to multiply two numbers. Arithmetic is not what neural networks are for, which is the point: the same loop, with a bigger model and more data, learns things nobody could write down.
+The counts check out by hand: the first layer has a `2 × 64` weight and 64 biases (192), the second `64 × 64 + 64` (4,160), and the output `64 × 1 + 1` (65). That is 4,417 numbers in all, to multiply two numbers. Multiplication is only a test case: the same training loop, with a larger model and more data, is how models learn tasks that have no simple formula.
 
 ## Things to try
 
