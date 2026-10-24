@@ -904,11 +904,15 @@ pointer loops, `Maths` (own)|542
 
 **Training a character-level GPT on Tiny Shakespeare, Linux container.** The M5 exit is a validation loss below 1.8 within an hour here, and M7's is below 1.6 within an hour (Decision R). Runs use `examples/shakespeare.cr` on `BLAS`, with AdamW and a cosine schedule from 1e-3 to 1e-4:
 
-Model                                   |Params|Tokens per step|ms per step|Steps|Wall time|Validation loss, nats/char        
-----------------------------------------|------|---------------|-----------|-----|---------|----------------------------------
-4 layers, 4 heads, width 128, context 64|0.8M  |1,024          |720        |3,000|36 min   |1.726 (1.80 at step 2,250, 27 min)
+Model                                    |Params|Tokens per step|ms per step|Steps|Wall time|Validation loss, nats/char         
+-----------------------------------------|------|---------------|-----------|-----|---------|-----------------------------------
+4 layers, 4 heads, width 128, context 64 |0.8M  |1,024          |720        |3,000|36 min   |1.726 (1.80 at step 2,250, 27 min) 
+4 layers, 6 heads, width 192, context 128|1.8M  |2,048          |431        |5,000|36 min   |1.494 (1.573 at step 2,749, 20 min)
 
-Where the time of a step went, measured over 10 steps of that model before two fixes:
+- **The second row is M7's exit** (Decision R), run with M7 part 6 and the pool's thread fix. Its validation loss passes 1.6 at step 2,749.
+- **On the M5 Pro,** the same run (Accelerate, before the thread fix) takes 90 ms a step, 7.5 minutes in all, and ends at 1.4936 against Linux's 1.4939. Host maths is identical on both, but the two BLAS libraries add matmul terms in different orders, and the last-bit differences compound over 5,000 steps.
+
+Where the time of a step went, measured over 10 steps of the first model before two fixes:
 
 Cost                                       |Before             |After                             
 -------------------------------------------|-------------------|----------------------------------
