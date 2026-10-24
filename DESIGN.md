@@ -728,6 +728,23 @@ all others|151      |0.57  |4%
 - **Dispatch overhead is not the problem.** Encoding 710 dispatches costs 0.26 ms, and a small elementwise op about 3 µs of GPU time.
 - **Allocation costs 1 ms a token**, which the buffer pool (Decision U) targets.
 
+**After parallel reductions** (M7 part 2, M5 Pro):
+
+Measure                                                    |Part 1|Part 2
+-----------------------------------------------------------|------|------
+Metal decode, tokens/s (split)                             |63.6  |104.9 
+Metal prefill, tokens/s (split)                            |1,149 |1,279 
+Wall per decoded token, ms                                 |15.65 |10.14 
+of which waiting for the GPU                               |13.19 |6.98  
+of which on the host: allocating, encoding, everything else|2.45  |3.16  
+GPU time in `Sum`, ms                                      |7.81  |1.03  
+GPU time in `MatMul`, ms                                   |3.81  |4.04  
+GPU time in elementwise ops, ms                            |1.83  |2.10  
+
+- **Host work is now about a third of a decoded token's 10 ms.** The host builds the graph, allocates buffers and encodes every dispatch before the command buffer is committed, so the GPU waits for all of it. The buffer pool (part 3) removes most of the allocation. Committing in batches as encoding proceeds would let the GPU start before the host finishes.
+- **Matmul is now the largest GPU cost, at 54%.** Elementwise ops, about 2 ms over 500 dispatches, are what fusion removes.
+- **`BLAS` decodes at 6.6 ms per token.** Metal is at 9.5, so about 3 ms is left to find.
+
 **Training a character-level GPT on Tiny Shakespeare, Linux container.** The M5 exit is a validation loss below 1.8 within an hour here, and M7's is below 1.6 within an hour (Decision R). Runs use `examples/shakespeare.cr` on `BLAS`, with AdamW and a cosine schedule from 1e-3 to 1e-4:
 
 Model                                   |Params|Tokens per step|ms per step|Steps|Wall time|Validation loss, nats/char        
