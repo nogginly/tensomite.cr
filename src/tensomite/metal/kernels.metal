@@ -393,7 +393,7 @@ kernel void matmul_tiled(device const float* a [[buffer(0)]],
                          constant View& vb [[buffer(4)]],
                          constant uint* dims [[buffer(5)]],
                          uint3 group [[threadgroup_position_in_grid]],
-                         uint2 tid [[thread_position_in_threadgroup]]) {
+                         uint3 tid [[thread_position_in_threadgroup]]) {
     constexpr uint TX = BN / TN, TY = BM / TM, THREADS = TX * TY;
     // a's tile is stored k-major and b's row-major, each row padded by one, so
     // that the reads of the inner loop and most stores avoid bank conflicts.
