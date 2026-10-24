@@ -10,7 +10,8 @@ What the next session, or the next person, needs in order to carry on without th
 
 - **On `main`:** milestones 1 to 6. That covers the lazy tensor core, the CPU op set and `SimDiscrete`, the BLAS seam, GPT-2 inference verified against PyTorch, autograd with SGD, AdamW and a Shakespeare trainer, and the `Metal` device with every `F32` op on the GPU and split-K matmul. CI runs on Linux and macOS (the macOS runner has a GPU), and Decisions A–X are recorded in `PLAN.md`.
 - **M7 plan:** seven PRs, listed under M7 in `PLAN.md`, with Decisions T (row ops are hand-written fused ops), U (a finalizer-fed buffer pool), V (GLSL waits for M8) and W (threads only if training is still too slow).
-- **Open PR:** M7 part 2 on `m7-parallel-reductions`: `Sum` and `Max` on Metal with a threadgroup per output, in chunks (Decision X). Part 1's profile showed one-thread-per-row sums take 57% of a decoded token's GPU time.
+- **Open PR:** M7 part 3 on `m7-buffer-pool`: a finalizer-fed `BufferPool` on host devices and `Metal` (Decision U), and batched commits on Metal. On the Linux container a training step fell from 744 to 470 ms, with a `GC.collect` per step in the trainer. On the M5 Pro, Metal decode rose from 105 to 139 tokens/s, against BLAS's 144 in the same run, with 12 command buffers per token.
+- **Part 2 (merged):** parallel reductions lifted Metal decode from 64 to 105 tokens/s; BLAS is at 152. A decoded token is 10.1 ms, of which 3.2 ms is host work the GPU waits for.
 - **The profile (part 1, M5 Pro):** of 15.7 ms per decoded token, 13.2 ms is waiting for the GPU, of which `Sum` is 7.8 and `MatMul` 3.8; allocation is 1.0, graph building 1.2, encoding 710 dispatches only 0.26.
 - **Deferred:** Decision D, CPU parallelism. Profiling in M5 shows that training is bound by elementwise passes, so D now has a measured case; M7's fusion comes first.
 
@@ -56,7 +57,9 @@ Nothing persists between containers except what is pushed. Setting one up from s
 
 **Training data:** `scripts/fetch_shakespeare.sh` (from GitHub raw, allowed by default).
 
-**Long runs.** Start them with `nohup … &` and a log in the scratchpad, then wait with a background `until grep -q … log; do sleep 30; done`; a foreground `sleep` is blocked. Set `GC_UNMAP_THRESHOLD=0` for training. The container is reclaimed when the session goes idle, which kills background jobs: a run of several hours survives only while the session is active, so run those on the maintainer's machine.
+**High `sys` time** in training is OpenBLAS's threads busy-waiting, not the collector; `OPENBLAS_NUM_THREADS=1` removes it.
+
+**Long runs.** Start them with `nohup … &` and a log in the scratchpad, then wait with a background `until grep -q … log; do sleep 30; done`; a foreground `sleep` is blocked. The container is reclaimed when the session goes idle, which kills background jobs: a run of several hours survives only while the session is active, so run those on the maintainer's machine.
 
 **Shell gotchas.** `rm` on a path built from a shell variable (`rm -f "$D"/*`) is blocked; use a literal path or `"${D:?}"`. Force-pushes are blocked. Crystal cannot `require` an absolute path (see "Crystal gotchas" in `DEVELOPMENT.md`), so temporary scripts that load tensomite go inside the repo and are deleted afterwards.
 

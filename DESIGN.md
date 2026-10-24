@@ -430,6 +430,20 @@ sequenceDiagram
 
 If a kernel raises, the nodes before it stay realised and the failing node stays unrealised.
 
+### Buffer pool
+
+A graph built anew every step, as in training or decoding, would allocate a fresh buffer for every node, every time. Instead, each host device and `Metal` keeps a `BufferPool` of freed memory, keyed by exact size (Decision U):
+
+1. **Giving back.** When the collector finalizes a buffer, its finalizer hands the memory to the device's pool. A buffer is collected only once nothing can reach it, so reuse is always safe. Memory from a file mapping is never pooled.
+2. **Taking.** `alloc` takes memory of the exact size from the pool when there is some, and allocates otherwise. A pooled buffer's old contents remain, which is why `Device#alloc` promises nothing about contents and every kernel writes all of its output.
+3. **Re-entrancy.** A finalizer can run in the middle of any allocation, including one made by the pool itself. While the pool is changing it declines memory, and the memory is freed instead.
+4. **On Metal**, a buffer given back while GPU work is pending waits in a retired list until that work completes, because the GPU may still be reading it. The pool holds the `MTLBuffer`s themselves.
+5. **A limit** (1 GiB by default) bounds what a pool holds.
+
+Reuse lags by one collection: memory comes back only when the collector runs. A training loop that collects once per step (`examples/shakespeare.cr`) gets most of its buffers back before the next step; on the Linux container, that took a step from 744 to 470 ms, with identical losses.
+
+**Batched commits on Metal.** The device commits its command buffer every `commit_every` dispatches (64), without waiting, and starts a new one. The GPU therefore starts work while the host is still building and encoding the rest. A queue runs its command buffers in order, with Metal tracking each buffer's readers and writers across them, so results are unchanged.
+
 ## Autograd
 
 `Tensomite.grad(loss, params)` returns the gradient of a one-element `loss` with respect to each param, as lazy tensors. It is a graph transform: it reads the unrealised graph behind `loss` and builds a second graph of ordinary primitive ops beside it. Nothing runs until a gradient is realised, and devices need no autograd code at all.
@@ -745,6 +759,24 @@ GPU time in elementwise ops and `Cat`, ms                  |1.76  |2.10
 - **Matmul is now the largest GPU cost, at 54%.** Elementwise ops, about 2 ms over 500 dispatches, are what fusion removes.
 - **`BLAS` decodes at 6.6 ms per token.** Metal is at 9.5, so about 3 ms is left to find.
 
+**After the buffer pool and batched commits** (M7 part 3, M5 Pro):
+
+Measure                          |Part 2|Part 3
+---------------------------------|------|------
+Metal decode, tokens/s (split)   |104.9 |138.6 
+`BLAS` decode, tokens/s, same run|151.7 |144.0 
+Metal prefill, tokens/s (split)  |1,279 |1,521 
+Wall per decoded token, ms       |10.14 |6.98  
+of which waiting for the GPU     |6.98  |5.23  
+allocating buffers               |1.29  |0.60  
+everything else on the host      |1.53  |0.78  
+Command buffers per token        |1     |12    
+GPU time, each op alone, ms      |7.44  |6.78  
+
+- **The host now overlaps the GPU.** The wall time (6.98 ms) is less than the GPU's own work timed op by op (6.78 ms) plus the host's (1.74 ms), because the GPU starts on each batch of 64 dispatches while the host encodes the next.
+- **Metal decodes within 4% of `BLAS`** in the same run, and prefills 1.7 times as fast. `BLAS` itself varies by about 5% between runs (144 to 153 tokens/s), so the M7 exit compares the two within one run.
+- **What is left is GPU work:** matmul 3.8 ms, and about 2 ms of small elementwise dispatches, which fusion removes.
+
 **Training a character-level GPT on Tiny Shakespeare, Linux container.** The M5 exit is a validation loss below 1.8 within an hour here, and M7's is below 1.6 within an hour (Decision R). Runs use `examples/shakespeare.cr` on `BLAS`, with AdamW and a cosine schedule from 1e-3 to 1e-4:
 
 Model                                   |Params|Tokens per step|ms per step|Steps|Wall time|Validation loss, nats/char        
@@ -760,7 +792,7 @@ Allocation, with `GC_UNMAP_THRESHOLD` unset|3.6 s              |0.9 s, with `GC_
 `MatMul` on `BLAS`                         |0.4 s              |0.4 s                             
 
 - **Training is bound by elementwise passes, not by matmul.** The composites are built from primitives, so `gelu`, `softmax` and `layernorm`, forwards and backwards, touch tens of millions of elements per step. Each pass reads and writes fresh memory at about 2.4 ns per element, against 0.45 ns for the same loop over cached buffers. Fusion (M7) and buffer reuse (M7) attack exactly this, and parallel host kernels (Decision D) would divide it by the core count.
-- **The 720 ms was measured without `GC_UNMAP_THRESHOLD=0`,** which brings it to about 500 ms.
+- **The 720 ms was measured without `GC_UNMAP_THRESHOLD=0`,** which brings it to about 500 ms. With the buffer pool and a collection per step (M7), a step takes about 470 ms with no flag.
 - **Attention grows with the square of the context.** Doubling the context to 128, at the same width, more than doubles the step.
 
 ## Current limits
@@ -773,6 +805,6 @@ Allocation, with `GC_UNMAP_THRESHOLD` unset|3.6 s              |0.9 s, with `GC_
 - **One device per op.** Moving data needs an explicit `to`, which goes through host memory.
 - **Every primitive is a separate kernel run.** `softmax` alone is five; fusion arrives in M7.
 - **Each scalar operand is a new leaf,** uploaded to the device once per use.
-- **No buffer reuse.** Every node gets a fresh buffer, and training allocates hundreds of megabytes per step. On Linux, the Boehm collector then returns freed pages to the system and faults them back in, which roughly doubles a training step unless `GC_UNMAP_THRESHOLD=0` is set. Memory planning in M7 replaces this.
+- **Buffer reuse waits for the collector.** A freed buffer returns to its pool only when the collector finalizes it, so a loop that does not collect between steps reuses less (see "Buffer pool").
 - **Gradients of gradients** are built by the same rules, but are not tested.
 - **`grad` needs an unrealised graph.** Realise the loss after calling `grad`, or together with the gradients.
