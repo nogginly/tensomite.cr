@@ -73,6 +73,8 @@ src/tensomite/scheduler.cr  realisation
 src/tensomite/autograd.cr   Tensomite.grad and the chain rule for every op
 src/tensomite/scope.cr      Tensomite.scope and Scope
 src/tensomite/diagram.cr    Tensor#to_mermaid: graphs and summaries as Mermaid
+src/tensomite/module.cr     Parameter, Init, Module and Layer
+src/tensomite/modules.cr    Linear, Embedding, LayerNorm, Activation, Sequential
 src/tensomite/kernel.cr     the Tensomite.kernel macro and the Kernel class
 src/tensomite/kernels.cr    the kernels tensomite's own ops use, such as gelu
 src/tensomite/buffer_pool.cr  BufferPool

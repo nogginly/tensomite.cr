@@ -42,48 +42,35 @@ flowchart LR
 Why the non-linear function? Without it, three matrix products in a row equal a single matrix product, which can only compute a linear function of `a` and `b`, of the form `p·a + q·b + r`. `a × b` is not linear, so the network needs `gelu` between the layers to represent it.
 
 ```crystal
-class Multiplier
-  HIDDEN = 64
-
-  # The weights and biases, in the order `#forward` uses them.
-  property params : Array(Tensor)
-
-  def initialize(seed : Int32)
-    rng = Random.new(seed)
-    # Returns a [rows, cols] matrix of small random weights, scaled by 1/√rows
-    # so that each layer's outputs start at about the size of its inputs.
-    weight = ->(rows : Int32, cols : Int32) do
-      scale = 1 / Math.sqrt(rows)
-      Tensor.from(Array(Float32).new(rows * cols) { (rng.rand(-1.0..1.0) * scale).to_f32 }, [rows, cols])
-    end
-    bias = ->(size : Int32) { Tensor.zeros([size]) }
-    @params = [weight.call(2, HIDDEN), bias.call(HIDDEN),
-               weight.call(HIDDEN, HIDDEN), bias.call(HIDDEN),
-               weight.call(HIDDEN, 1), bias.call(1)]
+class Multiplier < Tensomite::Module
+  def initialize(rng : Random)
+    @hidden1 = Linear.new(2, 64, rng: rng)
+    @hidden2 = Linear.new(64, 64, rng: rng)
+    @output = Linear.new(64, 1, rng: rng)
   end
 
   # Returns predictions [batch, 1] for inputs [batch, 2], lazily.
   def forward(x : Tensor) : Tensor
-    w1, b1, w2, b2, w3, b3 = params
-    h = Tensomite.scope("hidden 1") { (x.matmul(w1) + b1).gelu }
-    h = Tensomite.scope("hidden 2") { (h.matmul(w2) + b2).gelu }
-    Tensomite.scope("output") { h.matmul(w3) + b3 }
+    h = @hidden1.call(x).gelu
+    h = @hidden2.call(h).gelu
+    @output.call(h)
   end
 end
 ```
 
-Three details:
+`Tensomite::Module` is the base class for models and their parts, and `Linear` is one of the parts it provides: `x.matmul(weight) + bias`, with the weight and bias as parameters. Four details:
 
-1. **Random starting weights.** If every weight began equal, every hidden unit would compute the same value and receive the same gradient, so they would stay identical. Random weights make them differ from the start. The `1/√rows` scale keeps the numbers from growing or shrinking layer by layer.
-2. **Broadcasting does the bias.** `x.matmul(w1)` is `[batch, 64]` and `b1` is `[64]`, so `+ b1` adds the bias to every row.
-3. **`Tensomite.scope`** names each layer. It changes nothing in the arithmetic; it is for the diagram in step 7.
+1. **Parameters are found and named for you.** The model's parameters are whatever its instance variables hold, named after the variables: `model.named_params.keys` is `["hidden1.weight", "hidden1.bias", "hidden2.weight", "hidden2.bias", "output.weight", "output.bias"]`. Nothing is listed by hand.
+2. **Random starting weights.** If every weight began equal, every hidden unit would compute the same value and receive the same gradient, so they would stay identical. Random weights make them differ from the start. `Linear` draws its weight uniformly from ±1/√inputs, which keeps the numbers from growing or shrinking layer by layer. All three layers draw from the one generator `rng`, so the same seed gives the same model.
+3. **Broadcasting does the bias.** `x.matmul(weight)` is `[batch, 64]` and the bias is `[64]`, so adding it adds the bias to every row.
+4. **`forward` defines the model; `call` runs it.** `@hidden1.call(x)` runs `Linear`'s `forward` inside a scope named `hidden1`, which is what names the boxes in the diagram in step 7.
 
 ## 3. The loss
 
 The loss is one number that says how wrong the network is: here the **mean squared error**, the average of `(prediction - target)²` over the batch. Squaring makes every miss positive, and big misses count for more than small ones.
 
 ```crystal
-error = model.forward(inputs) - targets
+error = model.call(inputs) - targets
 loss = (error * error).mean
 ```
 
@@ -93,24 +80,23 @@ Training repeats four steps. Each asks the loss how it would change if each weig
 
 ```crystal
 rng = Random.new(42)
-model = Multiplier.new(seed: 1)
-optimizer = AdamW.new(lr: 3e-3, weight_decay: 0.0)
+model = Multiplier.new(rng: Random.new(1))
+optimizer = AdamW.new(model.params, lr: 3e-3, weight_decay: 0.0)
 
 2000.times do |step|
   inputs, targets = batch(rng, 256)
-  error = model.forward(inputs) - targets
-  loss = (error * error).mean
-  grads = Tensomite.grad(loss, model.params)
-  loss_value = loss.to_a(Float32).first
-  model.params = optimizer.step(model.params, grads)
-  puts "step #{step}: loss #{loss_value.round(6)}" if step % 250 == 0 || step == 1999
+  error = model.call(inputs) - targets
+  loss = optimizer.step((error * error).mean)
+  puts "step #{step}: loss #{loss.round(6)}" if step % 250 == 0 || step == 1999
 end
 ```
 
-1. **Forward:** predictions for a fresh batch. Nothing is computed yet: tensomite is lazy, and this only builds a graph.
-2. **Gradients:** `Tensomite.grad` extends the graph backwards, from the loss to every parameter. It comes before `loss.to_a`, because reading the loss runs the graph and frees the intermediate results that the gradients need.
-3. **Read the loss,** for the log. This runs the forward graph.
-4. **Step:** `AdamW` computes new parameters from the gradients, which runs the rest of the graph. Tensors never change in place, so the model keeps the new ones.
+The optimizer is given the model's parameters once. Then `optimizer.step(loss)` does four things in order:
+
+1. **Forward:** `model.call(inputs)` has only built a graph. Tensomite is lazy, so nothing is computed yet.
+2. **Gradients:** `step` calls `Tensomite.grad`, which extends the graph backwards from the loss to every parameter. That has to happen before the loss is read, because reading it runs the graph and frees the intermediate results the gradients need.
+3. **Read the loss,** which runs the forward graph. `step` returns its value, for the log.
+4. **Update:** `AdamW` computes each parameter's new value from its gradient, which runs the rest of the graph, and puts it in the parameter's slot. Tensors never change in place; a parameter is a slot that holds one, and the optimizer replaces it.
 
 `AdamW` adapts the step size of each weight to the history of its gradients, so it works well over a wider range of learning rates (`lr`) than plain gradient descent. Weight decay, which shrinks every weight slightly at each step and helps large models generalise, is switched off: a model this small does not need it.
 
@@ -138,7 +124,7 @@ Inference is the forward pass alone, on one pair at a time, scaled in and out:
 # Returns the predicted product of *a* and *b*.
 def multiply(a : Float64, b : Float64) : Float64
   x = Tensor.from([(a / 10).to_f32, (b / 10).to_f32], [1, 2])
-  forward(x).to_a(Float32).first.to_f64 * 100
+  call(x).to_a(Float32).first.to_f64 * 100
 end
 ```
 
@@ -157,47 +143,60 @@ The first three are good: pairs it never saw, answered to within a few tenths. T
 
 ## 7. Saving, loading and drawing the model
 
-Tensomite cannot write weight files yet, but a parameter is just a shape and a list of numbers, so JSON does the job:
+Tensomite cannot write weight files yet, but every parameter has a name, a shape and a list of numbers, so JSON does the job, matched by name:
 
 ```crystal
-# Returns the weights as JSON: each tensor's shape and values.
+# Returns the parameters as JSON, by name: each one's shape and values.
 def to_json : String
-  params.map { |param| {shape: param.shape, values: param.to_a(Float32)} }.to_json
+  named_params.transform_values { |param| {shape: param.shape, values: param.value.to_a(Float32)} }.to_json
 end
 
-# Returns a model with the weights *json* holds, as written by `#to_json`.
-def self.from_json(json : String) : Multiplier
-  tensors = Array(NamedTuple(shape: Array(Int32), values: Array(Float32))).from_json(json)
-  new(tensors.map { |tensor| Tensor.from(tensor[:values], tensor[:shape]) })
+# Replaces each parameter with the one of the same name in *json*, as
+# written by `#to_json`.
+def load_json(json : String) : self
+  saved = Hash(String, NamedTuple(shape: Array(Int32), values: Array(Float32))).from_json(json)
+  named_params.each { |name, param| param.value = Tensor.from(saved[name][:values], saved[name][:shape]) }
+  self
 end
+```
+
+```crystal
+File.write("multiplier.json", model.to_json)
+reloaded = Multiplier.new(rng: Random.new(2)).load_json(File.read("multiplier.json"))
 ```
 
 ```
 reloaded from multiplier.json: 3 × 4 = 11.96
 ```
 
-The reloaded model gives exactly the same answer: the weights are the same bits, and tensomite's results repeat exactly.
+The reloaded model starts from different random weights (seed 2) and gives exactly the same answer once loaded: the weights are the same bits, and tensomite's results repeat exactly.
 
-Finally, the scopes from step 2 let tensomite draw the model, one box per layer with its parameter count:
+Finally, because each layer runs in a scope named after it, tensomite can draw the model, one box per layer with its parameter count:
 
 ```crystal
-puts model.forward(Tensor.zeros([1, 2]).named("a, b")).to_mermaid(depth: 1, params: model.params)
+puts model.call(Tensor.zeros([1, 2]).named("a, b")).to_mermaid(model: model, depth: 1)
 ```
 
 ```mermaid
 flowchart TB
     b0["a, b · leaf [1,2]"]
-    b1["hidden 1<br/>3 ops · 192 params"]
-    b2["hidden 2<br/>3 ops · 4.16k params"]
-    b3["output<br/>2 ops · 65 params"]
+    b2["Kernel gelu [1,64]"]
+    b4["Kernel gelu [1,64]"]
+    b1["hidden1<br/>2 ops · 192 params"]
+    b3["hidden2<br/>2 ops · 4.16k params"]
+    b5["output<br/>2 ops · 65 params"]
     b0 -- "[1,2]" --> b1
     b1 -- "[1,64]" --> b2
     b2 -- "[1,64]" --> b3
+    b3 -- "[1,64]" --> b4
+    b4 -- "[1,64]" --> b5
     classDef leaf stroke:#2b8a3e,stroke-width:2px
     class b0 leaf
     classDef root stroke:#c92a2a,stroke-width:2px
-    class b3 root
+    class b5 root
 ```
+
+Each `Linear` is two operations, the product and the bias. The two `gelu`s are drawn on their own, between the layers, because `forward` applies them outside the `Linear` modules.
 
 The counts check out by hand: the first layer has a `2 × 64` weight and 64 biases (192), the second `64 × 64 + 64` (4,160), and the output `64 × 1 + 1` (65). That is 4,417 numbers in all, to multiply two numbers. Multiplication is only a test case: the same training loop, with a larger model and more data, is how models learn tasks that have no simple formula.
 
@@ -205,8 +204,9 @@ The counts check out by hand: the first layer has a `2 × 64` weight and 64 bias
 
 1. **Relative error.** Divide each error by its target plus a small constant, such as `targets + 0.01`, before squaring. Do small products improve, and large ones get worse?
 2. **A wider range.** Train on pairs from 0 to 20, and ask `12 × 12` again.
-3. **A smaller model.** Set `HIDDEN` to 8. How low does the loss go now?
-4. **Speed.** Add `require "../src/tensomite/blas"` and create the tensors on `BLAS.default` (each `Tensor.from` and `Tensor.zeros` takes a `device:` argument). The model is too small for it to help much; try it with `HIDDEN = 512`.
-5. **Something new.** Change `batch` to teach another function: `a + b`, `max(a, b)`, or `sin(a)`. Which are easy to learn, and which are hard?
+3. **A smaller model.** Make the hidden layers 8 wide instead of 64. How low does the loss go now?
+4. **Speed.** Add `require "../src/tensomite/blas"` and pass `device: BLAS.default` to each `Linear.new` and to the `Tensor.from` calls. The model is too small for it to help much; try it with hidden layers 512 wide.
+5. **A `Sequential`.** Replace the class with `Sequential.new(Linear.new(2, 64), Activation.gelu, Linear.new(64, 64), Activation.gelu, Linear.new(64, 1))`. The arithmetic is the same; how do the parameter names and the diagram change?
+6. **Something new.** Change `batch` to teach another function: `a + b`, `max(a, b)`, or `sin(a)`. Which are easy to learn, and which are hard?
 
 For a larger model trained the same way, see `examples/shakespeare.cr`, which learns to write in the style of Shakespeare one character at a time.

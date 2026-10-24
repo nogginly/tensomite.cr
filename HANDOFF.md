@@ -4,7 +4,7 @@ What the next session, or the next person, needs in order to carry on without th
 
 **Keeping it current.** Rewrite it rather than appending to it: at the end of each PR, and whenever a session's context passes about 70%. Anything that belongs in one of the other three documents goes there instead.
 
-*Last rewritten: 24 Oct 2026, with M7 done, the user's guide open and M8 next.*
+*Last rewritten: 24 Oct 2026, with M7b part 1 open.*
 
 ## Where things stand
 
@@ -14,8 +14,9 @@ What the next session, or the next person, needs in order to carry on without th
   - Metal decodes at 186 tokens/s against BLAS's 166, and prefills 64 tokens at 3,684 against 2,419;
   - macro kernels match their oracles and their gradients pass finite differences;
   - Shakespeare reached 1.573 nats/char in 20 minutes in the Linux container.
-- **Open PR:** `docs-user-guide`: `GUIDE.md` (the API with run examples) and `TUTORIAL.md` (training `examples/multiply.cr`, a small network that learns to multiply), a README that says what tensomite is, and a fix to model summaries, which skipped one-element params. M7's exit record and `scripts/emulate_metal/` merged in #23.
-- **Next: M8, Vulkan.** Before planning it, settle where its kernels run. Its exit needs a Linux machine with a discrete GPU, and neither the cloud container (no GPU) nor the maintainer's Mac has one. The options to weigh include a cloud GPU runner for CI, a machine of the maintainer's, and MoltenVK on the Mac for development (Decision G chose native Metal for macOS, but that does not forbid testing Vulkan code there).
+- **Open PR:** M7b part 1 on `m7b-modules`: `Parameter`, `Module` (parts found from instance variables at compile time), `Linear`, `Embedding`, `LayerNorm`, `Activation`, `Sequential`, and optimizers that take parameters and `step(loss)`. The tutorial's model is on modules, with all 2,000 training losses bit-identical to the hand-written version. `GUIDE.md` and `TUTORIAL.md` are updated.
+- **Now: M7b, modules and a model DSL** (Decisions AH–AM in `PLAN.md`): modules first, then DSL candidates (a builder in plain Crystal, and a declarative macro) written against the same models, iterated with the modules. The next parts are a safetensors writer for `save` and `load`, then the Shakespeare model on modules.
+- **After that: M8, Vulkan.** Before planning it, settle where its kernels run. Its exit needs a Linux machine with a discrete GPU, and neither the cloud container (no GPU) nor the maintainer's Mac has one. The options to weigh include a cloud GPU runner for CI, a machine of the maintainer's, and MoltenVK on the Mac for development (Decision G chose native Metal for macOS, but that does not forbid testing Vulkan code there).
 - **A long-term goal:** inspecting running models (activations, attention, gradients) by the names of their parts; see "Inspectable" in `PLAN.md` and "Towards inspection" in `DESIGN.md`. Scopes are its first piece, and Decision AA must keep inspected nodes alive.
 - **Deferred:** Decision D, CPU threads (not needed for M7's exits). Decision AA, releasing buffers as soon as their last reader has run.
 
@@ -29,8 +30,8 @@ Stacked PRs         |When asked. The later PR's base is the earlier branch; GitH
 Merging             |The maintainer merges, by squash or by merge commit. After a squash, merge `main` into a stacked branch and resolve conflicts with the branch's side; never rewrite history or force-push (the session blocks it anyway).                                            
 Milestones          |Each ends with its exit criterion passing, with the evidence (numbers, logs) in the PR description.                                                                                                                                                                  
 Documents           |Updated in the same PR as the code (see "Workflow" in `DEVELOPMENT.md`), `GUIDE.md` included whenever the public API changes. Tables and diagrams follow "Documents" in `DEVELOPMENT.md`; check them with `scripts/format_tables.py` and `scripts/check_diagrams.sh`.
-Decisions           |Labelled with letters and recorded in `PLAN.md`. The next is **AH**; T to AG shape M7. P (how to get GPT-2 small's fixtures) was settled by allowing Hugging Face; Q made this document committed.                                                                   
-Understanding checks|Short questions labelled Q-A, Q-B and so on, after explaining something new. The next is **Q-X**; Q-T to Q-W are recent.                                                                                                                                             
+Decisions           |Labelled with letters and recorded in `PLAN.md`. The next is **AN**; T to AG shape M7, and AH to AM shape M7b. P (how to get GPT-2 small's fixtures) was settled by allowing Hugging Face; Q made this document committed.                                           
+Understanding checks|Short questions labelled Q-A, Q-B and so on, after explaining something new. The next is **Q-Z**; Q-T to Q-Y are recent.                                                                                                                                             
 Claims              |Measured before stated. Several assumptions were wrong when checked: decode time was dominated by the KV cache, not host kernels; GPT-2's file was unaligned. Say "I think" when something is unverified.                                                            
 
 ## Follow-ups found on the way
@@ -102,4 +103,4 @@ Fused kernels and rounding   |A fused CPU loop rounds exactly as the composite d
 Finalizers and threads       |A finalizer can interrupt its own thread mid-allocation, so it must never wait for a lock that thread may hold.                   |Q-U            
 GPU lifetimes                |On Metal, "its consumer ran" means encoded, not executed; the CPU must not reuse a buffer the GPU has yet to read.                |Q-V (explained)
 
-Questions asked but never answered: Q-D (why a SPIR-V emitter in Crystal needs no compiler at run time), Q-J (why `sum(axis)` permutes the axis to the end), Q-L (why `Cat` writes through a slice view), Q-M (why `max` starts from the first element), Q-P (why broadcasting needs no gradient rule of its own), Q-Q (the gradient of `x` expanded from `[3]` to `[2, 3]`), Q-R (why the split must depend only on `k` for prefill to equal decode), Q-T (why softmax's separate `exp` pass keeps the bits and vectorises), Q-W (what `b`'s gradient looks like in a diagram, given its `expand`), Q-X (why a 4×4 patch per thread cuts memory reads). Q-K was answered, after a correction: a stride of 0 means repeated reads of one position, not contiguous rows.
+Questions asked but never answered: Q-D (why a SPIR-V emitter in Crystal needs no compiler at run time), Q-J (why `sum(axis)` permutes the axis to the end), Q-L (why `Cat` writes through a slice view), Q-M (why `max` starts from the first element), Q-P (why broadcasting needs no gradient rule of its own), Q-Q (the gradient of `x` expanded from `[3]` to `[2, 3]`), Q-R (why the split must depend only on `k` for prefill to equal decode), Q-T (why softmax's separate `exp` pass keeps the bits and vectorises), Q-W (what `b`'s gradient looks like in a diagram, given its `expand`), Q-X (why a 4×4 patch per thread cuts memory reads), Q-Y (how named parameters simplify the decay split). Q-K was answered, after a correction: a stride of 0 means repeated reads of one position, not contiguous rows.

@@ -7,54 +7,39 @@ require "../src/tensomite"
 
 include Tensomite
 
-# A multilayer perceptron: two inputs, two hidden layers of `HIDDEN` units with
-# GELU between them, and one output.
-class Multiplier
-  HIDDEN = 64
-
-  # The weights and biases, in the order `#forward` uses them.
-  property params : Array(Tensor)
-
-  def initialize(seed : Int32)
-    rng = Random.new(seed)
-    # Returns a [rows, cols] matrix of small random weights, scaled by 1/√rows
-    # so that each layer's outputs start at about the size of its inputs.
-    weight = ->(rows : Int32, cols : Int32) do
-      scale = 1 / Math.sqrt(rows)
-      Tensor.from(Array(Float32).new(rows * cols) { (rng.rand(-1.0..1.0) * scale).to_f32 }, [rows, cols])
-    end
-    bias = ->(size : Int32) { Tensor.zeros([size]) }
-    @params = [weight.call(2, HIDDEN), bias.call(HIDDEN),
-               weight.call(HIDDEN, HIDDEN), bias.call(HIDDEN),
-               weight.call(HIDDEN, 1), bias.call(1)]
-  end
-
-  def initialize(@params : Array(Tensor))
+# A multilayer perceptron: two inputs, two hidden layers of 64 units with GELU
+# between them, and one output.
+class Multiplier < Tensomite::Module
+  def initialize(rng : Random)
+    @hidden1 = Linear.new(2, 64, rng: rng)
+    @hidden2 = Linear.new(64, 64, rng: rng)
+    @output = Linear.new(64, 1, rng: rng)
   end
 
   # Returns predictions [batch, 1] for inputs [batch, 2], lazily.
   def forward(x : Tensor) : Tensor
-    w1, b1, w2, b2, w3, b3 = params
-    h = Tensomite.scope("hidden 1") { (x.matmul(w1) + b1).gelu }
-    h = Tensomite.scope("hidden 2") { (h.matmul(w2) + b2).gelu }
-    Tensomite.scope("output") { h.matmul(w3) + b3 }
+    h = @hidden1.call(x).gelu
+    h = @hidden2.call(h).gelu
+    @output.call(h)
   end
 
   # Returns the predicted product of *a* and *b*.
   def multiply(a : Float64, b : Float64) : Float64
     x = Tensor.from([(a / 10).to_f32, (b / 10).to_f32], [1, 2])
-    forward(x).to_a(Float32).first.to_f64 * 100
+    call(x).to_a(Float32).first.to_f64 * 100
   end
 
-  # Returns the weights as JSON: each tensor's shape and values.
+  # Returns the parameters as JSON, by name: each one's shape and values.
   def to_json : String
-    params.map { |param| {shape: param.shape, values: param.to_a(Float32)} }.to_json
+    named_params.transform_values { |param| {shape: param.shape, values: param.value.to_a(Float32)} }.to_json
   end
 
-  # Returns a model with the weights *json* holds, as written by `#to_json`.
-  def self.from_json(json : String) : Multiplier
-    tensors = Array(NamedTuple(shape: Array(Int32), values: Array(Float32))).from_json(json)
-    new(tensors.map { |tensor| Tensor.from(tensor[:values], tensor[:shape]) })
+  # Replaces each parameter with the one of the same name in *json*, as
+  # written by `#to_json`.
+  def load_json(json : String) : self
+    saved = Hash(String, NamedTuple(shape: Array(Int32), values: Array(Float32))).from_json(json)
+    named_params.each { |name, param| param.value = Tensor.from(saved[name][:values], saved[name][:shape]) }
+    self
   end
 end
 
@@ -68,17 +53,14 @@ def batch(rng : Random, size : Int32) : {Tensor, Tensor}
 end
 
 rng = Random.new(42)
-model = Multiplier.new(seed: 1)
-optimizer = AdamW.new(lr: 3e-3, weight_decay: 0.0)
+model = Multiplier.new(rng: Random.new(1))
+optimizer = AdamW.new(model.params, lr: 3e-3, weight_decay: 0.0)
 
 2000.times do |step|
   inputs, targets = batch(rng, 256)
-  error = model.forward(inputs) - targets
-  loss = (error * error).mean
-  grads = Tensomite.grad(loss, model.params)
-  loss_value = loss.to_a(Float32).first
-  model.params = optimizer.step(model.params, grads)
-  puts "step #{step}: loss #{loss_value.round(6)}" if step % 250 == 0 || step == 1999
+  error = model.call(inputs) - targets
+  loss = optimizer.step((error * error).mean)
+  puts "step #{step}: loss #{loss.round(6)}" if step % 250 == 0 || step == 1999
 end
 
 puts
@@ -87,9 +69,9 @@ puts
 end
 
 File.write("multiplier.json", model.to_json)
-reloaded = Multiplier.from_json(File.read("multiplier.json"))
+reloaded = Multiplier.new(rng: Random.new(2)).load_json(File.read("multiplier.json"))
 puts
 puts "reloaded from multiplier.json: 3 × 4 = #{reloaded.multiply(3.0, 4.0).round(2)}"
 
 puts
-puts model.forward(Tensor.zeros([1, 2]).named("a, b")).to_mermaid(depth: 1, params: model.params)
+puts model.call(Tensor.zeros([1, 2]).named("a, b")).to_mermaid(model: model, depth: 1)

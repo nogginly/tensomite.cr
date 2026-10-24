@@ -106,6 +106,17 @@ Each milestone is done when its exit criterion passes.
      - `gelu`'s kernel gives its composite's bits on host devices, and kernel and fused-row-op gradients pass finite differences (`spec/kernel_spec.cr`, `spec/row_ops_spec.cr`);
      - the Shakespeare model reached 1.573 nats/char at step 2,749 (20 minutes) and 1.494 after 5,000 steps (36 minutes).
      - Memory is planned by a pool fed by the collector (Decision U); releasing buffers as soon as their last reader has run is Decision AA, after M7.
+
+**7b. Modules and a model DSL (Decisions AH to AM).** Models are written as `Tensomite::Module`s: classes whose instance variables hold `Parameter`s and other modules, found and named at compile time, with a `forward` that combines them. Then a DSL over the modules, iterated with them. In PRs:
+
+1. `Parameter`, `Module`, `Linear`, `Embedding`, `LayerNorm`, `Activation`, `Sequential`, and optimizers over parameters; the tutorial's model on modules.
+2. A safetensors writer, and `save` and `load` by name (Decision AM).
+3. The Shakespeare model on modules, with a `CausalSelfAttention`; its trainer simplified.
+4. DSL candidates, a builder in plain Crystal (`with ... yield`) and a declarative macro, written against the same models; then a choice, and changes to the modules that the DSL shows a need for.
+5. GPT-2 on modules, loading Hugging Face's weights by name, if step 3 shows that its KV cache fits.
+
+Exit of 7b: the tutorial, Shakespeare and GPT-2 models on modules, with training losses bit-identical to the hand-written versions; `GUIDE.md` and `TUTORIAL.md` updated; a DSL chosen and recorded.
+
 8. **Vulkan backend.** Bind Vulkan compute, and port the hand-written kernels to GLSL compiled at build time. Kernel macros gain a GLSL backend beside Crystal and MSL (Decision V), so fused kernels come with it.
    - Exit: the full op suite matches the oracle on a Linux discrete GPU, and GPT-2 runs there.
 9. **Quantisation.** Add `F16`, block dtypes, a GGUF loader, and Q8_0/Q4_0 matmul kernels for CPU, Metal and Vulkan.
@@ -163,6 +174,12 @@ Each milestone is done when its exit criterion passes.
 - **Decision AE, matmul epilogues:** dropped from M7 (decided). Fusing the bias adds into the matmul would save under 1% of a prefill's GPU time and about 5% of a decoded token's.
 - **Decision AF, part 8's target:** Metal prefill faster than BLAS in the same run, with decode no slower (decided, met).
 - **Decision AG, after the target was met:** stop tuning; products with 768 output columns stay slower than Accelerate (decided). Speeding them up needs split-K across threadgroups, and keeping split-K's order then means storing every chunk's sum.
+- **Decision AH, how models are defined:** modules in plain Crystal first, then a DSL that builds on them, iterated together (decided). The DSL may need no macros, or may not be needed at all once the modules settle.
+- **Decision AI, how parameters change:** a mutable `Parameter` slot holding an immutable tensor (decided). Optimizers replace each slot's tensor, so training loops do not reassemble parameter lists. The alternative, functional modules returning updated copies as in JAX, keeps everything immutable at the cost of rebuilding the model every step.
+- **Decision AJ, how parts are found:** instance variables listed at compile time, named after the variables (decided), rather than explicit registration calls.
+- **Decision AK, initial weights:** each module takes an `rng:`, defaulting to `Tensomite.rng`, seeded, so runs repeat unless asked otherwise (decided). `Linear` follows PyTorch (uniform, ±1/√inputs) and `Embedding` GPT-2 (normal, 0.02).
+- **Decision AL, where modules sit in the plan:** milestone 7b, before Vulkan, so that later milestones keep their numbers (decided).
+- **Decision AM, saving:** a safetensors writer, so models save and load in the format GPT-2 already loads from (decided).
 
 ## Risks
 
