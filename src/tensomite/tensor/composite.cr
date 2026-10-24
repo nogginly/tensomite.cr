@@ -42,9 +42,12 @@ module Tensomite
 
     # Returns GELU with the tanh approximation used by GPT-2:
     # `0.5x(1 + tanh(√(2/π)(x + 0.044715x³)))`.
+    #
+    # One fused kernel (`Tensomite::Kernels::GELU`), which computes exactly what
+    # the composite `x * 0.5 * (((x + x * x * x * 0.044715) * √(2/π)).tanh + 1)`
+    # computes, operation for operation.
     def gelu : Tensor
-      inner = (self + self * self * self * 0.044715) * Math.sqrt(2 / Math::PI)
-      self * 0.5 * (inner.tanh + 1)
+      Kernels::GELU.call(self)
     end
 
     # Returns an `F32` mask of shape `[rows, cols]` to add to attention scores:

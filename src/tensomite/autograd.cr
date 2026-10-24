@@ -131,6 +131,12 @@ module Tensomite
       in Op::ScatterAdd then [g.gather(b), nil] of Tensor?
       in Op::Unview
         [through(g, node.source_view || raise Error.new("unview needs a source view"))] of Tensor?
+      in Op::Kernel
+        kernel = node.kernel || raise Error.new("kernel node without a kernel")
+        srcs.map_with_index do |_, i|
+          gradient = kernel.gradient(i) || raise Error.new("kernel #{kernel.name} has no gradient of its own")
+          Tensor.kernel(gradient, [g] + srcs).as(Tensor?)
+        end
       in Op::GreaterEqual
         [nil, nil] of Tensor?
       in Nil

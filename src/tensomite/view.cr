@@ -67,6 +67,20 @@ module Tensomite
       strides.all?(&.zero?)
     end
 
+    # Returns the length of the runs of consecutive logical indices that a kernel
+    # can walk with a fixed stride (`#run_stride`) in every one of *views*, which
+    # share a shape of *size* elements: all of them when each view is dense or
+    # constant, otherwise the last dimension.
+    def self.run_length(size : Int32, views : Enumerable(View)) : Int32
+      return size if views.all? { |view| view.dense? || view.constant? }
+      views.first.shape.last? || 1
+    end
+
+    # Returns the step between the positions of consecutive elements of a run.
+    def run_stride : Int32
+      strides.last? || 0
+    end
+
     # Returns true when the view walks its elements in row-major order from element 0.
     def contiguous? : Bool
       offset == 0 && strides == View.row_major_strides(shape)

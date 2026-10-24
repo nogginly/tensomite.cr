@@ -1,45 +1,5 @@
 require "./spec_helper"
 
-# Returns *n* values in [-1, 1) from a fixed seed.
-private def values(n : Int32, seed : Int32) : Array(Float32)
-  rng = Random.new(seed)
-  Array.new(n) { rng.rand(-1.0..1.0).to_f32 }
-end
-
-# Returns a copy of *data* with element *j* of input *i* moved by *delta*.
-private def nudge(data : Array(Array(Float32)), i : Int32, j : Int32, delta : Float64) : Array(Array(Float32))
-  data.map(&.dup).tap { |copy| copy[i][j] += delta }
-end
-
-# Checks the gradients `Tensomite.grad` gives for `f(inputs)` against central
-# finite differences, on every device.
-#
-# The loss is the sum of `f`'s output times fixed random weights, so that every
-# output element contributes differently. *shapes* gives the input shapes; inputs
-# are random unless *data* supplies them.
-private def check_gradients(shapes : Array(Array(Int32)), data : Array(Array(Float32))? = nil,
-                            eps = 1e-2, tolerance = 2e-3, &f : Array(Tensor) -> Tensor) : Nil
-  data ||= shapes.map_with_index { |shape, i| values(shape.product(1), 7 + i) }
-  DEVICES.each do |device|
-    loss_of = ->(xs : Array(Array(Float32))) do
-      inputs = xs.zip(shapes).map { |(x, shape)| Tensor.from(x, shape, device) }
-      output = f.call(inputs)
-      weights = Tensor.from(values(output.size, 99), output.shape, device)
-      {inputs, (output * weights).sum}
-    end
-    inputs, loss = loss_of.call(data)
-    analytic = Tensomite.grad(loss, inputs).map(&.to_a(Float32))
-    data.each_with_index do |x, i|
-      x.size.times do |j|
-        up = nudge(data, i, j, eps)
-        down = nudge(data, i, j, -eps)
-        numeric = (loss_of.call(up)[1].to_a(Float32)[0] - loss_of.call(down)[1].to_a(Float32)[0]) / (2 * eps)
-        analytic[i][j].should be_close(numeric, tolerance * (1 + numeric.abs))
-      end
-    end
-  end
-end
-
 describe "Tensomite.grad" do
   it "differentiates the binary ops, broadcasting included" do
     check_gradients([[2, 3], [3]]) { |(a, b)| a + b }

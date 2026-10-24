@@ -78,6 +78,20 @@ module Tensomite
       unary(Op::Sqrt)
     end
 
+    # Returns *kernel* applied to *inputs*, broadcast to a common shape. Call it as
+    # `kernel.call(inputs)`; see `Tensomite.kernel`.
+    def self.kernel(kernel : Kernel, inputs : Array(Tensor)) : Tensor
+      unless inputs.size == kernel.arity
+        raise ArgumentError.new("kernel #{kernel.name} takes #{kernel.arity} inputs, not #{inputs.size}")
+      end
+      first = inputs.first
+      first.check_compatible("kernel #{kernel.name}", inputs)
+      first.check_float("kernel #{kernel.name}")
+      raise DTypeError.new("kernel #{kernel.name} needs F32, not #{first.dtype}") unless first.dtype.f32?
+      target = inputs.map(&.shape).reduce { |a, b| View.broadcast_shape(a, b) }
+      Tensor.lazy(Node.new(Op::Kernel, inputs.map(&.expand(target)), target, first.dtype, first.device, kernel: kernel))
+    end
+
     private def binary(op : Op, other : Tensor) : Tensor
       check_compatible(op.to_s, {other})
       target = View.broadcast_shape(shape, other.shape)

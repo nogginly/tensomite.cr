@@ -92,7 +92,7 @@ Each milestone is done when its exit criterion passes.
    1. Profile Metal decode: GPU time per op, and the host's share of each token.
    2. Parallel reductions on Metal (Decision X): the profile put 57% of a decoded token's GPU time in one-thread-per-row sums.
    3. A buffer pool, on host devices and Metal, and batched commits on Metal so the GPU starts before the host has encoded the whole graph.
-   4. Kernel macros for elementwise expressions, starting with a spike that settles whether Crystal's macro language can differentiate, or whether generation moves into a `{{ run(...) }}` helper.
+   4. Kernel macros for elementwise expressions. The spike settled it: pure macros suffice, flattening the block into a tape with an explicit stack and differentiating by a reverse sweep over it. No `{{ run(...) }}` helper is needed.
    5. Fused row ops.
    6. GPT-2 and the trainer on fused kernels, measured.
    7. Matmul epilogues, and tiling for square products on Metal.

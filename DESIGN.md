@@ -41,6 +41,8 @@ Type            |File                      |Role
 `Scheduler`     |`scheduler.cr`            |Turns unrealised nodes into kernel runs.                                                                                 
 `Tensomite.grad`|`autograd.cr`             |Builds the backward graph of a loss: lazy gradients for a list of params.                                                
 `Optimizer`     |`optim.cr`                |`SGD` and `AdamW`: new params from params and gradients.                                                                 
+`Kernel`        |`kernel.cr`, `kernels.cr` |A fused elementwise kernel made by the `Tensomite.kernel` macro, with its gradient kernels.                              
+`BufferPool`    |`buffer_pool.cr`          |Freed device memory kept for reuse, by exact size.                                                                       
 `HostDevice`    |`devices/host.cr`         |Abstract device whose kernels run on the host CPU; holds `HostBuffer`s.                                                  
 `CPU`           |`devices/cpu.cr`          |The reference device: host kernels on host-visible memory.                                                               
 `SimDiscrete`   |`devices/sim_discrete.cr` |A test device: host kernels on memory the host cannot map.                                                               
@@ -203,6 +205,7 @@ Unary     |`Exp`, `Log`, `Tanh`, `Sqrt`          |`exp`, `log`, `tanh`, `sqrt`, 
 Reduction |`Sum`, `Max`                          |`sum`, `max`, with optional `axis` and `keepdims`                     
 Structural|`Copy`, `Cat`, `Gather`, `MatMul`     |`contiguous`, `Tensor.cat`, `gather`, `matmul`                        
 Adjoint   |`GreaterEqual`, `Unview`, `ScatterAdd`|`greater_equal`; the other two only through `Tensomite.grad`          
+Fused     |`Kernel`                              |any `Tensomite.kernel`, such as `gelu`                                
 Composite |none: built from the rows above       |`mean`, `softmax`, `log_softmax`, `cross_entropy`, `layernorm`, `gelu`
 
 - **Scalars** become rank-0 leaf tensors of the operand's dtype (`Tensor.scalar`), which then broadcast like any other tensor. So `x * 0.5` is `Mul` of `x` and a broadcast scalar.
@@ -443,6 +446,27 @@ A graph built anew every step, as in training or decoding, would allocate a fres
 Reuse lags by one collection: memory comes back only when the collector runs. A training loop that collects once per step (`examples/shakespeare.cr`) gets most of its buffers back before the next step; on the Linux container, that took a step from 744 to 470 ms, with identical losses.
 
 **Batched commits on Metal.** The device commits its command buffer every `commit_every` dispatches (64), without waiting, and starts a new one. The GPU therefore starts work while the host is still building and encoding the rest. A queue runs its command buffers in order, with Metal tracking each buffer's readers and writers across them, so results are unchanged.
+
+## Kernel macros
+
+`Tensomite.kernel(name) { |x, …| expression }` fuses an elementwise expression into one primitive, `Op::Kernel`: one pass over memory on host devices and one dispatch on Metal, instead of a node per operation (Decision J). `Tensor#gelu` is the first: eight primitives become one kernel.
+
+```mermaid
+flowchart LR
+    B["block: x * 0.5 * (((x + x*x*x*0.044715) * √(2/π)).tanh + 1)"] --> T["tape, at compile time: t0 = x * c0, t1 = x * x, … t8 = t0 * t7"]
+    T --> C["Crystal: one Float32 statement per entry, in a loop over views in runs"]
+    T --> S["MSL: one statement per entry, compiled on first use"]
+    T --> G["reverse sweep: one gradient kernel per input"]
+    style T stroke:#2b8a3e,stroke-width:3px
+```
+
+1. **The tape.** The macro walks the block's syntax tree in post order, with an explicit stack, because the macro language has no recursion that returns values. Each operation becomes one tape entry with its own temporary, in Crystal's own order of evaluation, so `x * x * x` is `(x · x) · x`, as the composite computes it.
+2. **Constants.** A subexpression without inputs, such as `Math.sqrt(2 / Math::PI)`, is computed once in `Float64` and converted to `Float32`, which is exactly how `Tensor.scalar` converts a number operand.
+3. **The host loop** computes each entry in `Float32`, and Crystal never fuses a multiply and an add. So a kernel gives **the same bits as the composite it replaces**, and the composite is its oracle (`spec/kernel_spec.cr`). `tanh`, `exp`, `log` and `sqrt` call the same `Math` functions as the host kernels.
+4. **MSL** puts one statement per entry, so the Metal compiler cannot fuse operations either; only the maths library's functions differ from the CPU's. `Metal` compiles a kernel's source, after `metal/prelude.metal`, the first time the kernel runs, and caches the pipeline.
+5. **Gradients.** A reverse sweep over the tape applies each operation's chain rule: the output's gradient spreads to its operands, and contributions to one value are added in the order the sweep meets them. Each input gets its own gradient kernel, whose inputs are the output's gradient followed by the kernel's inputs. Autograd's rule for `Op::Kernel` applies them, so a kernel needs no hand-written backward. Gradient kernels have no gradients of their own.
+
+The expression language is deliberately small: `+`, `-` (binary and unary), `*`, `/`, number literals, constant paths such as `Math::PI`, and `tanh`, `exp`, `log` and `sqrt`. Anything else fails at compile time with the offending expression. Inputs broadcast like a binary op's, and must be `F32` on one device.
 
 ## Autograd
 
@@ -777,6 +801,20 @@ GPU time, each op alone, ms      |7.44  |6.78
 - **Metal decodes within 4% of `BLAS`** in the same run, and prefills 1.7 times as fast. `BLAS` itself varies by about 5% between runs (144 to 153 tokens/s), so the M7 exit compares the two within one run.
 - **What is left is GPU work:** matmul 3.8 ms, and about 2 ms of small elementwise dispatches, which fusion removes.
 
+**After kernel macros** (M7 part 4, M5 Pro, `gelu` as one kernel):
+
+Measure                    |Part 3|Part 4
+---------------------------|------|------
+Dispatches per token       |710   |614   
+Wall per decoded token, ms |6.98  |6.72  
+GPU time, each op alone, ms|6.78  |6.48  
+of which `MatMul`          |3.82  |3.80  
+of which `Sum` and `Max`   |1.21  |1.21  
+of which the 12 `gelu`s    |≈0.30 |0.04  
+
+- **`gelu` went from nine dispatches per layer to one,** and from about 25 µs of GPU time per layer to about 3.
+- **The rest of the non-matmul time is mostly inside `layernorm` and `softmax`:** their sums and maxima, and the `Sub`, `Div`, `Sqrt`, `Exp` and `Mul` around them. The fused row ops (part 5) replace each of them with one kernel.
+
 **Training a character-level GPT on Tiny Shakespeare, Linux container.** The M5 exit is a validation loss below 1.8 within an hour here, and M7's is below 1.6 within an hour (Decision R). Runs use `examples/shakespeare.cr` on `BLAS`, with AdamW and a cosine schedule from 1e-3 to 1e-4:
 
 Model                                   |Params|Tokens per step|ms per step|Steps|Wall time|Validation loss, nats/char        
@@ -803,7 +841,7 @@ Allocation, with `GC_UNMAP_THRESHOLD` unset|3.6 s              |0.9 s, with `GC_
 - **Model weights load as `F32` only.** `F16` and quantised weights arrive with M9.
 - **The KV cache grows by copying** (`Tensor.cat`), which is quadratic over a long generation and is half of decode time on `BLAS`.
 - **One device per op.** Moving data needs an explicit `to`, which goes through host memory.
-- **Every primitive is a separate kernel run.** `softmax` alone is five; fusion arrives in M7.
+- **Only what is written as a kernel is fused.** `gelu` is one kernel; `softmax`, `layernorm` and the attention's scale and mask are still several primitives each, until the fused row ops (M7 part 5) and the models' move onto kernels (M7 part 6).
 - **Each scalar operand is a new leaf,** uploaded to the device once per use.
 - **Buffer reuse waits for the collector.** A freed buffer returns to its pool only when the collector finalizes it, so a loop that does not collect between steps reuses less (see "Buffer pool").
 - **Gradients of gradients** are built by the same rules, but are not tested.
