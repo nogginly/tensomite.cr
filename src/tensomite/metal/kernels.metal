@@ -371,6 +371,105 @@ kernel void matmul_split_f32(device const float* a [[buffer(0)]],
     if (slice == 0 && live) dst[out_row * n + col] = total;
 }
 
+// Tiled matrix products, for when there are enough rows to share operands.
+//
+// A threadgroup owns a BM x BN block of outputs of one batch matrix, and each of
+// its (BM / TM) x (BN / TN) threads a TM x TN patch, whose rows and columns are
+// strided by the thread grid so that neighbouring threads read neighbouring
+// memory. k is walked in tiles of BK, which divides CHUNK: the threads first copy
+// a BM x BK tile of a and a BK x BN tile of b into threadgroup memory, each
+// element once, then every thread reads its operands from there.
+//
+// Bit-identical to matmul_split_f32, so the two can be chosen by speed alone:
+// each output sums every chunk of CHUNK in index order from zero, and adds the
+// chunk sums to its total in chunk order, never reading past k; it then adds the
+// exact zero split-K adds for chunks past k when their number is not a multiple
+// of SLICES, which turns a total of -0 into +0 as split-K does.
+template <uint BM, uint BN, uint BK, uint TM, uint TN>
+kernel void matmul_tiled(device const float* a [[buffer(0)]],
+                         device const float* b [[buffer(1)]],
+                         device float* dst [[buffer(2)]],
+                         constant View& va [[buffer(3)]],
+                         constant View& vb [[buffer(4)]],
+                         constant uint* dims [[buffer(5)]],
+                         uint3 group [[threadgroup_position_in_grid]],
+                         uint3 tid [[thread_position_in_threadgroup]]) {
+    constexpr uint TX = BN / TN, TY = BM / TM, THREADS = TX * TY;
+    // a's tile is stored k-major and b's row-major, each row padded by one, so
+    // that the reads of the inner loop and most stores avoid bank conflicts.
+    threadgroup float as[BK * (BM + 1)];
+    threadgroup float bs[BK * (BN + 1)];
+    uint m = dims[0], k = dims[1], n = dims[2];
+    uint batch = group.z, row0 = group.y * BM, col0 = group.x * BN;
+    uint t = tid.y * TX + tid.x;
+    int pa = offset_of(va, batch * m * k);
+    int pb = offset_of(vb, batch * k * n);
+    int ra = va.strides[va.ndim - 2], sa = va.strides[va.ndim - 1];
+    int sb = vb.strides[vb.ndim - 2], cb = vb.strides[vb.ndim - 1];
+    float total[TM][TN];
+    float partial[TM][TN];
+    for (uint i = 0; i < TM; i++) {
+        for (uint j = 0; j < TN; j++) {
+            total[i][j] = 0.0f;
+            partial[i][j] = 0.0f;
+        }
+    }
+    for (uint k0 = 0; k0 < k; k0 += BK) {
+        uint width = min(BK, k - k0);
+        // Copies the tiles, walking whichever index is contiguous in memory
+        // fastest across threads, and zero outside the matrices.
+        for (uint e = t; e < BM * BK; e += THREADS) {
+            uint r = sa == 1 ? e / BK : e % BM;
+            uint s = sa == 1 ? e % BK : e / BM;
+            bool inside = row0 + r < m && s < width;
+            as[s * (BM + 1) + r] = inside ? a[pa + int(row0 + r) * ra + int(k0 + s) * sa] : 0.0f;
+        }
+        for (uint e = t; e < BK * BN; e += THREADS) {
+            uint s = cb == 1 ? e / BN : e % BK;
+            uint c = cb == 1 ? e % BN : e / BK;
+            bool inside = col0 + c < n && s < width;
+            bs[s * (BN + 1) + c] = inside ? b[pb + int(k0 + s) * sb + int(col0 + c) * cb] : 0.0f;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint s = 0; s < width; s++) {
+            float x[TM], y[TN];
+            for (uint i = 0; i < TM; i++) x[i] = as[s * (BM + 1) + tid.y + i * TY];
+            for (uint j = 0; j < TN; j++) y[j] = bs[s * (BN + 1) + tid.x + j * TX];
+            for (uint i = 0; i < TM; i++) {
+                for (uint j = 0; j < TN; j++) {
+                    float product = x[i] * y[j];
+                    partial[i][j] = partial[i][j] + product;
+                }
+            }
+        }
+        if ((k0 + BK) % CHUNK == 0 || k0 + BK >= k) {
+            for (uint i = 0; i < TM; i++) {
+                for (uint j = 0; j < TN; j++) {
+                    total[i][j] = total[i][j] + partial[i][j];
+                    partial[i][j] = 0.0f;
+                }
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    uint chunks = (k + CHUNK - 1) / CHUNK;
+    bool padded = chunks % SLICES != 0;
+    for (uint i = 0; i < TM; i++) {
+        uint row = row0 + tid.y + i * TY;
+        for (uint j = 0; j < TN; j++) {
+            uint col = col0 + tid.x + j * TX;
+            if (row < m && col < n) dst[(batch * m + row) * n + col] = padded ? total[i][j] + 0.0f : total[i][j];
+        }
+    }
+}
+
+typedef decltype(matmul_tiled<32, 32, 64, 4, 4>) matmul_tiled_32_t;
+typedef decltype(matmul_tiled<64, 64, 32, 4, 4>) matmul_tiled_64_t;
+typedef decltype(matmul_tiled<32, 64, 32, 4, 4>) matmul_tiled_32x64_t;
+template [[host_name("matmul_tiled_32x32_f32")]] kernel matmul_tiled_32_t matmul_tiled<32, 32, 64, 4, 4>;
+template [[host_name("matmul_tiled_64x64_f32")]] kernel matmul_tiled_64_t matmul_tiled<64, 64, 32, 4, 4>;
+template [[host_name("matmul_tiled_32x64_f32")]] kernel matmul_tiled_32x64_t matmul_tiled<32, 64, 32, 4, 4>;
+
 #if __METAL_VERSION__ >= 300
 kernel void fill_zero_f32(device float* dst [[buffer(0)]],
                           constant uint& n [[buffer(1)]],

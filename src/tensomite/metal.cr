@@ -45,7 +45,7 @@ module Tensomite
   # Kernels are compiled from MSL source when the device is created, with fast math
   # off. Arithmetic, comparisons and reductions give the same bits as the host
   # kernels. `exp`, `log`, `tanh` and `sqrt` may differ in the last bits, and so
-  # may `MatMul`, which splits `k` across threads (`#matmul_mode`); all of them
+  # may `MatMul`, which splits `k` into chunks (`#matmul_mode`); all of them
   # repeat exactly from run to run and are shape-invariant (Decisions K and S).
   class Metal < HostDevice
     private PRELUDE          = {{ read_file("#{__DIR__}/metal/prelude.metal") }}
@@ -62,7 +62,7 @@ module Tensomite
       Op::Exp => "exp_f32", Op::Log => "log_f32", Op::Tanh => "tanh_f32", Op::Sqrt => "sqrt_f32",
       Op::Copy => "copy_f32",
     }
-    private OTHER          = %w[copy_into_f32 sum_f32 max_f32 sum_short_f32 max_short_f32 gather_f32 scatter_add_f32 unview_f32 matmul_f32 matmul_split_f32 softmax_f32 log_softmax_f32 layernorm_f32]
+    private OTHER          = %w[copy_into_f32 sum_f32 max_f32 sum_short_f32 max_short_f32 gather_f32 scatter_add_f32 unview_f32 matmul_f32 matmul_split_f32 matmul_tiled_32x32_f32 matmul_tiled_64x64_f32 matmul_tiled_32x64_f32 softmax_f32 log_softmax_f32 layernorm_f32]
     private OPTIONAL       = %w[fill_zero_f32 matmul_atomic_f32]
     private COLS           =  32
     private SLICES         =   8
@@ -80,7 +80,41 @@ module Tensomite
       # As `Split`, but each thread adds its chunks into the output atomically, in
       # whatever order threads finish. Not deterministic; for measurement only.
       Atomic
+      # Blocks of outputs per threadgroup, with tiles of both operands shared
+      # through threadgroup memory (`#matmul_tile`): bit-identical to `Split`, and
+      # faster when there are many rows.
+      Tiled
+      # `Tiled` for products of at least `TILED_ROWS` rows, `Split` otherwise, as
+      # in decoding one token. Bit-identical to both. The default.
+      Auto
     end
+
+    # The outputs a threadgroup of the tiled matmul computes, rows by columns.
+    enum MatMulTile
+      T32x32
+      T64x64
+      T32x64
+
+      # Returns the block's rows and columns.
+      def block : {Int32, Int32}
+        case self
+        in .t32x32? then {32, 32}
+        in .t64x64? then {64, 64}
+        in .t32x64? then {32, 64}
+        end
+      end
+
+      protected def kernel : String
+        rows, cols = block
+        "matmul_tiled_#{rows}x#{cols}_f32"
+      end
+    end
+
+    # The fewest rows for which `MatMulMode::Auto` uses the tiled matmul.
+    TILED_ROWS = 16
+
+    # Each thread of the tiled matmul computes a patch of this many rows and columns.
+    private TILE_PATCH = 4
 
     # Returns true when the system has a Metal GPU. Some virtual machines, such as
     # hosted CI runners, do not.
@@ -101,7 +135,10 @@ module Tensomite
     getter host_ops = 0
 
     # How `MatMul` divides its work; see `MatMulMode`.
-    property matmul_mode = MatMulMode::Split
+    property matmul_mode = MatMulMode::Auto
+
+    # The block size of the tiled matmul; see `MatMulTile`.
+    property matmul_tile = MatMulTile::T64x64
 
     # Where a `Metal` device's time goes, collected while `Metal#profile` is set.
     #
@@ -131,7 +168,12 @@ module Tensomite
       property dispatches = 0
       property command_buffers = 0
 
-      def initialize(@per_kernel = false)
+      # True when `#kernels` keys each op by its shapes as well as its name: a
+      # matmul's two sources, `MatMul [64,768]·[768,2304]`, and any other op's
+      # output. Takes effect only with `#per_kernel?`.
+      getter? shapes : Bool
+
+      def initialize(@per_kernel = false, @shapes = false)
       end
 
       protected def add_kernel(name : String, seconds : Float64) : Nil
@@ -255,7 +297,7 @@ module Tensomite
         @gpu_ops += 1
         if profile && start
           profile.encode += (Time.instant - start).total_seconds
-          flush(node.op.to_s) if profile.per_kernel?
+          flush(profile_label(node, profile)) if profile.per_kernel?
         end
       else
         flush
@@ -323,17 +365,26 @@ module Tensomite
     #
     # `Split` and `Atomic` launch one threadgroup per output row and block of
     # `COLS` columns, with `SLICES` threads per column, each summing chunks of `k`.
+    # `Tiled` launches one threadgroup per block of `#matmul_tile` outputs of each
+    # batch matrix, with a thread per `TILE_PATCH` x `TILE_PATCH` patch.
     private def encode_matmul(node : Node, output : MetalBuffer) : Nil
       a, b = node.srcs
       m, k, n = a.shape[-2], a.shape[-1], b.shape[-1]
       dims = Slice[m.to_u32, k.to_u32, n.to_u32].to_unsafe_bytes
       buffers = [mtl(a), mtl(b), output.mtl]
       constants = [view_args(a.view), view_args(b.view), dims]
+      return if node.size == 0
       case matmul_mode
       in .serial?
         dispatch("matmul_f32", node.size, buffers, constants << u32(node.size))
-      in .split?
-        dispatch_groups("matmul_split_f32", {(n + COLS - 1) // COLS, node.size // n}, {COLS, SLICES}, buffers, constants)
+      in .split?, .tiled?, .auto?
+        if matmul_mode.tiled? || (matmul_mode.auto? && m >= TILED_ROWS)
+          rows, cols = matmul_tile.block
+          groups = {(n + cols - 1) // cols, (m + rows - 1) // rows, node.size // (m * n)}
+          dispatch_groups(matmul_tile.kernel, groups, {cols // TILE_PATCH, rows // TILE_PATCH}, buffers, constants)
+        else
+          dispatch_groups("matmul_split_f32", {(n + COLS - 1) // COLS, node.size // n}, {COLS, SLICES}, buffers, constants)
+        end
       in .atomic?
         raise DeviceError.new("atomic matmul needs Metal 3") unless @pipelines.has_key?("matmul_atomic_f32")
         dispatch("fill_zero_f32", node.size, [output.mtl], [u32(node.size)])
@@ -474,13 +525,19 @@ module Tensomite
       dispatched
     end
 
-    # Encodes one dispatch of kernel *name* over a 2-D grid of *groups*
+    # Encodes one dispatch of kernel *name* over a 2-D or 3-D grid of *groups*
     # threadgroups, each of *threads* threads, binding arguments as `#dispatch` does.
     private def dispatch_groups(name : String, groups : {Int32, Int32}, threads : {Int32, Int32},
                                 buffers : Array(Void*), constants : Array(Bytes)) : Nil
-      return if groups[0] == 0 || groups[1] == 0
+      dispatch_groups(name, {groups[0], groups[1], 1}, threads, buffers, constants)
+    end
+
+    # :ditto:
+    private def dispatch_groups(name : String, groups : {Int32, Int32, Int32}, threads : {Int32, Int32},
+                                buffers : Array(Void*), constants : Array(Bytes)) : Nil
+      return if groups.any?(&.zero?)
       bind(name, buffers, constants)
-      grid = StaticArray[groups[0].to_u64, groups[1].to_u64, 1_u64]
+      grid = StaticArray[groups[0].to_u64, groups[1].to_u64, groups[2].to_u64]
       group = StaticArray[threads[0].to_u64, threads[1].to_u64, 1_u64]
       ObjC.send(Nil, open_encoder, "dispatchThreadgroups:threadsPerThreadgroup:", grid.to_unsafe, group.to_unsafe)
       dispatched
@@ -561,6 +618,12 @@ module Tensomite
     #
     # With a per-kernel profile, *label* names the op whose work the command
     # buffers hold, and their GPU time is recorded under it.
+    private def profile_label(node : Node, profile : Profile) : String
+      return node.op.to_s unless profile.shapes?
+      shapes = node.op.try(&.mat_mul?) ? node.srcs.map(&.shape) : [node.shape]
+      "#{node.op} #{shapes.map { |shape| "[#{shape.join(',')}]" }.join('·')}"
+    end
+
     private def flush(label : String? = nil) : Nil
       commit
       return if @in_flight.empty?

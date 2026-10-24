@@ -73,7 +73,7 @@ require "./spec_helper"
           metal.matmul_mode = mode
           Tensor.from(xs, [3, 200], metal).matmul(Tensor.from(ws, [200, 70], metal)).to_a(Float32)
       ensure
-        metal.matmul_mode = Metal::MatMulMode::Split
+        metal.matmul_mode = Metal::MatMulMode::Auto
         end
         expected = Tensor.from(xs, [3, 200]).matmul(Tensor.from(ws, [200, 70])).to_a(Float32)
 
@@ -98,6 +98,51 @@ require "./spec_helper"
         it "gives a row the same bits whatever the number of rows" do
           one_row = Tensor.from(xs[0, 200], [1, 200], metal).matmul(Tensor.from(ws, [200, 70], metal)).to_a(Float32)
           one_row.should eq product.call(Metal::MatMulMode::Split)[0, 70]
+        end
+
+        # Returns a·b under *mode* and *tile*; a is [*batch, m, k], and b is
+        # [*batch, k, n], or [*batch, n, k] transposed when *b_transposed*.
+        tiled_product = ->(mode : Metal::MatMulMode, tile : Metal::MatMulTile, a_shape : Array(Int32), b_shape : Array(Int32), b_transposed : Bool) do
+          metal.matmul_mode, metal.matmul_tile = mode, tile
+          rng = Random.new(a_shape.sum + b_shape.sum)
+          a = Tensor.from(Array(Float32).new(a_shape.product) { rng.rand(-1f32...1f32) }, a_shape, metal)
+          b = Tensor.from(Array(Float32).new(b_shape.product) { rng.rand(-1f32...1f32) }, b_shape, metal)
+          a.matmul(b_transposed ? b.transpose : b).to_a(Float32)
+      ensure
+        metal.matmul_mode, metal.matmul_tile = Metal::MatMulMode::Auto, Metal::MatMulTile::T64x64
+        end
+        shapes = [
+          {[3, 200], [200, 70], false}, {[70, 129], [129, 65], false}, {[64, 64], [64, 64], false},
+          {[2, 37, 577], [2, 577, 33], false}, {[33, 100], [97, 100], true}, {[128, 768], [96, 768], true},
+          {[5, 1], [1, 3], false},
+        ]
+
+        it "gives split's bits when tiled, with every tile, batched and transposed" do
+          shapes.each do |(a_shape, b_shape, b_transposed)|
+            split = tiled_product.call(Metal::MatMulMode::Split, Metal::MatMulTile::T64x64, a_shape, b_shape, b_transposed)
+            Metal::MatMulTile.values.each do |tile|
+              tiled_product.call(Metal::MatMulMode::Tiled, tile, a_shape, b_shape, b_transposed).should eq split
+            end
+          end
+        end
+
+        it "gives split's bits when automatic, whatever the number of rows" do
+          [{[1, 300], [300, 50], false}, {[40, 300], [300, 50], false}].each do |(a_shape, b_shape, b_transposed)|
+            tiled_product.call(Metal::MatMulMode::Auto, Metal::MatMulTile::T64x64, a_shape, b_shape, b_transposed)
+              .should eq tiled_product.call(Metal::MatMulMode::Split, Metal::MatMulTile::T64x64, a_shape, b_shape, b_transposed)
+          end
+        end
+
+        it "gives a tiled prefill the bits of a decode" do
+          model = GPT2.load("#{__DIR__}/fixtures/tiny_gpt2/model.safetensors", heads: 4, device: metal)
+          ids = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200]
+          metal.matmul_mode = Metal::MatMulMode::Tiled
+          prefill = model.forward(ids, model.new_cache).to_a(Float32)
+          metal.matmul_mode = Metal::MatMulMode::Split
+          cache = model.new_cache
+          ids.flat_map { |id| model.forward([id], cache).to_a(Float32) }.should eq prefill
+        ensure
+          metal.matmul_mode = Metal::MatMulMode::Auto
         end
 
         it "stays close to the host when atomic" do
@@ -132,11 +177,15 @@ require "./spec_helper"
       end
 
       it "reuses the Metal buffers of collected tensors" do
-        20.times { (Tensor.from(f32(1, 2), [2], metal) * 2).realize }
-        5.times { GC.collect }
+        # Collection is conservative and finalizers can run on another thread,
+        # so memory comes back after some collection, not after a known one.
         hits = metal.buffer_pool.hits
-        20.times { (Tensor.from(f32(1, 2), [2], metal) * 2).to_a(Float32).should eq f32(2, 4) }
-        metal.buffer_pool.hits.should be > hits
+        reused = (1..10).any? do
+          20.times { (Tensor.from(f32(1, 2), [2], metal) * 2).to_a(Float32).should eq f32(2, 4) }
+          GC.collect
+          metal.buffer_pool.hits > hits
+        end
+        reused.should be_true
       end
 
       it "shares memory with the host" do

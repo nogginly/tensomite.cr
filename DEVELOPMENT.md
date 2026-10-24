@@ -41,6 +41,8 @@ crystal build --release examples/shakespeare.cr -o shakespeare
 
 **High system time is OpenBLAS, not the collector.** OpenBLAS's worker threads busy-wait between calls, so `time` reports several times the wall time in `user` and `sys`. `OPENBLAS_NUM_THREADS=1` removes it, at little cost to the wall time of these small models.
 
+**Random order.** `ops test_specs` runs `crystal spec --order random`, which ends with `Randomized with seed: N`. To replay that order, as when a failure appears only sometimes, run `crystal spec --order N`.
+
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs on every push to `main` and on every pull request, whatever its base, so stacked PRs are checked too. It runs on Linux, with OpenBLAS installed, and on macOS, with Accelerate:
@@ -207,6 +209,8 @@ crystal build --cross-compile --target aarch64-apple-darwin spec/gpu_spec.cr spe
 ```
 
 type-checks and generates code for the Metal path without linking it, so mistakes in Crystal surface before a Mac is involved. The MSL in `metal/kernels.metal` is compiled by the driver only when a `Metal` device is created, so it is checked only on a Mac: `crystal spec spec/metal_spec.cr spec/gpu_spec.cr`. A compile error is raised as `DeviceError`, with the compiler's message.
+
+**Kernels on Linux.** MSL is close enough to C++ that a kernel can be run on the CPU before it reaches a GPU: compile its source with `g++ -std=c++20` behind a few defines (`kernel`, `device` and `constant` empty, `threadgroup` as `static`), run each threadgroup's threads as `std::thread`s, and make `threadgroup_barrier` a `std::barrier`. That checks indexing and order of arithmetic, though not MSL's own rules, such as matching widths of position attributes.
 
 CI runs the specs on macOS too. A hosted runner may have no usable GPU, in which case the Metal specs are pending rather than failing.
 

@@ -334,13 +334,15 @@ Op          |Threads                                                            
 
 **Errors.** A GPU kernel cannot raise. `Gather` and `ScatterAdd` report an id out of range through a small shared error buffer, and `flush` raises the host's `ExecutionError` when it finds a report. The error therefore surfaces when the command buffer completes, at `realize`, as it does on the host. One difference remains: the nodes encoded before the error are marked realised, with undefined contents for the failing one.
 
-**`MatMul`** has three modes (`Metal#matmul_mode`), because a matrix-vector product (`m` = 1), which is what decoding mostly does, has too few outputs to fill the GPU with one thread each:
+**`MatMul`** has five modes (`Metal#matmul_mode`). A matrix-vector product (`m` = 1), which is what decoding mostly does, has too few outputs to fill the GPU with one thread each; a prefill has enough outputs that reading the operands, not adding them, is the cost:
 
-Mode             |Threads per output                    |How partial sums combine                     |Bits                                                           
------------------|--------------------------------------|---------------------------------------------|---------------------------------------------------------------
-`Serial`         |one, adding over all of `k` in order  |none                                         |identical to the host                                          
-`Split` (default)|8, each summing chunks of 64 along `k`|one thread adds the chunks in chunk order    |repeat every run; independent of `m` and of zero-padding of `k`
-`Atomic`         |8, as `Split`                         |atomic adds, in whatever order threads finish|may change from run to run; for measurement only               
+Mode            |Work per thread                                                              |How partial sums combine                     |Bits                                                           
+----------------|-----------------------------------------------------------------------------|---------------------------------------------|---------------------------------------------------------------
+`Serial`        |one output, adding over all of `k` in order                                  |none                                         |identical to the host                                          
+`Split`         |whole chunks of 64 along `k` for one output, 8 threads per output            |one thread adds the chunks in chunk order    |repeat every run; independent of `m` and of zero-padding of `k`
+`Atomic`        |as `Split`                                                                   |atomic adds, in whatever order threads finish|may change from run to run; for measurement only               
+`Tiled`         |a 4×4 patch of outputs, reading operands from tiles shared by its threadgroup|each output adds its chunks in chunk order   |identical to `Split`                                           
+`Auto` (default)|`Tiled` for 16 rows or more, `Split` below                                   |as the mode chosen                           |identical to `Split`                                           
 
 ```mermaid
 flowchart LR
@@ -356,7 +358,27 @@ flowchart LR
 - **Decision S.** Splitting changes the order of additions, so `Split` no longer matches the host bit for bit: `spec/gpu_spec.cr` compares matmuls within 1e-5. Levels 1 and 2 of Decision K still hold, which is what caching and reproducibility need.
 - **No fused multiply-add.** Each product and running sum are separate statements, so the compiler cannot fuse them into one rounding. That is what keeps `Serial` identical to the host.
 
-**Profiling.** Setting `Metal#profile` to a `Metal::Profile` collects where time goes: seconds spent encoding dispatches, allocating and waiting for the GPU, the number of dispatches and command buffers, and the wall time of each op that ran on the host. With `per_kernel: true`, every op is committed alone and its GPU time recorded under its op's name, which slows the run but shows the GPU's own cost per op. `bench/profile_gpt2.cr` prints both for a decoded GPT-2 token.
+**Tiled matmul (Decision AD).** In a prefill each weight is used by every token, yet `Split` reads it from memory once per output. The tiled kernel (`matmul_tiled` in `metal/kernels.metal`, an MSL template) gives each threadgroup a block of outputs (`Metal#matmul_tile`: 64×64 by default, or 32×32 and 32×64 for comparison) and each thread a 4×4 patch of it. For each tile of `k` the threadgroup copies a block of `a` and of `b` into threadgroup memory, every element once, along whichever index is contiguous in memory, so the head's transposed embedding loads as well as a plain weight; then every thread reads its operands from there. Each value fetched serves a whole row or column of the block, not one output.
+
+Tiling changes where operands are read from, not the order they are added in. Each output still sums every chunk of 64 from zero in index order, then adds the chunk sums to its total in chunk order, and never reads past `k`; it even adds the exact zero split-K adds for chunks past `k` when their number is not a multiple of 8, which matters only for a total of `-0`. So `Tiled` gives `Split`'s bits, and `Auto` can choose between them by speed alone: prefill (tiled) and decode (split) stay bit-identical (`spec/metal_spec.cr`). What this rules out is Apple's 8×8 matrix instructions (`simdgroup_matrix`), whose internal order of addition is not specified.
+
+```mermaid
+flowchart TB
+    start["threadgroup: a 64×64 block of outputs; each thread a 4×4 patch, total = 0"] --> chunk{{"next tile of k?"}}
+    chunk -- yes --> load["copy a's and b's tiles into threadgroup memory, once"]
+    load --> partial["each thread: partial += a·b over the tile's k, in order"]
+    partial --> boundary{{"end of a chunk of 64?"}}
+    boundary -- yes --> combine["total = total + partial; partial = 0"]
+    boundary -- no --> chunk
+    combine --> chunk
+    chunk -- no --> store["write the totals"]
+    style partial stroke:#1971c2,stroke-width:3px
+    style combine stroke:#1971c2,stroke-width:3px
+```
+
+The kernel was checked before it first ran on a GPU by compiling the MSL source as C++ with each threadgroup's threads as OS threads and real barriers: every tile matched `Split` bit for bit on odd sizes, batched and transposed operands, while `Serial` differed whenever `k` > 64.
+
+**Profiling.** Setting `Metal#profile` to a `Metal::Profile` collects where time goes: seconds spent encoding dispatches, allocating and waiting for the GPU, the number of dispatches and command buffers, and the wall time of each op that ran on the host. With `per_kernel: true`, every op is committed alone and its GPU time recorded under its op's name, which slows the run but shows the GPU's own cost per op; with `shapes: true` as well, under its shapes too, such as `MatMul [128,768]·[768,50257]`. `bench/profile_gpt2.cr` prints both for a decoded GPT-2 token, or with `--prefill N` for a prefill of N tokens, by shape and with each matmul's GFLOP/s.
 
 The atomic kernel needs `atomic_float`, from Metal 3. Without it the device still works, and only `Atomic` raises.
 
@@ -804,7 +826,7 @@ prefill MLP up, 64 rows     |11.851|12.574|11.537|8%
 - **A token's matmuls take about 3 ms of its 16.** Each layer's four products take about 211 µs, so 2.5 ms for 12 layers, plus 0.6 ms for the logits. The smaller weights may stay in the GPU's cache across the 20 products, so those figures flatter decode a little.
 - **With 64 rows, splitting costs 6%** over serial: the GPU is already full, and the split's barriers are pure cost. One kernel for every number of rows is what keeps prefill equal to decode.
 - **Decode is still behind `BLAS`** (16 ms against 7 ms per token). The matmuls take about 3 ms of it (above), so about 13 ms goes elsewhere. Each primitive op is its own dispatch, hundreds per token, and the reductions inside `layernorm` and `softmax` use one thread per output. That is M7's work: kernel macros fuse those chains (Decision O requires Metal to beat `BLAS` there).
-- **Square matmuls barely change, at 99 GFLOP/s** against Accelerate's 1.3 TFLOP/s on the CPU's matrix units. They already had enough outputs to fill the GPU; they need tiling in threadgroup memory, which comes with M7's matmul epilogues.
+- **Square matmuls barely change, at 99 GFLOP/s** against Accelerate's 1.3 TFLOP/s on the CPU's matrix units. They already had enough outputs to fill the GPU; they needed tiling in threadgroup memory, which came in M7 part 8.
 - **About 0.3 ms per realise is fixed cost:** committing a command buffer and waiting for it. It dominates small matrices, and is paid once per decoded token.
 - **With one thread per output (serial), decode left most of the GPU idle:** a 768-wide layer launched 768 threads, each looping over all of `k`.
 
@@ -927,7 +949,23 @@ Metal prefill, tokens/s (split)  |1,642 |1,590
 Wall per decoded token, ms       |4.95  |4.98      
 
 - **Metal still decodes faster, by 7% rather than 17%.** Decision O's requirement holds, with less room.
-- **`BLAS` now prefills half as fast again as Metal.** Prefill is a few large matmuls, where Accelerate is strong and Metal's untiled matmul is not; tiling is M7 part 7.
+- **`BLAS` now prefills half as fast again as Metal.** Prefill is a few large matmuls, where Accelerate is strong and Metal's matmul, untiled until M7 part 8, was not.
+
+**After the tiled matmul** (M7 part 8, M5 Pro, GPU time per product of a 128-token GPT-2 prefill from `bench/profile_gpt2.cr --prefill 128`):
+
+Products                        |Before, ms|After, ms|GFLOP/s after|`BLAS` GFLOP/s
+--------------------------------|----------|---------|-------------|--------------
+head, `[128,768]·[768,50257]`   |24.9      |4.0      |2,481        |1,010         
+mlp in, ×12                     |13.3      |3.4      |2,106        |1,139         
+attention in, ×12               |10.0      |3.0      |1,826        |1,450         
+mlp out, ×12                    |12.3      |7.5      |967          |1,756         
+attention out, ×12              |3.5       |1.9      |941          |1,498         
+attention scores and values, ×24|3.4       |0.6      |840–1,240    |730–970       
+all GPU work                    |69.0      |22.1     |             |              
+
+- **A 128-token prefill runs at 5,539 tokens/s,** against 2,010 for `BLAS` in `bench/gpt2.cr`: Decision AF's target, with room. Decode is unchanged (183 against `Split`'s 187 tokens/s, within run-to-run noise), because it still uses `Split`.
+- **64×64 blocks win everywhere it matters.** In `bench/matmul.cr`, 32×32 and 32×64 blocks were slower on every large product, including the narrow ones.
+- **Products with 768 output columns are the gap left** (Decision AG). A 128 × 768 output is 24 blocks of 64×64, too few to occupy the GPU, and each walks all of `k` alone; mlp out and attention out are 43% of the prefill now. Splitting `k` across threadgroups would fill the GPU, but split-K's left fold, `((c0 + c1) + c2) + …`, means each chunk's sum would have to be stored and folded by a second kernel, about 19 MB of scratch for mlp out, for an estimated 3 of 22 ms.
 
 **Training step in the Linux container through M7** (the 0.8M-param model, 30 steps, identical losses):
 
@@ -974,6 +1012,7 @@ Allocation, with `GC_UNMAP_THRESHOLD` unset|3.6 s              |0.9 s, with `GC_
 
 ## Current limits
 
+- **Metal matmuls with few output blocks are slower than Accelerate.** A prefill's products with 768 output columns run at about 950 GFLOP/s against Accelerate's 1.5–1.8 TFLOP/s, though prefill as a whole is 2.7 times as fast (see "Performance baselines").
 - **Element counts and offsets are `Int32`,** following Crystal's `Slice` indexing. That caps one buffer at about 2 GB.
 - **Only `F32` and `I32`.** No type promotion: operands must have the same dtype.
 - **BLAS covers `F32` matmul only.** See "Performance baselines" for how far the oracle is behind it.
