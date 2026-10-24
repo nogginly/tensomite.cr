@@ -67,7 +67,7 @@ module Tensomite
     private COLS           =  32
     private SLICES         =   8
     private REDUCE_THREADS = 256
-    private REDUCE_CHUNK   =  64
+    private REDUCE_CHUNK   =  16
 
     # How `MatMul` divides its work.
     enum MatMulMode
@@ -307,11 +307,14 @@ module Tensomite
       end
       name = node.op == Op::Sum ? "sum" : "max"
       chunks = (run + REDUCE_CHUNK - 1) // REDUCE_CHUNK
+      # A run along the (permuted) last axis, or over a dense or constant view, is
+      # walked by stride; one over several dimensions of another view is not.
+      walk = u32(node.axis || view.dense? || view.constant? ? 1 : 0)
       if chunks <= 1
-        dispatch("#{name}_short_f32", node.size, [mtl(src), output.mtl], [view_args(view), u32(run), u32(node.size)])
+        dispatch("#{name}_short_f32", node.size, [mtl(src), output.mtl], [view_args(view), u32(run), u32(node.size), walk])
       else
         threads = Math.min(chunks, REDUCE_THREADS)
-        dispatch_groups("#{name}_f32", {node.size, 1}, {threads, 1}, [mtl(src), output.mtl], [view_args(view), u32(run)])
+        dispatch_groups("#{name}_f32", {node.size, 1}, {threads, 1}, [mtl(src), output.mtl], [view_args(view), u32(run), walk])
       end
     end
 
@@ -517,12 +520,13 @@ module Tensomite
 
     # Returns *view* laid out as the kernels' `View` struct.
     private def view_args(view : View) : Bytes
-      args = Slice(Int32).new(2 + 2 * MAX_DIMS)
+      args = Slice(Int32).new(3 + 2 * MAX_DIMS)
       args[0], args[1] = view.ndim, view.offset
       view.ndim.times do |dim|
         args[2 + dim] = view.shape[dim]
         args[2 + MAX_DIMS + dim] = view.strides[dim]
       end
+      args[2 + 2 * MAX_DIMS] = view.dense? ? 1 : 0
       args.to_unsafe_bytes
     end
 

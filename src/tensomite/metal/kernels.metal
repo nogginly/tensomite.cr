@@ -62,20 +62,31 @@ kernel void copy_into_f32(device const float* src [[buffer(0)]],
 // exact in any order, so it matches the host bit for bit; Sum adds in a different
 // order from the host's (Decision X).
 //
+// When `walk` is set, the run is one stretch of the view's last dimension, and
+// its elements are found from its start by the last stride; otherwise each goes
+// through offset_of.
+//
 // A run of one chunk or less is folded by one thread per output (sum_short_f32,
 // max_short_f32), which is the same arithmetic as a single chunk.
 #define REDUCE_THREADS 256
-#define REDUCE_CHUNK 64
+#define REDUCE_CHUNK 16
+
+// Returns the position of element s of the run that starts at logical index base.
+static int run_position(constant View& v, int start, uint walk, uint base, uint s) {
+    return walk ? start + int(s) * run_stride(v) : offset_of(v, base + s);
+}
 
 kernel void sum_short_f32(device const float* a [[buffer(0)]],
                           device float* dst [[buffer(1)]],
                           constant View& v [[buffer(2)]],
                           constant uint& run [[buffer(3)]],
                           constant uint& count [[buffer(4)]],
+                          constant uint& walk [[buffer(5)]],
                           uint row [[thread_position_in_grid]]) {
     if (row >= count) return;
+    int start = offset_of(v, row * run);
     float acc = 0.0f;
-    for (uint j = 0; j < run; j++) acc = acc + a[offset_of(v, row * run + j)];
+    for (uint j = 0; j < run; j++) acc = acc + a[run_position(v, start, walk, row * run, j)];
     dst[row] = 0.0f + acc;
 }
 
@@ -84,11 +95,13 @@ kernel void max_short_f32(device const float* a [[buffer(0)]],
                           constant View& v [[buffer(2)]],
                           constant uint& run [[buffer(3)]],
                           constant uint& count [[buffer(4)]],
+                          constant uint& walk [[buffer(5)]],
                           uint row [[thread_position_in_grid]]) {
     if (row >= count) return;
-    float acc = a[offset_of(v, row * run)];
+    int start = offset_of(v, row * run);
+    float acc = a[start];
     for (uint j = 1; j < run; j++) {
-        float x = a[offset_of(v, row * run + j)];
+        float x = a[run_position(v, start, walk, row * run, j)];
         acc = x > acc ? x : acc;
     }
     dst[row] = acc;
@@ -98,10 +111,13 @@ kernel void sum_f32(device const float* a [[buffer(0)]],
                     device float* dst [[buffer(1)]],
                     constant View& v [[buffer(2)]],
                     constant uint& run [[buffer(3)]],
+                    constant uint& walk [[buffer(4)]],
                     uint row [[threadgroup_position_in_grid]],
                     uint t [[thread_position_in_threadgroup]],
                     uint threads [[threads_per_threadgroup]]) {
     threadgroup float partial[REDUCE_THREADS];
+    uint base = row * run;
+    int start = offset_of(v, base);
     uint chunks = (run + REDUCE_CHUNK - 1) / REDUCE_CHUNK;
     float total = 0.0f;
     for (uint first = 0; first < chunks; first += threads) {
@@ -109,7 +125,7 @@ kernel void sum_f32(device const float* a [[buffer(0)]],
         float acc = 0.0f;
         if (c < chunks) {
             uint stop = min(run, (c + 1) * REDUCE_CHUNK);
-            for (uint s = c * REDUCE_CHUNK; s < stop; s++) acc = acc + a[offset_of(v, row * run + s)];
+            for (uint s = c * REDUCE_CHUNK; s < stop; s++) acc = acc + a[run_position(v, start, walk, base, s)];
         }
         partial[t] = acc;
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -126,19 +142,22 @@ kernel void max_f32(device const float* a [[buffer(0)]],
                     device float* dst [[buffer(1)]],
                     constant View& v [[buffer(2)]],
                     constant uint& run [[buffer(3)]],
+                    constant uint& walk [[buffer(4)]],
                     uint row [[threadgroup_position_in_grid]],
                     uint t [[thread_position_in_threadgroup]],
                     uint threads [[threads_per_threadgroup]]) {
     threadgroup float partial[REDUCE_THREADS];
+    uint base = row * run;
+    int start = offset_of(v, base);
     uint chunks = (run + REDUCE_CHUNK - 1) / REDUCE_CHUNK;
-    float total = a[offset_of(v, row * run)];
+    float total = a[start];
     for (uint first = 0; first < chunks; first += threads) {
         uint c = first + t;
         if (c < chunks) {
             uint stop = min(run, (c + 1) * REDUCE_CHUNK);
-            float acc = a[offset_of(v, row * run + c * REDUCE_CHUNK)];
+            float acc = a[run_position(v, start, walk, base, c * REDUCE_CHUNK)];
             for (uint s = c * REDUCE_CHUNK + 1; s < stop; s++) {
-                float x = a[offset_of(v, row * run + s)];
+                float x = a[run_position(v, start, walk, base, s)];
                 acc = x > acc ? x : acc;
             }
             partial[t] = acc;
@@ -391,21 +410,24 @@ kernel void matmul_atomic_f32(device const float* a [[buffer(0)]],
 // row's chunks of REDUCE_CHUNK at fixed offsets, a thread per chunk, and the
 // first thread folds the chunk results in chunk order, as the reductions above
 // do, so a row padded with -inf (softmax) keeps its bits. Each thread then
-// rewrites only the chunks it wrote itself.
+// rewrites only the chunks it wrote itself. A row lies along the last dimension,
+// so its elements are found from its start by the last stride.
 //
 // Returns the maximum of row `base` of `n` elements of `a` through `v`.
 static float row_max(device const float* a, constant View& v, uint base, uint n,
                      threadgroup float* partial, threadgroup float* shared,
                      uint t, uint threads) {
     uint chunks = (n + REDUCE_CHUNK - 1) / REDUCE_CHUNK;
-    float top = a[offset_of(v, base)];
+    int start = offset_of(v, base);
+    int stride = run_stride(v);
+    float top = a[start];
     for (uint first = 0; first < chunks; first += threads) {
         uint c = first + t;
         if (c < chunks) {
             uint stop = min(n, (c + 1) * REDUCE_CHUNK);
-            float acc = a[offset_of(v, base + c * REDUCE_CHUNK)];
+            float acc = a[start + int(c * REDUCE_CHUNK) * stride];
             for (uint s = c * REDUCE_CHUNK + 1; s < stop; s++) {
-                float x = a[offset_of(v, base + s)];
+                float x = a[start + int(s) * stride];
                 acc = x > acc ? x : acc;
             }
             partial[t] = acc;
@@ -465,9 +487,11 @@ kernel void softmax_f32(device const float* a [[buffer(0)]],
     threadgroup float partial[REDUCE_THREADS];
     threadgroup float shared;
     uint base = row * n;
+    int start = offset_of(v, base);
+    int stride = run_stride(v);
     float top = row_max(a, v, base, n, partial, &shared, t, threads);
     float total;
-    ROW_SUM(total, float e = precise::exp(a[offset_of(v, base + s)] - top); dst[base + s] = e; acc = acc + e;)
+    ROW_SUM(total, float e = precise::exp(a[start + int(s) * stride] - top); dst[base + s] = e; acc = acc + e;)
     OWN_ELEMENTS(dst[base + s] = dst[base + s] / total;)
 }
 
@@ -481,9 +505,11 @@ kernel void log_softmax_f32(device const float* a [[buffer(0)]],
     threadgroup float partial[REDUCE_THREADS];
     threadgroup float shared;
     uint base = row * n;
+    int start = offset_of(v, base);
+    int stride = run_stride(v);
     float top = row_max(a, v, base, n, partial, &shared, t, threads);
     float total;
-    ROW_SUM(total, float shifted = a[offset_of(v, base + s)] - top; dst[base + s] = shifted; acc = acc + precise::exp(shifted);)
+    ROW_SUM(total, float shifted = a[start + int(s) * stride] - top; dst[base + s] = shifted; acc = acc + precise::exp(shifted);)
     float log_total = precise::log(total);
     OWN_ELEMENTS(dst[base + s] = dst[base + s] - log_total;)
 }
@@ -503,13 +529,17 @@ kernel void layernorm_f32(device const float* a [[buffer(0)]],
     threadgroup float partial[REDUCE_THREADS];
     threadgroup float shared;
     uint base = row * n;
+    int start = offset_of(v, base);
+    int stride = run_stride(v);
+    int wstart = offset_of(vw, base);
+    int bstart = offset_of(vb, base);
     float count = float(n);
     float total;
-    ROW_SUM(total, acc = acc + a[offset_of(v, base + s)];)
+    ROW_SUM(total, acc = acc + a[start + int(s) * stride];)
     float mean = total / count;
     float squares;
-    ROW_SUM(squares, float centred = a[offset_of(v, base + s)] - mean; dst[base + s] = centred; float sq = centred * centred; acc = acc + sq;)
+    ROW_SUM(squares, float centred = a[start + int(s) * stride] - mean; dst[base + s] = centred; float sq = centred * centred; acc = acc + sq;)
     float variance = squares / count;
     float deviation = precise::sqrt(variance + epsilon);
-    OWN_ELEMENTS(float scaled = dst[base + s] / deviation; float weighted = scaled * w[offset_of(vw, base + s)]; dst[base + s] = weighted + b[offset_of(vb, base + s)];)
+    OWN_ELEMENTS(float scaled = dst[base + s] / deviation; float weighted = scaled * w[wstart + int(s) * run_stride(vw)]; dst[base + s] = weighted + b[bstart + int(s) * run_stride(vb)];)
 }

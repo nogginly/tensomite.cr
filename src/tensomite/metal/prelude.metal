@@ -12,11 +12,13 @@ struct View {
     int offset;
     int shape[MAX_DIMS];
     int strides[MAX_DIMS];
+    int dense;  // 1 when the strides are row-major: element i is at offset + i
 };
 
 // Returns the storage position of logical element `flat` of `v`, peeling indices
-// off from the last dimension.
+// off from the last dimension, or directly when the view is dense.
 static int offset_of(constant View& v, int flat) {
+    if (v.dense) return v.offset + flat;
     int pos = v.offset;
     for (int d = v.ndim - 1; d >= 0; d--) {
         int dim = v.shape[d];
@@ -26,3 +28,8 @@ static int offset_of(constant View& v, int flat) {
     return pos;
 }
 
+// Returns the step between the positions of consecutive elements along the last
+// dimension.
+static int run_stride(constant View& v) {
+    return v.ndim > 0 ? v.strides[v.ndim - 1] : 0;
+}

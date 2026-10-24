@@ -324,13 +324,13 @@ flowchart TD
 
 Op          |Threads                                                                                  |Each thread                                                                                      
 ------------|-----------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------
-`Sum`, `Max`|one threadgroup per output, a thread per chunk of 64 (one thread for a run of 64 or less)|folds whole chunks in index order; the first thread folds the chunk results in chunk order       
+`Sum`, `Max`|one threadgroup per output, a thread per chunk of 16 (one thread for a run of 16 or less)|folds whole chunks in index order; the first thread folds the chunk results in chunk order       
 `ScatterAdd`|one per column                                                                           |zeroes its column, then adds the source rows into the rows their ids select, in order            
 `Unview`    |one per output position                                                                  |inverts the view to find which logical elements read the position, and adds them in logical order
 
 `Unview` inverts a view by decomposing `position - offset` over the dimensions with a nonzero stride, largest first. The dimensions with stride 0 are the ones that repeat a position: their indices are walked in row-major order, which is logical order. The decomposition is unique when each stride exceeds the furthest the smaller ones can reach together. Every view tensomite builds satisfies that, and a view that did not would run on the host.
 
-**Reductions in chunks (Decision X).** One thread per output made a long reduction slow: each of a GPT-2 layer norm's means was a single thread adding 768 numbers one after another, 126 µs each and 57% of a decoded token's GPU time. Each output now has a threadgroup, with each thread folding chunks of 64 at fixed offsets. As with split-K, chunk boundaries never depend on the run's length or on the number of threads, so a row padded with zeros (or, for `Max`, with -∞), as a masked attention row is, keeps its bits, and prefill still equals decode. `Max` is exact in any order and still matches the host bit for bit. `Sum` of more than one chunk adds in a different order from the host's and is compared within 1e-5. A run of one chunk or less keeps one thread per output, which is the host's arithmetic exactly.
+**Reductions in chunks (Decision X).** One thread per output made a long reduction slow: each of a GPT-2 layer norm's means was a single thread adding 768 numbers one after another, 126 µs each and 57% of a decoded token's GPU time. Each output now has a threadgroup, with each thread folding chunks of 16 at fixed offsets. As with split-K, chunk boundaries never depend on the run's length or on the number of threads, so a row padded with zeros (or, for `Max`, with -∞), as a masked attention row is, keeps its bits, and prefill still equals decode. `Max` is exact in any order and still matches the host bit for bit. `Sum` of more than one chunk adds in a different order from the host's and is compared within 1e-5. A run of one chunk or less (16 elements) keeps one thread per output, which is the host's arithmetic exactly. Within a run along the last axis, threads step by the view's stride rather than calling `offset_of` for every element.
 
 **Errors.** A GPU kernel cannot raise. `Gather` and `ScatterAdd` report an id out of range through a small shared error buffer, and `flush` raises the host's `ExecutionError` when it finds a report. The error therefore surfaces when the command buffer completes, at `realize`, as it does on the host. One difference remains: the nodes encoded before the error are marked realised, with undefined contents for the failing one.
 
@@ -831,6 +831,21 @@ of which the 12 `gelu`s    |≈0.30 |0.04
 
 - **`gelu` went from nine dispatches per layer to one,** and from about 25 µs of GPU time per layer to about 3.
 - **The rest of the non-matmul time is mostly inside `layernorm` and `softmax`:** their sums and maxima, and the `Sub`, `Div`, `Sqrt`, `Exp` and `Mul` around them. The fused row ops (part 5) replace each of them with one kernel.
+
+**After fused row ops** (M7 part 5, M5 Pro, first version):
+
+Measure                          |Part 4|Part 5
+---------------------------------|------|------
+Dispatches per token             |614   |316   
+Metal decode, tokens/s           |—     |150.95
+`BLAS` decode, tokens/s, same run|—     |167.82
+Wall per decoded token, ms       |6.72  |6.54  
+GPU time, each op alone, ms      |6.48  |6.33  
+of which `MatMul`                |3.80  |3.74  
+of which `LayerNorm` (25)        |—     |1.42  
+of which `Softmax` (12)          |—     |0.51  
+
+Fusing saved dispatches but little GPU time: a layer norm of one row of 768 took 57 µs. With chunks of 64 it had only 12 threads, each reading 64 elements in turn through `offset_of`, whose integer division and remainder per dimension are slow on a GPU. So reductions and row ops now use chunks of 16, giving a row of 768 48 threads, and step through a run by its stride; `offset_of` returns `offset + i` at once for a dense view, which every kernel benefits from.
 
 **Training step in the Linux container through M7** (the 0.8M-param model, 30 steps, identical losses):
 
