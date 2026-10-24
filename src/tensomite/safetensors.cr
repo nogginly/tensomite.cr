@@ -1,7 +1,7 @@
 require "json"
 
 module Tensomite
-  # Reads tensors from a [safetensors](https://github.com/huggingface/safetensors) file.
+  # Reads and writes [safetensors](https://github.com/huggingface/safetensors) files.
   #
   # The file is memory-mapped once. On a `HostDevice` each tensor whose data is
   # 4-byte aligned is a realised leaf over its slice of the mapping, so nothing is
@@ -40,6 +40,60 @@ module Tensomite
       end
       @data_start = 8_i64 + header_size
       @entries = parse_header(String.new(@mapping.bytes(8, header_size.to_i32)))
+    end
+
+    # Writes *tensors* to a safetensors file at *path*, in the order given, with
+    # optional string *metadata* under the header's `__metadata__` key.
+    #
+    # Each tensor is written as its values in row-major order, so a view is saved
+    # as the tensor it shows, in the host's byte order (little-endian on every
+    # platform tensomite supports). The header is padded with spaces to a multiple
+    # of 8 bytes, so that every tensor's data is aligned and can be mapped without
+    # a copy when read back.
+    #
+    # The file is written beside *path* and then renamed over it. A file already at
+    # *path* is replaced whole, never rewritten in place, so tensors still mapped
+    # from it, such as a model loaded from the same path, keep their values.
+    def self.write(path : String, tensors : Hash(String, Tensor), metadata : Hash(String, String)? = nil) : Nil
+      offset = 0_i64
+      header = JSON.build do |json|
+        json.object do
+          if metadata
+            json.field("__metadata__") { metadata.to_json(json) }
+          end
+          tensors.each do |name, tensor|
+            size = tensor.dtype.bytes_for(tensor.size).to_i64
+            json.field(name) do
+              json.object do
+                json.field "dtype", tensor.dtype.to_s
+                json.field "shape", tensor.shape
+                json.field "data_offsets", [offset, offset + size]
+              end
+            end
+            offset += size
+          end
+        end
+      end
+      header += " " * ((8 - header.bytesize % 8) % 8)
+      temp = "#{path}.#{Process.pid}.#{Random::Secure.hex(4)}.tmp"
+      begin
+        File.open(temp, "w") do |file|
+          file.write_bytes(header.bytesize.to_u64, IO::ByteFormat::LittleEndian)
+          file << header
+          tensors.each_value { |tensor| file.write(contents(tensor)) }
+        end
+        File.rename(temp, path)
+      ensure
+        File.delete?(temp)
+      end
+    end
+
+    # Returns *tensor*'s values in row-major order, as bytes.
+    private def self.contents(tensor : Tensor) : Bytes
+      case tensor.dtype
+      in .f32? then tensor.to_a(Float32).to_unsafe.to_slice(tensor.size).to_unsafe_bytes
+      in .i32? then tensor.to_a(Int32).to_unsafe.to_slice(tensor.size).to_unsafe_bytes
+      end
     end
 
     # Returns the names of all tensors, in file order.

@@ -22,3 +22,4 @@ CLAUDE.md
 /shard.lock
 /models/
 /data/
+/multiplier.safetensors

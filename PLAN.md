@@ -110,7 +110,7 @@ Each milestone is done when its exit criterion passes.
 **7b. Modules and a model DSL (Decisions AH to AM).** Models are written as `Tensomite::Module`s: classes whose instance variables hold `Parameter`s and other modules, found and named at compile time, with a `forward` that combines them. Then a DSL over the modules, iterated with them. In PRs:
 
 1. `Parameter`, `Module`, `Linear`, `Embedding`, `LayerNorm`, `Activation`, `Sequential`, and optimizers over parameters; the tutorial's model on modules.
-2. A safetensors writer, and `save` and `load` by name (Decision AM).
+2. A safetensors writer, and `save` and `load` by name (Decision AM). Files round-trip with Hugging Face's `safetensors` package, and saving over a file that a loaded model still maps leaves the model's weights unchanged.
 3. The Shakespeare model on modules, with a `CausalSelfAttention`; its trainer simplified.
 4. DSL candidates, a builder in plain Crystal (`with ... yield`) and a declarative macro, written against the same models; then a choice, and changes to the modules that the DSL shows a need for.
 5. GPT-2 on modules, loading Hugging Face's weights by name, if step 3 shows that its KV cache fits.

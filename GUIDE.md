@@ -279,6 +279,7 @@ This is the same fit as in "Training", with the same result. `AdamW` applies wei
 
 **Other things modules do:**
 
+- `model.save(path)` writes every parameter to a safetensors file under its name, and `model.load(path)` replaces each parameter with the tensor of the same name. A missing or extra name raises `Error`, unless `strict: false`; a different shape raises `ShapeError`. The file can be read by other tools, such as Hugging Face's `safetensors` package.
 - `model.to(device)` moves every parameter to another device.
 - `tensor.to_mermaid(model: model, depth: 1)` draws a summary of the model's parts, with their parameter counts. [The tutorial](TUTORIAL.md) shows one.
 
@@ -357,7 +358,7 @@ puts bpe.decode(model.generate(bpe.encode("Once upon a time"), 10, sampler))
 
 `generate` returns only the new tokens. Without a sampler it picks the likeliest token each time (greedy), so the output is always the same. With a `Sampler` it picks at random, in proportion to each token's probability, among the `top_k` likeliest tokens (all of them when `top_k` is 0, the default). A `temperature` above 1 makes unlikely tokens more likely to be picked, and below 1 less likely. The same seed gives the same text.
 
-For other weights in safetensors files, `SafeTensors.open(path)` lists them (`names`) and loads each as a tensor (`file["name", device]`).
+For other weights in safetensors files, `SafeTensors.open(path)` lists them (`names`) and loads each as a tensor (`file["name", device]`). `SafeTensors.write(path, {"name" => tensor, ...})` writes tensors to a new file.
 
 ## Errors
 
@@ -373,7 +374,6 @@ All of them are subclasses of `Tensomite::Error`.
 ## Current limits
 
 - **Two dtypes:** `F32` and `I32`. Half precision and quantised weights are planned.
-- **No saving yet.** Weights can be read from safetensors files but not written. To keep a trained model, write each named parameter's `shape` and values to a file and load them back by name, as [the tutorial](TUTORIAL.md) does with JSON.
 - **Numbers go on the right** of an operator: `x * 2` works, `2 * x` does not.
 - **One device per operation.** Move tensors with `to` first.
 - **A tensor holds at most about 2 GB,** because element counts are `Int32`.

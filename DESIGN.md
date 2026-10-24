@@ -719,6 +719,10 @@ flowchart LR
 - **Limits:** one tensor must fit in 2 GiB (an `Int32` `Slice`), but the file may be larger. Only `F32` and `I32` tensors load; other dtypes raise `DTypeError`.
 - **Every header entry is checked** against the file: its byte range fits and holds exactly the bytes its shape needs.
 
+**Writing.** `SafeTensors.write(path, tensors, metadata)` writes each tensor's values in row-major order, so a view is saved as the tensor it shows, and pads the header with spaces to a multiple of 8 bytes, as Hugging Face's writer does, so every `F32` and `I32` tensor is aligned and maps without a copy when read back. It writes a temporary file beside *path* and renames it over *path*. Writing in place would be a hazard: tensors loaded from a file are mapped from it, so a model that saves over the file it loaded would see its own weights change under it, or crash if the file shrank. A rename leaves the old file's data in place for as long as it is mapped (`spec/safetensors_spec.cr` checks both). Files written this way are read by Hugging Face's `safetensors` package, and files it writes are read here.
+
+`Module#save` and `Module#load` (see "Modules") use these by parameter name: `load` puts each tensor on the device its parameter is on, and by default refuses a file with missing, extra or misshapen tensors.
+
 ### Tokeniser
 
 `BPE` reproduces GPT-2's byte-level byte-pair encoding from a `vocab.json` and a `merges.txt`:
