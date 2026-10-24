@@ -131,7 +131,12 @@ module Tensomite
       property dispatches = 0
       property command_buffers = 0
 
-      def initialize(@per_kernel = false)
+      # True when `#kernels` keys each op by its shapes as well as its name: a
+      # matmul's two sources, `MatMul [64,768]·[768,2304]`, and any other op's
+      # output. Takes effect only with `#per_kernel?`.
+      getter? shapes : Bool
+
+      def initialize(@per_kernel = false, @shapes = false)
       end
 
       protected def add_kernel(name : String, seconds : Float64) : Nil
@@ -255,7 +260,7 @@ module Tensomite
         @gpu_ops += 1
         if profile && start
           profile.encode += (Time.instant - start).total_seconds
-          flush(node.op.to_s) if profile.per_kernel?
+          flush(profile_label(node, profile)) if profile.per_kernel?
         end
       else
         flush
@@ -561,6 +566,12 @@ module Tensomite
     #
     # With a per-kernel profile, *label* names the op whose work the command
     # buffers hold, and their GPU time is recorded under it.
+    private def profile_label(node : Node, profile : Profile) : String
+      return node.op.to_s unless profile.shapes?
+      shapes = node.op.try(&.mat_mul?) ? node.srcs.map(&.shape) : [node.shape]
+      "#{node.op} #{shapes.map { |shape| "[#{shape.join(',')}]" }.join('·')}"
+    end
+
     private def flush(label : String? = nil) : Nil
       commit
       return if @in_flight.empty?
