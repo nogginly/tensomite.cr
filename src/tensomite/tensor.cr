@@ -130,8 +130,12 @@ module Tensomite
       unless DType.of(T) == dtype
         raise DTypeError.new("cannot read #{dtype} tensor as #{T}")
       end
+      # Allocates the result first: once `host_bytes` is taken, nothing may
+      # allocate, or a collection could recycle the memory while it is read.
+      result = Array(T).new(size, T.zero)
       xs = realize.host_bytes.unsafe_slice_of(T)
-      Array(T).new(size) { |i| xs[view.offset_of(i)] }
+      size.times { |i| result[i] = xs[view.offset_of(i)] }
+      result
     end
 
     # Returns a realised copy of this tensor on *device*, or `self` when it is already there.
@@ -141,9 +145,8 @@ module Tensomite
     def to(device : Device) : Tensor
       return self if device.same?(self.device)
       src = contiguous.realize
-      bytes = src.host_bytes[0, dtype.bytes_for(src.size)]
-      buffer = device.alloc(bytes.size)
-      device.upload(buffer, bytes)
+      buffer = device.alloc(dtype.bytes_for(src.size))
+      device.upload(buffer, src.host_bytes[0, buffer.bytesize])
       Tensor.new(Node.new(buffer, shape, dtype, device), View.contiguous(shape))
     end
 
