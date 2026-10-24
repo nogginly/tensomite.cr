@@ -34,11 +34,18 @@ runs.each do |label, device, setup|
   setup.call
   model = GPT2.load(path, heads, device)
   prompt = Array.new(PROMPT) { |i| (i * 37) % model.config.vocab }
-  cache = model.new_cache
+  # Prefill is timed warm, as the median of five, except on the slow CPU oracle.
+  repeats = device.is_a?(CPU) ? 1 : 5
+  model.forward(prompt, model.new_cache) if repeats > 1
+  prefills = Array.new(repeats) do
+    start = Time.instant
+    model.forward(prompt, model.new_cache)
+    (Time.instant - start).total_seconds
+  end
+  prefill = prefills.sort[repeats // 2]
 
-  start = Time.instant
+  cache = model.new_cache
   model.forward(prompt, cache)
-  prefill = (Time.instant - start).total_seconds
 
   start = Time.instant
   DECODE.times { |i| model.forward([i], cache) }
