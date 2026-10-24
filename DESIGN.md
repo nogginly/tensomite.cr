@@ -739,7 +739,7 @@ of which waiting for the GPU                               |13.19 |6.98
 of which on the host: allocating, encoding, everything else|2.45  |3.16  
 GPU time in `Sum`, ms                                      |7.81  |1.03  
 GPU time in `MatMul`, ms                                   |3.81  |4.04  
-GPU time in elementwise ops, ms                            |1.83  |2.10  
+GPU time in elementwise ops and `Cat`, ms                  |1.76  |2.10  
 
 - **Host work is now about a third of a decoded token's 10 ms.** The host builds the graph, allocates buffers and encodes every dispatch before the command buffer is committed, so the GPU waits for all of it. The buffer pool (part 3) removes most of the allocation. Committing in batches as encoding proceeds would let the GPU start before the host finishes.
 - **Matmul is now the largest GPU cost, at 54%.** Elementwise ops, about 2 ms over 500 dispatches, are what fusion removes.
