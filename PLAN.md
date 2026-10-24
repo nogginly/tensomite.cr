@@ -12,6 +12,7 @@ The aim is a minimal Crystal shard for tensor maths, inference and training on m
 - **Kernels live in Crystal.** GPU kernel source is written in Crystal, or generated from Crystal expressions by kernel macros at compile time. MSL is compiled by the Metal driver at runtime, and GLSL is compiled to SPIR-V at build time.
 - **CPU backend is the oracle.** Every other backend is tested against the naive pure-Crystal implementation. Library ops keep a hand-written CPU version, so a mistake in a kernel macro's expression cannot pass its own parity test.
 - **Always runnable.** Each milestone ends with something that runs end to end and has a measurable exit.
+- **Inspectable.** A running model can be looked into: its graph drawn, and in time its activations, attention and gradients read, by the names of its parts (scopes), without changing its code.
 
 ## Architecture
 
@@ -95,7 +96,7 @@ Each milestone is done when its exit criterion passes.
    4. Kernel macros for elementwise expressions. The spike settled it: pure macros suffice, flattening the block into a tape with an explicit stack and differentiating by a reverse sweep over it. No `{{ run(...) }}` helper is needed.
    5. Fused row ops.
    6. GPT-2 and the trainer on fused kernels, measured. Vectorised host loops and own maths (Decision Y) halved a training step, which met the training exit; the remaining fusions (attention's scale and mask, AdamW, bias adds) became optional.
-   7. Graph diagrams (Decision AB): `Tensor#to_mermaid` renders the graph behind a tensor as a Mermaid flowchart, with ops as nodes, views as edge labels and a node limit for large graphs.
+   7. Graph diagrams (Decisions AB and AC): `Tensor#to_mermaid` renders the graph behind a tensor as a Mermaid flowchart, with ops as nodes, views as edge labels and a node limit for large graphs; with a depth, it summarises the graph by scope, folding repeated blocks.
    8. Matmul epilogues, and tiling for square products on Metal.
    9. The exit runs. Training's is met: 1.573 nats/char at step 2,749 (20 minutes) and 1.494 after 5,000 steps (36 minutes), in the Linux container.
    - Exit: dispatch count per GPT-2 token falls measurably, GPT-2 tokens/s on Metal beats BLAS (Decision O), macro kernels match their hand-written CPU oracles, macro gradients pass finite-difference checks, and the char-level Shakespeare model reaches a validation loss below 1.6 nats/char within an hour of training in the 4-core Linux container (Decision R).
@@ -151,6 +152,7 @@ Each milestone is done when its exit criterion passes.
 - **Decision Z, after part 6's speed-up:** run the training exit at once, and treat the remaining fusions as optional (decided). It passed, so Decision W's CPU threads are not needed for M7.
 - **Decision AA, planned release of intermediate buffers:** after M7 part 8 (decided). The scheduler would return a node's buffer to its pool once its last consumer has run, rather than when the collector finalizes it, which would lower a step's peak memory and make buffer lifetimes independent of the collector and its threads. Only nodes internal to the realised graph qualify, since a tensor the caller holds must stay valid. On Metal a buffer would be released when its consumer's command buffer completes, not when it is encoded, because the CPU may write a reused buffer before the GPU has read it.
 - **Decision AB, a Mermaid view of the graph:** `Tensor#to_mermaid`, as its own PR between M7 parts 6 and 8 (decided). Node ids follow topological order, so the same graph gives the same text.
+- **Decision AC, model summaries:** scopes (`Tensomite.scope`) and summaries by scope in the same PR as Decision AB (decided). Scopes are designed for inspection too: each call makes a new instance, so one of several repeated blocks stays addressable, and gradient nodes take the scope of the node they differentiate.
 
 ## Risks
 

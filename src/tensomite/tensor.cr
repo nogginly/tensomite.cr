@@ -57,6 +57,17 @@ module Tensomite
       view.shape
     end
 
+    # Names the node this tensor views, for diagrams, and returns `self`.
+    def named(name : String) : Tensor
+      node.name = name
+      self
+    end
+
+    # Returns the name of the node this tensor views, if it has one.
+    def name : String?
+      node.name
+    end
+
     def ndim : Int32
       view.ndim
     end

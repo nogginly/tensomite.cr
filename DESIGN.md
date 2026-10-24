@@ -578,6 +578,54 @@ flowchart LR
 
 `logits.cross_entropy(targets)` is the mean of `-log_softmax(logits)[row, target]` over rows. `log_softmax` is `x - max - log(Σ exp(x - max))`, which never takes the log of an underflowed probability. The entries are picked by `gather` from the log-probabilities flattened to a `[rows × classes, 1]` table, with indices `row × classes + target` computed on the host. So the targets are realised when the op is built, and the gradient arrives through the `Gather` rule.
 
+## Graph diagrams
+
+`Tensor#to_mermaid` draws the graph behind a tensor as a Mermaid flowchart, so it can be read rather than walked through `node.srcs` by hand.
+
+- **Every op** (`to_mermaid`, the default): a box per node with its op, name and shape, and an edge per source. Views are not nodes, so a source read through one labels its edge with the kind of view (`reshape`, `slice`, `expand` or `permute`) and the shape it reads. Leaves have a green border and the root a red one. A graph larger than `max_nodes` (200) keeps the nodes nearest the root and puts the rest behind one box, since Mermaid refuses graphs of more than about 500 edges.
+- **A summary** (`to_mermaid(depth: n, params: model.params)`): nodes grouped by scope, cut to `n` levels, one box per group with its op count and parameter count.
+
+**Scopes** name the parts of a model. `Tensomite.scope("block") { ... }` opens a scope, nested in the current one, and every node built inside records it, in one reference per node. The chain rules of `grad` build their nodes in the scope of the node they differentiate, so a block's gradients belong to the block. Leaves get names with `Tensor#named`; GPT-2 names its weights as the weights file does.
+
+A summary folds repetition: sibling scopes of one name whose graphs match (the same ops, shapes and parameter sizes, in order) become one box marked `×k`, with counts per instance, and edges from one instance into the next are drawn dashed as `next`. Scopes above the last level become subgraphs, and the nodes a scope holds directly, outside its children, are its "own ops", such as a block's residual adds. The Shakespeare model's loss at depth 2, from `examples/shakespeare.cr --diagram 2`:
+
+```mermaid
+flowchart TB
+    b1["ids · leaf [16,128] I32"]
+    b3["causal mask · leaf [128,128]"]
+    b8["leaf [2048] I32"]
+    b0["embedding<br/>2 ops · 37.1k params"]
+    subgraph sub1 ["block ×4"]
+        b4["own ops<br/>2 ops each"]
+        b2["attention<br/>12 ops · 148k params each"]
+        b5["mlp<br/>4 ops · 295k params each"]
+    end
+    b6["head<br/>2 ops · 384 params"]
+    b7["loss<br/>5 ops"]
+    b1 -- "[16,128]" --> b0
+    b0 -- "[2048,192]" --> b2
+    b3 -- "[16,6,128,128]" --> b2
+    b0 -- "[2048,192]" --> b4
+    b2 -- "[2048,192]" --> b4
+    b4 -- "[2048,192]" --> b5
+    b5 -- "[2048,192]" --> b4
+    b4 -. "next" .-> b2
+    b4 -. "next" .-> b4
+    b4 -- "[2048,192]" --> b6
+    b6 -- "[2048,65]" --> b7
+    b8 -- "[2048]" --> b7
+    classDef leaf stroke:#2b8a3e,stroke-width:2px
+    class b1,b3,b8 leaf
+    classDef root stroke:#c92a2a,stroke-width:2px
+    class b7 root
+```
+
+GPT-2 small at the same depth (`examples/gpt2_diagram.cr`) has the same shape: an embedding of 39.4M params, `block ×12` of 7.09M each, whose attention has 14 ops to the Shakespeare model's 12 because its projections have biases.
+
+Box ids follow the graph's order, so the same graph always gives the same text, and diagrams can be compared as text.
+
+**Towards inspection.** Diagrams are the first step towards looking inside a running model: its activations, attention patterns and gradients. Scopes are the addresses that will need. Each call to `scope` makes a new instance, so "the third block" stays addressable even where a summary folds four into one, and a lazy graph can keep any intermediate it computes, so a probe needs no change to the model's code.
+
 ## Error timing
 
 The plan accepts that errors in a lazy graph may surface far from their cause. To keep that rare, every check that can be made when an op is called is made then:

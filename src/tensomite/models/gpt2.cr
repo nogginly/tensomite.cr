@@ -54,7 +54,7 @@ module Tensomite
     # `transformer.` prefix. Sizes other than *heads* come from the weight shapes.
     def initialize(weights : SafeTensors, heads : Int32, @device : Device)
       prefix = weights.has_key?("transformer.wte.weight") ? "transformer." : ""
-      fetch = ->(name : String) { weights[prefix + name, device] }
+      fetch = ->(name : String) { weights[prefix + name, device].named(name) }
       @wte = fetch.call("wte.weight")
       @wpe = fetch.call("wpe.weight")
       @lnf_w = fetch.call("ln_f.weight")
@@ -88,21 +88,24 @@ module Tensomite
     #    back to the residual stream.
     # 3. Applies the final layer norm and projects onto the token embeddings.
     def forward(ids : Array(Int32), cache : Cache) : Tensor
-      count, past = ids.size, cache.length
-      raise ShapeError.new("forward of no tokens") if count == 0
-      if past + count > config.context
-        raise ShapeError.new("#{past + count} positions exceed the context of #{config.context}")
-      end
-      x = @wte.gather(Tensor.from(ids, [count], device)) + @wpe.slice(0, past, past + count)
-      mask = Tensor.causal_mask(count, past + count, device)
-      @blocks.each_with_index do |block, layer|
-        x = x + attention(block, x.layernorm(block.ln1_w, block.ln1_b), cache, layer, mask)
-        hidden = x.layernorm(block.ln2_w, block.ln2_b).matmul(block.fc_w) + block.fc_b
-        x = x + (hidden.gelu.matmul(block.out_w) + block.out_b)
-      end
-      logits = x.layernorm(@lnf_w, @lnf_b).matmul(@wte.transpose).realize
-      cache.advance(count)
-      logits
+      result = logits(ids, cache).realize
+      cache.advance(count: ids.size)
+      result
+    end
+
+    # Returns the unrealised logits of *ids* from an empty cache, for diagrams
+    # (`Tensor#to_mermaid`). The graph is scoped as `embedding`, then `block`, each
+    # holding `attention` and `mlp`, then `head`.
+    def graph(ids : Array(Int32)) : Tensor
+      logits(ids, new_cache)
+    end
+
+    # Returns every weight, named as in the weights file without its prefix.
+    def params : Array(Tensor)
+      [@wte, @wpe] + @blocks.flat_map do |block|
+        [block.ln1_w, block.ln1_b, block.attn_w, block.attn_b, block.proj_w, block.proj_b,
+         block.ln2_w, block.ln2_b, block.fc_w, block.fc_b, block.out_w, block.out_b]
+      end + [@lnf_w, @lnf_b]
     end
 
     # Returns *count* tokens generated after *prompt*, each chosen by *sampler* from
@@ -121,6 +124,30 @@ module Tensomite
     # :ditto:
     def generate(prompt : Array(Int32), count : Int32, sampler : Sampler = Sampler.greedy) : Array(Int32)
       generate(prompt, count, sampler) { }
+    end
+
+    # Returns the logits of *ids* after the positions in *cache*, unrealised, and
+    # sets the cache's keys and values; `#forward` advances it after realising.
+    private def logits(ids : Array(Int32), cache : Cache) : Tensor
+      count, past = ids.size, cache.length
+      raise ShapeError.new("forward of no tokens") if count == 0
+      if past + count > config.context
+        raise ShapeError.new("#{past + count} positions exceed the context of #{config.context}")
+      end
+      x = Tensomite.scope("embedding") do
+        @wte.gather(Tensor.from(ids, [count], device).named("ids")) + @wpe.slice(0, past, past + count)
+      end
+      mask = Tensor.causal_mask(count, past + count, device).named("causal mask")
+      @blocks.each_with_index do |block, layer|
+        x = Tensomite.scope("block") do
+          x = x + Tensomite.scope("attention") { attention(block, x.layernorm(block.ln1_w, block.ln1_b), cache, layer, mask) }
+          x + Tensomite.scope("mlp") do
+            hidden = x.layernorm(block.ln2_w, block.ln2_b).matmul(block.fc_w) + block.fc_b
+            hidden.gelu.matmul(block.out_w) + block.out_b
+          end
+        end
+      end
+      Tensomite.scope("head") { x.layernorm(@lnf_w, @lnf_b).matmul(@wte.transpose) }
     end
 
     # Returns causal self-attention over the cache and *h*, the normalised input.
