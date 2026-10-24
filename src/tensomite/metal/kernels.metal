@@ -78,26 +78,39 @@ kernel void copy_into_f32(device const float* src [[buffer(0)]],
     dst[offset_of(vd, i)] = src[offset_of(vs, i)];
 }
 
-// Folds each output's run of `run` consecutive logical indices of `v` in index
-// order, as the host does: Sum from zero, Max from the first element.
-kernel void sum_f32(device const float* a [[buffer(0)]],
-                    device float* dst [[buffer(1)]],
-                    constant View& v [[buffer(2)]],
-                    constant uint& run [[buffer(3)]],
-                    constant uint& count [[buffer(4)]],
-                    uint row [[thread_position_in_grid]]) {
+// Reductions fold each output's run of `run` consecutive logical indices of `v`.
+//
+// The run is cut into chunks of REDUCE_CHUNK at fixed offsets. Each thread of an
+// output's threadgroup folds whole chunks in index order; the first thread then
+// folds the chunk results in chunk order. Chunk boundaries never depend on the
+// run's length or on the number of threads, so a run padded with zeros (Sum) or
+// with -inf (Max), as masked attention rows are, gives the same bits. Max is
+// exact in any order, so it matches the host bit for bit; Sum adds in a different
+// order from the host's (Decision X).
+//
+// A run of one chunk or less is folded by one thread per output (sum_short_f32,
+// max_short_f32), which is the same arithmetic as a single chunk.
+#define REDUCE_THREADS 256
+#define REDUCE_CHUNK 64
+
+kernel void sum_short_f32(device const float* a [[buffer(0)]],
+                          device float* dst [[buffer(1)]],
+                          constant View& v [[buffer(2)]],
+                          constant uint& run [[buffer(3)]],
+                          constant uint& count [[buffer(4)]],
+                          uint row [[thread_position_in_grid]]) {
     if (row >= count) return;
     float acc = 0.0f;
-    for (uint j = 0; j < run; j++) acc += a[offset_of(v, row * run + j)];
-    dst[row] = acc;
+    for (uint j = 0; j < run; j++) acc = acc + a[offset_of(v, row * run + j)];
+    dst[row] = 0.0f + acc;
 }
 
-kernel void max_f32(device const float* a [[buffer(0)]],
-                    device float* dst [[buffer(1)]],
-                    constant View& v [[buffer(2)]],
-                    constant uint& run [[buffer(3)]],
-                    constant uint& count [[buffer(4)]],
-                    uint row [[thread_position_in_grid]]) {
+kernel void max_short_f32(device const float* a [[buffer(0)]],
+                          device float* dst [[buffer(1)]],
+                          constant View& v [[buffer(2)]],
+                          constant uint& run [[buffer(3)]],
+                          constant uint& count [[buffer(4)]],
+                          uint row [[thread_position_in_grid]]) {
     if (row >= count) return;
     float acc = a[offset_of(v, row * run)];
     for (uint j = 1; j < run; j++) {
@@ -105,6 +118,65 @@ kernel void max_f32(device const float* a [[buffer(0)]],
         acc = x > acc ? x : acc;
     }
     dst[row] = acc;
+}
+
+kernel void sum_f32(device const float* a [[buffer(0)]],
+                    device float* dst [[buffer(1)]],
+                    constant View& v [[buffer(2)]],
+                    constant uint& run [[buffer(3)]],
+                    uint row [[threadgroup_position_in_grid]],
+                    uint t [[thread_position_in_threadgroup]],
+                    uint threads [[threads_per_threadgroup]]) {
+    threadgroup float partial[REDUCE_THREADS];
+    uint chunks = (run + REDUCE_CHUNK - 1) / REDUCE_CHUNK;
+    float total = 0.0f;
+    for (uint first = 0; first < chunks; first += threads) {
+        uint c = first + t;
+        float acc = 0.0f;
+        if (c < chunks) {
+            uint stop = min(run, (c + 1) * REDUCE_CHUNK);
+            for (uint s = c * REDUCE_CHUNK; s < stop; s++) acc = acc + a[offset_of(v, row * run + s)];
+        }
+        partial[t] = acc;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (t == 0) {
+            uint n = min(threads, chunks - first);
+            for (uint k = 0; k < n; k++) total = total + partial[k];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (t == 0) dst[row] = total;
+}
+
+kernel void max_f32(device const float* a [[buffer(0)]],
+                    device float* dst [[buffer(1)]],
+                    constant View& v [[buffer(2)]],
+                    constant uint& run [[buffer(3)]],
+                    uint row [[threadgroup_position_in_grid]],
+                    uint t [[thread_position_in_threadgroup]],
+                    uint threads [[threads_per_threadgroup]]) {
+    threadgroup float partial[REDUCE_THREADS];
+    uint chunks = (run + REDUCE_CHUNK - 1) / REDUCE_CHUNK;
+    float total = a[offset_of(v, row * run)];
+    for (uint first = 0; first < chunks; first += threads) {
+        uint c = first + t;
+        if (c < chunks) {
+            uint stop = min(run, (c + 1) * REDUCE_CHUNK);
+            float acc = a[offset_of(v, row * run + c * REDUCE_CHUNK)];
+            for (uint s = c * REDUCE_CHUNK + 1; s < stop; s++) {
+                float x = a[offset_of(v, row * run + s)];
+                acc = x > acc ? x : acc;
+            }
+            partial[t] = acc;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (t == 0) {
+            uint n = min(threads, chunks - first);
+            for (uint k = 0; k < n; k++) total = partial[k] > total ? partial[k] : total;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (t == 0) dst[row] = total;
 }
 
 // Records the first out-of-range index: errors[0] counts reports, and only the

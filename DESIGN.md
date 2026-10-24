@@ -316,17 +316,17 @@ flowchart TD
 
 **Calling Objective-C from Crystal.** Metal has no C API, so `metal/objc.cr` sends messages through `objc_msgSend`. That function must be called with the exact C signature of the method it reaches, and Crystal does not allow one C symbol to be declared with several signatures. So `ObjC.send(ReturnType, receiver, "selector:", args...)` casts its address to a `Proc` typed by its arguments, one type per call site. `NSUInteger` is `UInt64`, `BOOL` is passed as `UInt32`, and `MTLSize`, a 24-byte struct, is passed as a pointer, as arm64 passes structs over 16 bytes. Objects the runtime autoreleases are created inside `ObjC.autoreleasepool`, and those kept beyond it are retained.
 
-**Kernels that add.** Each kernel that adds does so in the host's order, so its results are bit-identical to the host's, not merely close:
+**Kernels that add.** Each of these kernels combines in a fixed order. `ScatterAdd` and `Unview` add in the host's order and are bit-identical to it; `Sum` and `Max` work in chunks (below):
 
-Op          |Threads                |Each thread                                                                                      
-------------|-----------------------|-------------------------------------------------------------------------------------------------
-`Sum`, `Max`|one per output         |folds its run of the source, permuted so the reduced axis is last, in index order                
-`ScatterAdd`|one per column         |zeroes its column, then adds the source rows into the rows their ids select, in order            
-`Unview`    |one per output position|inverts the view to find which logical elements read the position, and adds them in logical order
+Op          |Threads                                                                                  |Each thread                                                                                      
+------------|-----------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------
+`Sum`, `Max`|one threadgroup per output, a thread per chunk of 64 (one thread for a run of 64 or less)|folds whole chunks in index order; the first thread folds the chunk results in chunk order       
+`ScatterAdd`|one per column                                                                           |zeroes its column, then adds the source rows into the rows their ids select, in order            
+`Unview`    |one per output position                                                                  |inverts the view to find which logical elements read the position, and adds them in logical order
 
 `Unview` inverts a view by decomposing `position - offset` over the dimensions with a nonzero stride, largest first. The dimensions with stride 0 are the ones that repeat a position: their indices are walked in row-major order, which is logical order. The decomposition is unique when each stride exceeds the furthest the smaller ones can reach together. Every view tensomite builds satisfies that, and a view that did not would run on the host.
 
-One thread per output is simple but slow for a long reduction, such as the sum of a whole tensor. Faster strategies, in which threads share a reduction, change the order of additions; they belong with the matmul work, where the cost of a deterministic split is measured (the M6 exit).
+**Reductions in chunks (Decision X).** One thread per output made a long reduction slow: each of a GPT-2 layer norm's means was a single thread adding 768 numbers one after another, 126 µs each and 57% of a decoded token's GPU time. Each output now has a threadgroup, with each thread folding chunks of 64 at fixed offsets. As with split-K, chunk boundaries never depend on the run's length or on the number of threads, so a row padded with zeros (or, for `Max`, with -∞), as a masked attention row is, keeps its bits, and prefill still equals decode. `Max` is exact in any order and still matches the host bit for bit. `Sum` of more than one chunk adds in a different order from the host's and is compared within 1e-5. A run of one chunk or less keeps one thread per output, which is the host's arithmetic exactly.
 
 **Errors.** A GPU kernel cannot raise. `Gather` and `ScatterAdd` report an id out of range through a small shared error buffer, and `flush` raises the host's `ExecutionError` when it finds a report. The error therefore surfaces when the command buffer completes, at `realize`, as it does on the host. One difference remains: the nodes encoded before the error are marked realised, with undefined contents for the failing one.
 

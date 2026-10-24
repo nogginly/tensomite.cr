@@ -8,10 +8,10 @@ What the next session, or the next person, needs in order to carry on without th
 
 ## Where things stand
 
-- **On `main`:** milestones 1 to 6. That covers the lazy tensor core, the CPU op set and `SimDiscrete`, the BLAS seam, GPT-2 inference verified against PyTorch, autograd with SGD, AdamW and a Shakespeare trainer, and the `Metal` device with every `F32` op on the GPU and split-K matmul. CI runs on Linux and macOS (the macOS runner has a GPU), and Decisions A–W are recorded in `PLAN.md`.
+- **On `main`:** milestones 1 to 6. That covers the lazy tensor core, the CPU op set and `SimDiscrete`, the BLAS seam, GPT-2 inference verified against PyTorch, autograd with SGD, AdamW and a Shakespeare trainer, and the `Metal` device with every `F32` op on the GPU and split-K matmul. CI runs on Linux and macOS (the macOS runner has a GPU), and Decisions A–X are recorded in `PLAN.md`.
 - **M7 plan:** seven PRs, listed under M7 in `PLAN.md`, with Decisions T (row ops are hand-written fused ops), U (a finalizer-fed buffer pool), V (GLSL waits for M8) and W (threads only if training is still too slow).
-- **Open PR:** M7 part 1 on `m7-profile`: `Metal::Profile` and `bench/profile_gpt2.cr`, to break down Metal's 16 ms per decoded token. Waiting on the maintainer's run on the M5 Pro.
-- **Why M7 starts by measuring:** a token's matmuls take 3 ms of Metal's 16; the rest is unexplained.
+- **Open PR:** M7 part 2 on `m7-parallel-reductions`: `Sum` and `Max` on Metal with a threadgroup per output, in chunks (Decision X). Part 1's profile showed one-thread-per-row sums take 57% of a decoded token's GPU time.
+- **The profile (part 1, M5 Pro):** of 15.7 ms per decoded token, 13.2 ms is waiting for the GPU, of which `Sum` is 7.8 and `MatMul` 3.8; allocation is 1.0, graph building 1.2, encoding 710 dispatches only 0.26.
 - **Deferred:** Decision D, CPU parallelism. Profiling in M5 shows that training is bound by elementwise passes, so D now has a measured case; M7's fusion comes first.
 
 ## Working agreements
@@ -24,7 +24,7 @@ Stacked PRs         |When asked. The later PR's base is the earlier branch; GitH
 Merging             |The maintainer merges, by squash or by merge commit. After a squash, merge `main` into a stacked branch and resolve conflicts with the branch's side; never rewrite history or force-push (the session blocks it anyway).
 Milestones          |Each ends with its exit criterion passing, with the evidence (numbers, logs) in the PR description.                                                                                                                      
 Documents           |Updated in the same PR as the code (see "Workflow" in `DEVELOPMENT.md`). Tables and diagrams follow "Documents" in `DEVELOPMENT.md`; check them with `scripts/format_tables.py` and `scripts/check_diagrams.sh`.         
-Decisions           |Labelled with letters and recorded in `PLAN.md`. The next is **X**; T to W planned M7. P (how to get GPT-2 small's fixtures) was settled by allowing Hugging Face; Q made this document committed.                       
+Decisions           |Labelled with letters and recorded in `PLAN.md`. The next is **Y**; T to X shape M7. P (how to get GPT-2 small's fixtures) was settled by allowing Hugging Face; Q made this document committed.                         
 Understanding checks|Short questions labelled Q-A, Q-B and so on, after explaining something new. The next is **Q-T**.                                                                                                                        
 Claims              |Measured before stated. Several assumptions were wrong when checked: decode time was dominated by the KV cache, not host kernels; GPT-2's file was unaligned. Say "I think" when something is unverified.                
 
