@@ -33,3 +33,18 @@ describe "Host matmul kernel" do
     end
   end
 end
+
+describe "HostDevice.check_run" do
+  it "accepts runs inside the buffer, including stride 0 and negative strides" do
+    HostDevice.check_run(0, 4, 1, 4) { "unused" }
+    HostDevice.check_run(3, 9, 0, 4) { "unused" }
+    HostDevice.check_run(3, 4, -1, 4) { "unused" }
+  end
+
+  it "raises a described IndexError for a run that leaves the buffer" do
+    expect_raises(IndexError, "Add [2]: a run of 3 from 2, stride 1, leaves a buffer of 4") do
+      HostDevice.check_run(2, 3, 1, 4) { "Add [2]" }
+    end
+    expect_raises(IndexError) { HostDevice.check_run(-1, 1, 1, 4) { "x" } }
+  end
+end

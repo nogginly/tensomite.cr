@@ -92,9 +92,9 @@ module Tensomite
       in Op::Mul          then binary(T, node, dst) { |x, y| x * y }
       in Op::Div          then binary(T, node, dst) { |x, y| T.new(x / y) }
       in Op::Maximum      then binary(T, node, dst) { |x, y| x > y ? x : y }
-      in Op::Exp          then unary(T, node, dst) { |x| T.new(Math.exp(x)) }
-      in Op::Log          then unary(T, node, dst) { |x| T.new(Math.log(x)) }
-      in Op::Tanh         then unary(T, node, dst) { |x| T.new(Math.tanh(x)) }
+      in Op::Exp          then unary(T, node, dst) { |x| T.new(Maths.exp(x.to_f32)) }
+      in Op::Log          then unary(T, node, dst) { |x| T.new(Maths.log(x.to_f32)) }
+      in Op::Tanh         then unary(T, node, dst) { |x| T.new(Maths.tanh(x.to_f32)) }
       in Op::Sqrt         then unary(T, node, dst) { |x| T.new(Math.sqrt(x)) }
       in Op::Sum          then reduce(T, node, dst, T.zero) { |acc, x| acc + x }
       in Op::Max          then reduce(T, node, dst, nil) { |acc, x| x > acc ? x : acc }
@@ -117,7 +117,9 @@ module Tensomite
     # Applies the block to each pair of elements; sources already have the output shape.
     #
     # Walks the output in runs (see `View.run_length`), finding each source's position
-    # through its view once per run and stepping by its stride within it.
+    # through its view once per run and stepping by its stride within it. Each run's
+    # extent is checked once and then read through pointers, so that unit-stride
+    # runs vectorise.
     private def binary(type : T.class, node : Node, dst : Slice(T), & : T, T -> T) : Nil forall T
       return if dst.empty?
       a, b = node.srcs
@@ -127,7 +129,17 @@ module Tensomite
       (dst.size // run).times do |run_index|
         base = run_index * run
         pa, pb = a.view.offset_of(base), b.view.offset_of(base)
-        run.times { |j| dst[base + j] = yield xs[pa + j * sa], ys[pb + j * sb] }
+        HostDevice.check_run(pa, run, sa, xs.size) { describe(node) }
+        HostDevice.check_run(pb, run, sb, ys.size) { describe(node) }
+        left, right, output = xs.to_unsafe + pa, ys.to_unsafe + pb, dst.to_unsafe + base
+        if sa == 1 && sb == 1
+          run.times { |j| output[j] = yield left[j], right[j] }
+        elsif sa == 1 && sb == 0
+          scalar = right[0]
+          run.times { |j| output[j] = yield left[j], scalar }
+        else
+          run.times { |j| output[j] = yield left[j * sa], right[j * sb] }
+        end
       end
     end
 
@@ -141,7 +153,13 @@ module Tensomite
       (dst.size // run).times do |run_index|
         base = run_index * run
         pos = src.view.offset_of(base)
-        run.times { |j| dst[base + j] = yield xs[pos + j * stride] }
+        HostDevice.check_run(pos, run, stride, xs.size) { describe(node) }
+        input, output = xs.to_unsafe + pos, dst.to_unsafe + base
+        if stride == 1
+          run.times { |j| output[j] = yield input[j] }
+        else
+          run.times { |j| output[j] = yield input[j * stride] }
+        end
       end
     end
 
@@ -195,7 +213,14 @@ module Tensomite
       (src.size // run).times do |run_index|
         base = run_index * run
         pv, ps = view.offset_of(base), src.view.offset_of(base)
-        run.times { |j| dst[pv + j * sv] += xs[ps + j * ss] }
+        HostDevice.check_run(pv, run, sv, dst.size) { describe(node) }
+        HostDevice.check_run(ps, run, ss, xs.size) { describe(node) }
+        output, input = dst.to_unsafe + pv, xs.to_unsafe + ps
+        if sv == 1 && ss == 1
+          run.times { |j| output[j] += input[j] }
+        else
+          run.times { |j| output[j * sv] += input[j * ss] }
+        end
       end
     end
 
@@ -221,19 +246,26 @@ module Tensomite
         base = row * n
         pos = src.view.offset_of(base)
         case node.op
-        when Op::Softmax
-          top = xs[pos]
-          (1...n).each { |j| top = (v = xs[pos + j * stride]) > top ? v : top }
+        when Op::Softmax, Op::LogSoftmax
+          HostDevice.check_run(pos, n, stride, xs.size) { describe(node) }
+          row_in, row_out = xs.to_unsafe + pos, dst.to_unsafe + base
+          top = row_in[0]
+          (1...n).each { |j| top = (v = row_in[j * stride]) > top ? v : top }
           total = 0f32
-          n.times { |j| total += (dst[base + j] = Math.exp(xs[pos + j * stride] - top)) }
-          n.times { |j| dst[base + j] = dst[base + j] / total }
-        when Op::LogSoftmax
-          top = xs[pos]
-          (1...n).each { |j| top = (v = xs[pos + j * stride]) > top ? v : top }
-          total = 0f32
-          n.times { |j| total += Math.exp(dst[base + j] = xs[pos + j * stride] - top) }
-          log_total = Math.log(total)
-          n.times { |j| dst[base + j] = dst[base + j] - log_total }
+          if node.op == Op::Softmax
+            if stride == 1
+              n.times { |j| row_out[j] = Maths.exp(row_in[j] - top) }
+            else
+              n.times { |j| row_out[j] = Maths.exp(row_in[j * stride] - top) }
+            end
+            n.times { |j| total += row_out[j] }
+            n.times { |j| row_out[j] = row_out[j] / total }
+          else
+            n.times { |j| row_out[j] = row_in[j * stride] - top }
+            n.times { |j| total += Maths.exp(row_out[j]) }
+            log_total = Maths.log(total)
+            n.times { |j| row_out[j] = row_out[j] - log_total }
+          end
         else
           weight, bias = node.srcs[1], node.srcs[2]
           ws, bs = elements(Float32, weight), elements(Float32, bias)
@@ -330,6 +362,18 @@ module Tensomite
           end
         end
       end
+    end
+
+    # Raises `IndexError`, described by the block, unless every element of a run of
+    # *count* from *start*, *stride* apart, lies within a buffer of *size* elements.
+    # Kernels check each run once, then read it through pointers.
+    def self.check_run(start : Int32, count : Int32, stride : Int32, size : Int32, & : -> String) : Nil
+      return if 0 <= start && 0 <= start + (count - 1) * stride < size
+      raise IndexError.new("#{yield}: a run of #{count} from #{start}, stride #{stride}, leaves a buffer of #{size}")
+    end
+
+    private def describe(node : Node) : String
+      "#{node.op} #{node.shape} from #{node.srcs.map { |src| "#{src.shape} #{src.view.inspect}" }.join(", ")}"
     end
 
     private def elements(type : T.class, tensor : Tensor) : Slice(T) forall T

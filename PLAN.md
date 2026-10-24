@@ -94,9 +94,10 @@ Each milestone is done when its exit criterion passes.
    3. A buffer pool, on host devices and Metal, and batched commits on Metal so the GPU starts before the host has encoded the whole graph.
    4. Kernel macros for elementwise expressions. The spike settled it: pure macros suffice, flattening the block into a tape with an explicit stack and differentiating by a reverse sweep over it. No `{{ run(...) }}` helper is needed.
    5. Fused row ops.
-   6. GPT-2 and the trainer on fused kernels, measured.
-   7. Matmul epilogues, and tiling for square products on Metal.
-   8. The exit runs.
+   6. GPT-2 and the trainer on fused kernels, measured. Vectorised host loops and own maths (Decision Y) halved a training step, which met the training exit; the remaining fusions (attention's scale and mask, AdamW, bias adds) became optional.
+   7. Graph diagrams (Decision AB): `Tensor#to_mermaid` renders the graph behind a tensor as a Mermaid flowchart, with ops as nodes, views as edge labels and a node limit for large graphs.
+   8. Matmul epilogues, and tiling for square products on Metal.
+   9. The exit runs. Training's is met: 1.573 nats/char at step 2,749 (20 minutes) and 1.494 after 5,000 steps (36 minutes), in the Linux container.
    - Exit: dispatch count per GPT-2 token falls measurably, GPT-2 tokens/s on Metal beats BLAS (Decision O), macro kernels match their hand-written CPU oracles, macro gradients pass finite-difference checks, and the char-level Shakespeare model reaches a validation loss below 1.6 nats/char within an hour of training in the 4-core Linux container (Decision R).
 8. **Vulkan backend.** Bind Vulkan compute, and port the hand-written kernels to GLSL compiled at build time. Kernel macros gain a GLSL backend beside Crystal and MSL (Decision V), so fused kernels come with it.
    - Exit: the full op suite matches the oracle on a Linux discrete GPU, and GPT-2 runs there.
@@ -146,6 +147,10 @@ Each milestone is done when its exit criterion passes.
 - **Decision V, when kernel macros emit GLSL:** in M8, when a Vulkan device can run it (decided). Emitting code that nothing runs invites drift. The emitter is designed with GLSL as a third backend.
 - **Decision W, if M7's training is still too slow:** decided after the fused models are measured in M7. The next lever would be Decision D, CPU threads, with work split independently of thread count.
 - **Decision X, Metal reductions against the CPU's bits:** Metal's `Sum` of a long run folds it in chunks of 64 in parallel, so it may differ from the CPU in the last bits (decided). The rules of Decision S apply: chunks sit at fixed offsets and combine in chunk order, so bits repeat from run to run and do not change when a row is padded with zeros. `Max` is exact in any order, and runs of one chunk keep the host's arithmetic.
+- **Decision Y, transcendental functions on host devices:** tensomite's own `Float32` `exp`, `log` and `tanh` (`Tensomite::Maths`), not the C library's (decided). A call into libm cannot be vectorised, and `tanhf` alone cost 12 ns per element, most of `gelu`'s time in training. Each function is range reduction and a polynomial written with selects, within 2 ulp of the correctly rounded result. They pay only in loops that vectorise, so host loops read unit-stride runs through pointers after checking each run's bounds once. Together they halve a training step. Host results no longer depend on the platform's maths library, so Linux and macOS give the same bits; they differ from libm's in the last bits, within the fixtures' tolerances.
+- **Decision Z, after part 6's speed-up:** run the training exit at once, and treat the remaining fusions as optional (decided). It passed, so Decision W's CPU threads are not needed for M7.
+- **Decision AA, planned release of intermediate buffers:** after M7 part 8 (decided). The scheduler would return a node's buffer to its pool once its last consumer has run, rather than when the collector finalizes it, which would lower a step's peak memory and make buffer lifetimes independent of the collector and its threads. Only nodes internal to the realised graph qualify, since a tensor the caller holds must stay valid. On Metal a buffer would be released when its consumer's command buffer completes, not when it is encoded, because the CPU may write a reused buffer before the GPU has read it.
+- **Decision AB, a Mermaid view of the graph:** `Tensor#to_mermaid`, as its own PR between M7 parts 6 and 8 (decided). Node ids follow topological order, so the same graph gives the same text.
 
 ## Risks
 

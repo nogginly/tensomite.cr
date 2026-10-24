@@ -127,6 +127,7 @@ Benchmarks of model speed depend only on shapes, so `bench/gpt2.cr` can run on a
 
 ### Crystal gotchas met so far
 
+- **Finalizers can run on another thread,** concurrently with the main fiber: in Crystal 1.22 the execution-context monitor thread invokes them when it allocates. Anything a finalizer touches needs an atomic guard, and must never wait for it, because a finalizer can also interrupt the holder on its own thread (see `BufferPool`).
 - **`out` is a reserved word** (used for C out-parameters). Don't use it as a variable name. Kernels use `dst`.
 - **Array literals mixing types become unions.** `[1f32, 2, 3]` is `Array(Float32 | Int32)`, which `Tensor.from` rejects. In specs, use the `f32(1, 2, 3)` helper. Elsewhere, use `[1, 2, 3].map(&.to_f32)`.
 - **`Bytes#unsafe_slice_of(T)`** reinterprets a buffer's bytes as `Slice(T)` without copying. It works for structs too: a packed block struct of 18 bytes reads straight out of a buffer.
@@ -137,6 +138,7 @@ Benchmarks of model speed depend only on shapes, so `bench/gpt2.cr` can run on a
 - **Unicode-aware regexes need `Regex::Options::UCP`.** Without it `\s`, `\w` and `\d` match ASCII only, while `\p{L}` and `\p{N}` work either way.
 - **Crystal cannot `require` an absolute path.** Scripts outside the repo cannot load it by path. Put a temporary script inside the repo, relative to `src/`, and delete it afterwards.
 - **Class variables are shared with subclasses.** A `class_getter default : CPU` on `CPU` stops a subclass from declaring its own `default` of another type. That is why `CPU` and `SimDiscrete` are siblings under `HostDevice` rather than parent and child.
+- **Indexing a `Slice` in a loop stops it vectorising,** because each access carries a bounds check that can raise. In hot loops, check the first and last positions once, then index `slice.to_unsafe + offset` (see `HostDevice#binary`). Measure the loop afterwards: a call LLVM cannot inline, such as one into libm, also stops vectorisation, which is why host kernels use `Tensomite::Maths`.
 - **Generic kernels compile every branch for every dtype.** `Math.exp(x)` on an `Int32` returns `Float64`, which does not fit a `Slice(Int32)`. Wrap results in `T.new(...)` so the code compiles, and reject float-only ops when they are called, so integer kernels never run them.
 - **`Void*` is a type, not an expression.** Pass `Pointer(Void)` where a type is an argument, as in `ObjC.send(Pointer(Void), …)`.
 - **The macro language is small.** `ArrayLiteral` has no `pop`, `reverse` or `index`: use `last` with a slice (`a[0...-1]`), a loop over indices, or a `HashLiteral`. An empty array literal passed to another macro needs a type (`[] of String`). There is no recursion that returns a value and no `while`, so tree walks use an explicit stack in a bounded `for` loop, as `Tensomite.kernel` does.

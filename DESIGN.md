@@ -386,6 +386,8 @@ The host kernels are deliberately naive, and they run in a fixed order. That giv
 
 - **Kernel structure.** `execute` dispatches on `DType` to a generic method, `execute(Float32, …)` or `execute(Int32, …)`, which dispatches on `Op`. A buffer's bytes are read as `Slice(T)`. Results are converted with `T.new(...)`, so every branch compiles for every dtype; float-only ops never reach an integer kernel because they are rejected when called.
 - **Indexing in runs.** Kernels walk logical indices in order, in runs that each view can step through with a fixed stride. When every view involved is dense or constant, the run is the whole tensor. Otherwise it is the last dimension. `View#offset_of` finds each run's start, once per run rather than once per element. The order of arithmetic is the same as indexing every element, so the results are bit-identical, and strided reads are three to five times faster.
+- **Pointers within a run.** A kernel checks a run's first and last positions against each buffer once, then reads and writes through pointers, with a separate loop for unit strides. Without a bounds check on every element LLVM vectorises those loops, which made elementwise ops three to four times faster (2.8 to 0.7 ns per element for `Mul` in training).
+- **Transcendental functions** (`exp`, `log`, `tanh`) are tensomite's own, in `Tensomite::Maths` (Decision Y): range reduction and a short polynomial, written with selects rather than branches so the loops around them vectorise, each within 2 ulp of the correctly rounded result (`spec/maths_spec.cr`). Inputs whose results would be subnormal are never computed with, because arithmetic on subnormals is about 100 times slower on x86; that mattered for the `-inf` of the causal mask. `sqrt` stays `Math.sqrt`, which compiles to one instruction.
 - **Reductions.** The reduced axis is permuted to the end of the source view, so each output element reads one run of consecutive logical indices. `Sum` folds the run from zero, and `Max` from its first element. A reduction over all elements is the same loop with a single output.
 
 ```mermaid
@@ -440,8 +442,8 @@ A graph built anew every step, as in training or decoding, would allocate a fres
 
 1. **Giving back.** When the collector finalizes a buffer, its finalizer hands the memory to the device's pool. A buffer is collected only once nothing can reach it, so reuse is always safe. Memory from a file mapping is never pooled.
 2. **Taking.** `alloc` takes memory of the exact size from the pool when there is some, and allocates otherwise. A pooled buffer's old contents remain, which is why `Device#alloc` promises nothing about contents and every kernel writes all of its output.
-3. **Re-entrancy.** A finalizer can run in the middle of any allocation, including one made by the pool itself. While the pool is changing it declines memory, and the memory is freed instead.
-4. **On Metal**, a buffer given back while GPU work is pending waits in a retired list until that work completes, because the GPU may still be reading it. The pool holds the `MTLBuffer`s themselves.
+3. **Threads and re-entrancy.** A finalizer can run in the middle of any allocation, including one made by the pool itself, and on any thread: in Crystal 1.22 the execution-context monitor thread runs them too, while the main thread is computing. So the pool is guarded by an atomic try-lock and never waits. While one caller holds it, `take` misses, and the caller allocates, and `give` declines, and the memory is freed. Before this lock, a race between the two threads corrupted the free lists, about once in 30 runs of `gpt2_spec`, and once in a 5,000-step training run.
+4. **On Metal**, finalizers only queue a buffer in a retired list, under the same kind of try-lock. The device's own thread moves the list into the pool when no GPU work is pending, at the next allocation or flush, because the GPU may still be reading a buffer. When the list is held, the finalizer releases the `MTLBuffer` instead, which is safe because command buffers retain what they use. The pool holds the `MTLBuffer`s themselves.
 5. **A limit** (1 GiB by default) bounds what a pool holds.
 
 Reuse lags by one collection: memory comes back only when the collector runs. A training loop that collects once per step (`examples/shakespeare.cr`) gets most of its buffers back before the next step; on the Linux container, that took a step from 744 to 470 ms, with identical losses.
@@ -463,7 +465,7 @@ flowchart LR
 
 1. **The tape.** The macro walks the block's syntax tree in post order, with an explicit stack, because the macro language has no recursion that returns values. Each operation becomes one tape entry with its own temporary, in Crystal's own order of evaluation, so `x * x * x` is `(x · x) · x`, as the composite computes it.
 2. **Constants.** A subexpression without inputs, such as `Math.sqrt(2 / Math::PI)`, is computed once in `Float64` and converted to `Float32`, which is exactly how `Tensor.scalar` converts a number operand.
-3. **The host loop** computes each entry in `Float32`, and Crystal never fuses a multiply and an add. So a kernel gives **the same bits as the composite it replaces**, and the composite is its oracle (`spec/kernel_spec.cr`). `tanh`, `exp`, `log` and `sqrt` call the same `Math` functions as the host kernels.
+3. **The host loop** computes each entry in `Float32`, and Crystal never fuses a multiply and an add. So a kernel gives **the same bits as the composite it replaces**, and the composite is its oracle (`spec/kernel_spec.cr`). `tanh`, `exp` and `log` call the same `Tensomite::Maths` functions as the host kernels, and `sqrt` the same `Math.sqrt`.
 4. **MSL** puts one statement per entry, so the Metal compiler cannot fuse operations either; only the maths library's functions differ from the CPU's. `Metal` compiles a kernel's source, after `metal/prelude.metal`, the first time the kernel runs, and caches the pipeline.
 5. **Gradients.** A reverse sweep over the tape applies each operation's chain rule: the output's gradient spreads to its operands, and contributions to one value are added in the order the sweep meets them. Each input gets its own gradient kernel, whose inputs are the output's gradient followed by the kernel's inputs. Autograd's rule for `Op::Kernel` applies them, so a kernel needs no hand-written backward. Gradient kernels have no gradients of their own.
 
@@ -866,6 +868,19 @@ of which `Softmax` (12)          |0.51         |0.08
 - **Matmul is 79% of the GPU's time.** The rest is the residual and bias adds, the KV cache's `Cat` and `Copy`, and the fused ops.
 - **Atomic matmul is now slower than the deterministic split in decode** (182.9 against 187.6 tokens/s), so determinism costs nothing there.
 
+**After vectorised host loops and own maths** (M7 part 6, M5 Pro): Metal's kernels are unchanged, but `BLAS` runs every op except matmul on host kernels, which now vectorise.
+
+Measure                          |Part 5|Part 6    
+---------------------------------|------|----------
+Metal decode, tokens/s (split)   |187.63|**183.80**
+`BLAS` decode, tokens/s, same run|160.26|171.56    
+Metal prefill, tokens/s (split)  |1,642 |1,590     
+`BLAS` prefill, tokens/s         |1,240 |**2,349** 
+Wall per decoded token, ms       |4.95  |4.98      
+
+- **Metal still decodes faster, by 7% rather than 17%.** Decision O's requirement holds, with less room.
+- **`BLAS` now prefills half as fast again as Metal.** Prefill is a few large matmuls, where Accelerate is strong and Metal's untiled matmul is not; tiling is M7 part 7.
+
 **Training step in the Linux container through M7** (the 0.8M-param model, 30 steps, identical losses):
 
 Build                             |ms per step
@@ -874,16 +889,30 @@ M6                                |744
 buffer pool, a collection per step|470        
 `gelu` as one kernel              |387        
 fused row ops                     |293        
+pointer loops and own maths       |133        
 
-The larger model Decision R's 1.6 target needs (4 layers, 6 heads, width 192, context 128) went from 1.6 s to 1.1 s a step: about 90 minutes for 5,000 steps, still short of the hour.
+The larger model Decision R's 1.6 target needs (4 layers, 6 heads, width 192, context 128, batch 16) went from 1.6 s to 0.54 s a step: about 45 minutes for 5,000 steps, inside the hour. The last row's two changes, measured in one session on that model:
+
+Build                       |ms per step
+----------------------------|-----------
+`main` after fused row ops  |1,130      
+pointer loops, libm         |808        
+pointer loops, `Maths` (own)|542        
+
+- **Own maths only pays in loops that vectorise.** With the old bounds-checked loops it made the step slower (1,065 to 1,282 ms): scalar code with both of `tanh`'s branches computed loses to libm's, and `softmax`'s masked `-inf` entries produced subnormals.
+- **Kernel time per step fell from 1.0 to 0.4 s.** `gelu` went from 26 to 4.5 ns per element, its gradient from 28 to 6, and `softmax` from 9 to 4.2.
 
 **Training a character-level GPT on Tiny Shakespeare, Linux container.** The M5 exit is a validation loss below 1.8 within an hour here, and M7's is below 1.6 within an hour (Decision R). Runs use `examples/shakespeare.cr` on `BLAS`, with AdamW and a cosine schedule from 1e-3 to 1e-4:
 
-Model                                   |Params|Tokens per step|ms per step|Steps|Wall time|Validation loss, nats/char        
-----------------------------------------|------|---------------|-----------|-----|---------|----------------------------------
-4 layers, 4 heads, width 128, context 64|0.8M  |1,024          |720        |3,000|36 min   |1.726 (1.80 at step 2,250, 27 min)
+Model                                    |Params|Tokens per step|ms per step|Steps|Wall time|Validation loss, nats/char         
+-----------------------------------------|------|---------------|-----------|-----|---------|-----------------------------------
+4 layers, 4 heads, width 128, context 64 |0.8M  |1,024          |720        |3,000|36 min   |1.726 (1.80 at step 2,250, 27 min) 
+4 layers, 6 heads, width 192, context 128|1.8M  |2,048          |431        |5,000|36 min   |1.494 (1.573 at step 2,749, 20 min)
 
-Where the time of a step went, measured over 10 steps of that model before two fixes:
+- **The second row is M7's exit** (Decision R), run with M7 part 6 and the pool's thread fix. Its validation loss passes 1.6 at step 2,749.
+- **On the M5 Pro,** the same run (Accelerate, before the thread fix) takes 90 ms a step, 7.5 minutes in all, and ends at 1.4936 against Linux's 1.4939. Host maths is identical on both, but the two BLAS libraries add matmul terms in different orders, and the last-bit differences compound over 5,000 steps.
+
+Where the time of a step went, measured over 10 steps of the first model before two fixes:
 
 Cost                                       |Before             |After                             
 -------------------------------------------|-------------------|----------------------------------

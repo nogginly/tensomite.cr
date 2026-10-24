@@ -157,9 +157,10 @@ module Tensomite
     @in_flight = [] of Void*
     # Dispatches encoded into the open command buffer.
     @encoded = 0
-    # Buffers given back while GPU work was pending; they join the pool once it completes.
+    # Buffers given back by finalizers, which may run on another thread; the
+    # device's own thread moves them into the pool once no GPU work is pending.
     @retired = [] of {Void*, Int32}
-    @retiring = false
+    @retired_lock = Atomic(Bool).new(false)
 
     # Freed `MTLBuffer`s kept for reuse; see `BufferPool`. Holds up to 1 GiB by
     # default. (`#pool`, inherited, holds host memory, which `Metal` does not use.)
@@ -189,27 +190,27 @@ module Tensomite
 
     # Returns a buffer of *bytesize* bytes, from the pool when one is free.
     private def new_buffer(bytesize : Int32) : MetalBuffer
+      recycle_retired if idle?
       mtl = buffer_pool.take(bytesize) ||
             ObjC.send(Pointer(Void), @device, "newBufferWithLength:options:", Math.max(bytesize, 4).to_u64, STORAGE_SHARED)
       raise DeviceError.new("cannot allocate #{bytesize} bytes") if mtl.null?
       MetalBuffer.new(self, mtl, bytesize)
     end
 
-    # Takes back the `MTLBuffer` of a collected buffer. It joins the pool at once
-    # when no GPU work is pending, otherwise when that work completes, because the
-    # GPU may still be reading it; it is released when the pool cannot take it.
+    # Takes back the `MTLBuffer` of a collected buffer, from a finalizer on any
+    # thread. It joins the pool later, from the device's own thread, when no GPU
+    # work is pending, since the GPU may still be reading it. When another thread
+    # holds the queue it is released instead; command buffers keep the buffers
+    # they use alive, so releasing is always safe.
     protected def retire(mtl : Void*, bytesize : Int32) : Nil
-      if idle?
-        ObjC.release(mtl) unless buffer_pool.give(mtl, bytesize)
-      elsif @retiring
+      unless @retired_lock.compare_and_set(false, true)[1]
         ObjC.release(mtl)
-      else
-        @retiring = true
-        begin
-          @retired << {mtl, bytesize}
-        ensure
-          @retiring = false
-        end
+        return
+      end
+      begin
+        @retired << {mtl, bytesize}
+      ensure
+        @retired_lock.set(false)
       end
     end
 
@@ -593,7 +594,13 @@ module Tensomite
 
     # Moves the buffers retired while GPU work was pending into the pool.
     private def recycle_retired : Nil
-      retired, @retired = @retired, [] of {Void*, Int32}
+      return if @retired.empty?
+      fresh = [] of {Void*, Int32}
+      until @retired_lock.compare_and_set(false, true)[1]
+        Thread.yield
+      end
+      retired, @retired = @retired, fresh
+      @retired_lock.set(false)
       retired.each { |(mtl, bytesize)| ObjC.release(mtl) unless buffer_pool.give(mtl, bytesize) }
     end
 
