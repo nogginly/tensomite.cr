@@ -9,10 +9,10 @@ include Tensomite
 # A multilayer perceptron: two inputs, two hidden layers of 64 units with GELU
 # between them, and one output.
 class Multiplier < Tensomite::Module
-  def initialize(rng : Random)
-    @hidden1 = Linear.new(2, 64, rng: rng)
-    @hidden2 = Linear.new(64, 64, rng: rng)
-    @output = Linear.new(64, 1, rng: rng)
+  def initialize(build : Builder)
+    @hidden1 = build.linear(2, 64)
+    @hidden2 = build.linear(64, 64)
+    @output = build.linear(64, 1)
   end
 
   # Returns predictions [batch, 1] for inputs [batch, 2], lazily.
@@ -39,7 +39,7 @@ def batch(rng : Random, size : Int32) : {Tensor, Tensor}
 end
 
 rng = Random.new(42)
-model = Multiplier.new(rng: Random.new(1))
+model = Multiplier.new(Builder.new(rng: Random.new(1)))
 optimizer = AdamW.new(model.params, lr: 3e-3, weight_decay: 0.0)
 
 2000.times do |step|
@@ -55,7 +55,7 @@ puts
 end
 
 model.save("multiplier.safetensors")
-reloaded = Multiplier.new(rng: Random.new(2)).load("multiplier.safetensors")
+reloaded = Multiplier.new(Builder.new(rng: Random.new(2))).load("multiplier.safetensors")
 puts
 puts "reloaded from multiplier.safetensors: 3 × 4 = #{reloaded.multiply(3.0, 4.0).round(2)}"
 

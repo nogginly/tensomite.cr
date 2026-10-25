@@ -14,14 +14,15 @@ include Tensomite
 # A transformer block: attention, then an MLP, each after a layer norm and added
 # back to the residual stream.
 class Block < Tensomite::Module
-  def initialize(width : Int32, heads : Int32, residual : Init, rng : Random, device : Device)
-    @ln1 = LayerNorm.new(width, device: device)
-    @attention = CausalSelfAttention.new(width, heads, bias: false, proj_init: residual, rng: rng, device: device)
-    @ln2 = LayerNorm.new(width, device: device)
-    @mlp = Sequential.new(
-      Linear.new(width, 4 * width, bias: false, init: Init.normal(0.02), rng: rng, device: device),
-      Activation.gelu,
-      Linear.new(4 * width, width, bias: false, init: residual, rng: rng, device: device))
+  def initialize(width : Int32, heads : Int32, residual : Init, build : Builder)
+    @ln1 = build.layernorm(width)
+    @attention = build.attention(width, heads, proj_init: residual)
+    @ln2 = build.layernorm(width)
+    @mlp = Sequential.build(build) do
+      linear width, 4 * width
+      gelu
+      linear 4 * width, width, init: residual
+    end
   end
 
   def forward(x : Tensor, mask : Tensor) : Tensor
@@ -41,13 +42,19 @@ class CharGPT < Tensomite::Module
 
   @blocks : Array(Block)
 
-  def initialize(@layers, @heads, @width, @context, @vocab, device : Device, seed : Int32)
-    rng = Random.new(seed)
-    @tokens = Embedding.new(vocab, width, rng: rng, device: device)
-    @positions = Parameter.new(Init.normal(0.02).tensor([context, width], rng, device))
+  # Returns a model whose weights are drawn from a normal distribution with
+  # standard deviation 0.02, except the projections back into the residual
+  # stream, which GPT-2 scales down by the depth.
+  def self.new(layers : Int32, heads : Int32, width : Int32, context : Int32, vocab : Int32, device : Device, seed : Int32)
+    new(layers, heads, width, context, vocab, Builder.new(rng: Random.new(seed), device: device, bias: false, init: Init.normal(0.02)))
+  end
+
+  def initialize(@layers : Int32, @heads : Int32, @width : Int32, @context : Int32, @vocab : Int32, build : Builder)
+    @tokens = build.embedding(vocab, width)
+    @positions = build.parameter([context, width])
     residual = Init.normal(0.02 / Math.sqrt(2 * layers))
-    @blocks = Array.new(layers) { Block.new(width, heads, residual, rng, device) }
-    @ln = LayerNorm.new(width, device: device)
+    @blocks = Array.new(layers) { Block.new(width, heads, residual, build) }
+    @ln = build.layernorm(width)
   end
 
   # Returns lazy logits `[batch * length, vocab]` for *ids*, `[batch, length]`.

@@ -43,10 +43,10 @@ Why the non-linear function? Without it, three matrix products in a row equal a 
 
 ```crystal
 class Multiplier < Tensomite::Module
-  def initialize(rng : Random)
-    @hidden1 = Linear.new(2, 64, rng: rng)
-    @hidden2 = Linear.new(64, 64, rng: rng)
-    @output = Linear.new(64, 1, rng: rng)
+  def initialize(build : Builder)
+    @hidden1 = build.linear(2, 64)
+    @hidden2 = build.linear(64, 64)
+    @output = build.linear(64, 1)
   end
 
   # Returns predictions [batch, 1] for inputs [batch, 2], lazily.
@@ -58,10 +58,10 @@ class Multiplier < Tensomite::Module
 end
 ```
 
-`Tensomite::Module` is the base class for models and their parts, and `Linear` is one of the parts it provides: `x.matmul(weight) + bias`, with the weight and bias as parameters. Four details:
+`Tensomite::Module` is the base class for models and their parts, and `Linear` is one of the parts it provides: `x.matmul(weight) + bias`, with the weight and bias as parameters. `build.linear(2, 64)` makes a `Linear` with 2 inputs and 64 outputs. Four details:
 
 1. **Parameters are found and named for you.** The model's parameters are whatever its instance variables hold, named after the variables: `model.named_params.keys` is `["hidden1.weight", "hidden1.bias", "hidden2.weight", "hidden2.bias", "output.weight", "output.bias"]`. Nothing is listed by hand.
-2. **Random starting weights.** If every weight began equal, every hidden unit would compute the same value and receive the same gradient, so they would stay identical. Random weights make them differ from the start. `Linear` draws its weight uniformly from ±1/√inputs, which keeps the numbers from growing or shrinking layer by layer. All three layers draw from the one generator `rng`, so the same seed gives the same model.
+2. **Random starting weights.** If every weight began equal, every hidden unit would compute the same value and receive the same gradient, so they would stay identical. Random weights make them differ from the start. `Linear` draws its weight uniformly from ±1/√inputs, which keeps the numbers from growing or shrinking layer by layer. The `Builder` holds the random generator, and the device the weights live on, so all three layers draw from one generator and the same seed gives the same model.
 3. **Broadcasting does the bias.** `x.matmul(weight)` is `[batch, 64]` and the bias is `[64]`, so adding it adds the bias to every row.
 4. **`forward` defines the model; `call` runs it.** `@hidden1.call(x)` runs `Linear`'s `forward` inside a scope named `hidden1`, which is what names the boxes in the diagram in step 7.
 
@@ -80,7 +80,7 @@ Training repeats four steps. Each asks the loss how it would change if each weig
 
 ```crystal
 rng = Random.new(42)
-model = Multiplier.new(rng: Random.new(1))
+model = Multiplier.new(Builder.new(rng: Random.new(1)))
 optimizer = AdamW.new(model.params, lr: 3e-3, weight_decay: 0.0)
 
 2000.times do |step|
@@ -147,7 +147,7 @@ A model saves its parameters to a safetensors file, the format Hugging Face uses
 
 ```crystal
 model.save("multiplier.safetensors")
-reloaded = Multiplier.new(rng: Random.new(2)).load("multiplier.safetensors")
+reloaded = Multiplier.new(Builder.new(rng: Random.new(2))).load("multiplier.safetensors")
 ```
 
 ```
@@ -190,8 +190,8 @@ The counts check out by hand: the first layer has a `2 × 64` weight and 64 bias
 1. **Relative error.** Divide each error by its target plus a small constant, such as `targets + 0.01`, before squaring. Do small products improve, and large ones get worse?
 2. **A wider range.** Train on pairs from 0 to 20, and ask `12 × 12` again.
 3. **A smaller model.** Make the hidden layers 8 wide instead of 64. How low does the loss go now?
-4. **Speed.** Add `require "../src/tensomite/blas"` and pass `device: BLAS.default` to each `Linear.new` and to the `Tensor.from` calls. The model is too small for it to help much; try it with hidden layers 512 wide.
-5. **A `Sequential`.** Replace the class with `Sequential.new(Linear.new(2, 64), Activation.gelu, Linear.new(64, 64), Activation.gelu, Linear.new(64, 1))`. The arithmetic is the same; how do the parameter names and the diagram change?
+4. **Speed.** Add `require "../src/tensomite/blas"` and pass `device: BLAS.default` to the `Builder.new` and to the `Tensor.from` calls. The model is too small for it to help much; try it with hidden layers 512 wide.
+5. **A `Sequential`.** Replace the three layers with one, `@mlp = Sequential.build(build) { linear 2, 64; gelu; linear 64, 64; gelu; linear 64, 1 }`, and `forward` with `@mlp.call(x)`. The arithmetic is the same; how do the parameter names and the diagram change?
 6. **Something new.** Change `batch` to teach another function: `a + b`, `max(a, b)`, or `sin(a)`. Which are easy to learn, and which are hard?
 
 For a larger model trained the same way, see `examples/shakespeare.cr`, which learns to write in the style of Shakespeare one character at a time.

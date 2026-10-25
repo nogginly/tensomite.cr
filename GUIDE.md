@@ -225,7 +225,7 @@ model.named_params.keys                  # => ["hidden.weight", "hidden.bias", "
 - **Parts are found at compile time.** Any instance variable holding a `Parameter`, a `Module`, an `Array` of either, or a nilable one, is part of the model, named after the variable. Members of an array are named by position: `blocks.0.norm.weight`.
 - **`forward` defines; `call` runs.** `call` runs `forward` with the same arguments, inside a scope named after the module's place in its parent, so diagrams show one box per part. `forward` can take any arguments.
 - **A `Parameter` is a slot** holding a tensor (`param.value`), with a name and a flag for weight decay. Tensors never change; training replaces the tensor in each slot.
-- **Weights are drawn from `Tensomite.rng`,** a generator seeded with 0, so the same program builds the same model on every run. Each built-in module also takes `rng:` and `device:` arguments.
+- **Weights are drawn from `Tensomite.rng`,** a generator seeded with 0, so the same program builds the same model on every run. Each built-in module also takes `rng:` and `device:` arguments, which a `Builder` (below) fills in.
 
 Built-in module                                    |Parameters                                            |`forward`                                                                                                                      
 ---------------------------------------------------|------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------
@@ -244,6 +244,35 @@ mlp.named_params.keys   # => ["steps.0.weight", "steps.0.bias", "steps.2.weight"
 ```
 
 `Sequential` holds `Layer`s, modules whose `forward` takes one tensor and returns one. Every built-in module is a `Layer`. A model whose `forward` takes more, such as a transformer block that also takes a mask, inherits from `Module` instead.
+
+**Builders.** A `Builder` holds the settings a model's parts share: the random generator, the device, whether `Linear`s have biases, and how weights are drawn. Its methods `linear`, `embedding`, `layernorm`, `attention` (a `CausalSelfAttention`) and `parameter` take the same arguments as the modules, without those settings. `Sequential.build` makes a `Sequential` from a block in which `linear`, `layernorm`, `gelu` and `tanh` each add a step, and `add` adds any layer:
+
+```crystal
+class Block < Tensomite::Module
+  def initialize(width : Int32, heads : Int32, build : Builder)
+    @ln1 = build.layernorm(width)
+    @attention = build.attention(width, heads)
+    @ln2 = build.layernorm(width)
+    @mlp = Sequential.build(build) do
+      linear width, 4 * width
+      gelu
+      linear 4 * width, width
+    end
+  end
+
+  def forward(x : Tensor, mask : Tensor) : Tensor
+    x = x + @attention.call(@ln1.call(x), mask)
+    x + @mlp.call(@ln2.call(x))
+  end
+end
+
+build = Builder.new(rng: Random.new(1), device: BLAS.default, bias: false, init: Init.normal(0.02))
+block = Block.new(128, 4, build)
+```
+
+- **Settings apply unless overridden.** With `bias: false` above, `build.linear(2, 3, bias: true)` still has a bias. `build.with(bias: true)` returns a builder with one setting changed.
+- **`init: nil`,** the default, leaves each module's own: uniform ±1/√inputs for `Linear`, normal with standard deviation 0.02 for `Embedding`, `CausalSelfAttention` and `parameter`.
+- **Pass the builder as a typed argument,** `build : Builder`, and give the constructor's other arguments types too. Crystal works out an instance variable's type from `build.linear(...)` only when it knows `build`'s type from the method's signature; a builder made in a local variable inside `initialize` does not work. For the same reason, `Sequential.build(build) do ... end` is a class method: Crystal does not work out a type from an instance method called with a block.
 
 **Repeated parts** go in an array, which needs its type declared, because Crystal cannot infer it from `Array.new`:
 
