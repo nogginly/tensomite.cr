@@ -46,6 +46,7 @@ module Tensomite
       Uniform
       Normal
       Constant
+      Placeholder
     end
 
     getter kind : Kind
@@ -69,6 +70,12 @@ module Tensomite
       new(Kind::Constant, value.to_f64)
     end
 
+    # No values: zeros that take no memory, for parameters that `Module#load`
+    # will replace, so building a model to load it allocates nothing.
+    def self.placeholder : Init
+      new(Kind::Placeholder, 0.0)
+    end
+
     # Returns a tensor of *shape* filled as this says, drawing from *rng* in
     # row-major order. Normal values use the Box–Muller transform, two draws each.
     def tensor(shape : Array(Int32), rng : Random, device : Device) : Tensor
@@ -80,6 +87,8 @@ module Tensomite
                Array(Float32).new(size) { (scale * Math.sqrt(-2 * Math.log(1 - rng.rand)) * Math.cos(2 * Math::PI * rng.rand)).to_f32 }
              in .constant?
                Array(Float32).new(size, scale.to_f32)
+             in .placeholder?
+               return Tensor.zeros(Array.new(shape.size, 1), device: device).expand(shape)
              end
       Tensor.from(data, shape, device)
     end
@@ -146,28 +155,36 @@ module Tensomite
     # safetensors file at *path*, on the device the parameter is on, and returns
     # `self`.
     #
-    # Raises `ShapeError` or `DTypeError` for a tensor whose shape or dtype differs
-    # from its parameter's. When *strict*, also raises `Error` for a parameter the
-    # file lacks or a tensor the model lacks; otherwise those are skipped, so a
-    # model can load part of a larger file.
-    def load(path : String, strict : Bool = true) : self
-      file = SafeTensors.open(path)
+    # The file's names are the model's with *prefix* in front, such as
+    # `"transformer."`; tensors whose names match *ignore*, such as stored masks,
+    # are skipped. Raises `ShapeError` or `DTypeError` for a tensor whose shape
+    # or dtype differs from its parameter's. When *strict*, also raises `Error`
+    # for a parameter the file lacks or a tensor the model lacks; otherwise those
+    # are skipped, so a model can load part of a larger file.
+    def load(path : String, strict : Bool = true, prefix : String = "", ignore : Regex? = nil) : self
+      load(SafeTensors.open(path), strict, prefix, ignore)
+    end
+
+    # :ditto:
+    def load(file : SafeTensors, strict : Bool = true, prefix : String = "", ignore : Regex? = nil) : self
       params = named_params
       if strict
-        missing = params.keys.reject { |name| file.has_key?(name) }
-        raise Error.new("#{path} lacks #{missing.join(", ")}") unless missing.empty?
-        extra = file.names.reject { |name| params.has_key?(name) }
-        raise Error.new("#{path} has #{extra.join(", ")}, which the model lacks") unless extra.empty?
+        missing = params.keys.reject { |name| file.has_key?(prefix + name) }
+        raise Error.new("#{file.path} lacks #{missing.map { |name| prefix + name }.join(", ")}") unless missing.empty?
+        extra = file.names.reject do |name|
+          (ignore && ignore.matches?(name)) || (name.starts_with?(prefix) && params.has_key?(name[prefix.size..]))
+        end
+        raise Error.new("#{file.path} has #{extra.join(", ")}, which the model lacks") unless extra.empty?
       end
       params.each do |name, param|
-        next unless entry = file.entries[name]?
+        next unless entry = file.entries[prefix + name]?
         unless entry.shape == param.shape
-          raise ShapeError.new("#{name}: #{path} holds #{entry.shape}, the model #{param.shape}")
+          raise ShapeError.new("#{name}: #{file.path} holds #{entry.shape}, the model #{param.shape}")
         end
         unless entry.dtype == param.value.dtype
-          raise DTypeError.new("#{name}: #{path} holds #{entry.dtype}, the model #{param.value.dtype}")
+          raise DTypeError.new("#{name}: #{file.path} holds #{entry.dtype}, the model #{param.value.dtype}")
         end
-        param.value = file[name, param.value.device]
+        param.value = file[prefix + name, param.value.device]
       end
       self
     end
@@ -198,6 +215,7 @@ module Tensomite
           child.name = path
           result[path] = child
         in Module
+          child.scope_name = child_scope_name(name, child)
           child.collect(path, result)
         end
       end

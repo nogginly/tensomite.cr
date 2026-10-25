@@ -72,6 +72,20 @@ describe "GPT-2 on the tiny reference model" do
     end
   end
 
+  it "names its parameters as the weights file does, without the prefix" do
+    file = SafeTensors.open("#{dir}/model.safetensors")
+    model = GPT2.load("#{dir}/model.safetensors", heads: 4)
+    model.named_params.keys.map { |name| "transformer.#{name}" }.sort!.should eq file.names.sort
+    model.named_params["h.1.attn.c_attn.weight"].value.to_a(Float32).should eq file["transformer.h.1.attn.c_attn.weight"].to_a(Float32)
+  end
+
+  it "draws one box per part, its blocks folded" do
+    model = GPT2.load("#{dir}/model.safetensors", heads: 4)
+    text = model.graph([1, 2, 3]).to_mermaid(model: model, depth: 1)
+    text.should contain %(["embedding<br/>)
+    text.should contain %(["h ×2<br/>)
+  end
+
   it "raises when positions exceed the context" do
     model = GPT2.load("#{dir}/model.safetensors", heads: 4)
     expect_raises(ShapeError, /exceed the context/) { model.forward(Array.new(65, 0), model.new_cache) }

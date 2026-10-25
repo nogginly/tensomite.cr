@@ -121,6 +121,8 @@ TENSOMITE_GPT2_DIR=models/gpt2 crystal spec --release
 
 Benchmarks of model speed depend only on shapes, so `bench/gpt2.cr` can run on any weights with GPT-2 small's shapes, such as a randomly initialised `GPT2LMHeadModel(GPT2Config())` saved with `save_pretrained`.
 
+To check that a change leaves GPT-2's arithmetic alone, run `bench/gpt2_digest.cr` on the same weights before and after: it prints one SHA-256 digest of the logits per device, over a prefill and 8 decoded tokens, so equal digests mean equal bits.
+
 ## Conventions
 
 ### Code

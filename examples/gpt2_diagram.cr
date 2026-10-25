@@ -11,4 +11,4 @@ path = ARGV[0]? || abort "usage: gpt2_diagram MODEL.safetensors [DEPTH]"
 depth = (ARGV[1]? || "2").to_i
 model = GPT2.load(path)
 logits = model.graph([464, 2068, 7586, 21831, 18045, 625, 262, 16931])
-puts depth > 0 ? logits.to_mermaid(depth: depth, params: model.params) : logits.to_mermaid(max_nodes: 400)
+puts depth > 0 ? logits.to_mermaid(model: model, depth: depth) : logits.to_mermaid(max_nodes: 400)

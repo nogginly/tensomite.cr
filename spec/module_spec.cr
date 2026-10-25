@@ -113,6 +113,13 @@ describe Tensomite::Init do
     std.should be_close(0.02, 0.001)
   end
 
+  it "makes placeholders of zeros that hold one value" do
+    tensor = Init.placeholder.tensor([3, 4], Random.new(1), CPU.default)
+    tensor.shape.should eq [3, 4]
+    tensor.node.size.should eq 1
+    tensor.to_a(Float32).should eq Array.new(12, 0f32)
+  end
+
   it "fills constants" do
     Init.constant(3).tensor([2], Random.new(1), CPU.default).to_a(Float32).should eq f32(3, 3)
   end
@@ -210,11 +217,22 @@ describe "saving and loading modules" do
     SafeTensors.write(path, {"first.weight" => Tensor.zeros([3, 4]), "first.bias" => Tensor.zeros([4]), "second.weight" => Tensor.zeros([4, 2]), "other" => Tensor.zeros([1])})
     expect_raises(Error, /has other/) { TwoLayers.new(Random.new(1)).load(path) }
   end
+
+  it "adds a prefix to the model's names, and skips tensors that match ignore" do
+    path = File.tempname("tensomite", ".safetensors")
+    trained = TwoLayers.new(Random.new(1))
+    tensors = trained.named_params.to_h { |name, param| {"model.#{name}", param.value} }
+    SafeTensors.write(path, tensors.merge({"model.first.mask" => Tensor.zeros([1])}))
+    expect_raises(Error, /has model.first.mask/) { TwoLayers.new(Random.new(2)).load(path, prefix: "model.") }
+    fresh = TwoLayers.new(Random.new(2)).load(path, prefix: "model.", ignore: /\.mask$/)
+    fresh.params.map(&.value.to_a(Float32)).should eq trained.params.map(&.value.to_a(Float32))
+    fresh.named_params["first.weight"].value.name.should eq "first.weight"
+  end
 end
 
 describe CausalSelfAttention do
   it "names its projections and refuses a width that heads do not divide" do
-    CausalSelfAttention.new(8, 2).named_params.keys.should eq ["qkv.weight", "qkv.bias", "proj.weight", "proj.bias"]
+    CausalSelfAttention.new(8, 2).named_params.keys.should eq ["c_attn.weight", "c_attn.bias", "c_proj.weight", "c_proj.bias"]
     expect_raises(ShapeError, /heads/) { CausalSelfAttention.new(8, 3) }
   end
 
@@ -223,14 +241,26 @@ describe CausalSelfAttention do
     batch, length, width, heads = 2, 3, 4, 2
     x = Tensor.from(random_values(batch * length * width, 3), [batch * length, width])
     mask = Tensor.causal_mask(length, length)
-    joined = x.matmul(attention.qkv.weight.value) + attention.qkv.bias.as(Parameter).value
+    joined = x.matmul(attention.c_attn.weight.value) + attention.c_attn.bias.as(Parameter).value
     q, k, v = (0..2).map do |part|
       joined.slice(1, part * width, (part + 1) * width).reshape([batch, length, heads, width // heads]).permute([0, 2, 1, 3])
     end
     scores = q.matmul(k.transpose) * (1 / Math.sqrt(width // heads)) + mask
     attended = scores.softmax.matmul(v).permute([0, 2, 1, 3]).reshape([batch * length, width])
-    expected = attended.matmul(attention.proj.weight.value) + attention.proj.bias.as(Parameter).value
+    expected = attended.matmul(attention.c_proj.weight.value) + attention.c_proj.bias.as(Parameter).value
     attention.call(x, mask).to_a(Float32).should eq expected.to_a(Float32)
+  end
+
+  it "gives the same values one position at a time with a cache as all at once" do
+    attention = CausalSelfAttention.new(4, 2, rng: Random.new(1))
+    x = Tensor.from(random_values(12, 5), [3, 4])
+    whole = attention.call(x, Tensor.causal_mask(3, 3)).to_a(Float32)
+    cache = CausalSelfAttention::Cache.new
+    steps = (0...3).flat_map do |i|
+      attention.call(x.slice(0, i, i + 1), Tensor.causal_mask(1, i + 1), cache).realize.to_a(Float32)
+    end
+    steps.should eq whole
+    cache.keys.as(Tensor).shape.should eq [1, 2, 3, 2]
   end
 
   it "lets no position see the positions after it" do

@@ -627,7 +627,9 @@ flowchart TB
   - it does so for class methods called with a block, but not for instance methods, which is why `Sequential.build(build) do ... end` is a class method;
   - `with ... yield` stops working when the block parameter has a type (`& : -> _`), so `Sequential.build` leaves it untyped.
 - **A declarative macro was tried and set aside (Decision AN).** A `parts(width : Int32) do ln1 = layernorm(width); ... end` macro wrote the constructor, getters and a method per part, so `forward` read `attention(ln1(x), mask)` rather than `@attention.call(@ln1.call(x), mask)`. It built both models with the same bits, but ameba reports every part line as a useless assignment, the block could hold nothing but parts, and mistakes appeared as macro-expansion errors. It returns for a second look after GPT-2 is on modules, with a syntax that ameba accepts without suppressions.
-- **`CausalSelfAttention`** is GPT-2's attention as a module, over rows of `[batch × length, width]`, the sequence length taken from the mask. It keeps the rows flat rather than `[batch, length, width]`, because a batched matmul is a different shape to BLAS, which chooses its blocking by shape.
+- **`CausalSelfAttention`** is GPT-2's attention as a module, over rows of `[batch × length, width]`, the sequence length taken from the mask. It keeps the rows flat rather than `[batch, length, width]`, because a batched matmul is a different shape to BLAS, which chooses its blocking by shape. Given a `CausalSelfAttention::Cache`, it appends its keys and values, `[batch, heads, positions, head width]`, and attends over all of them.
+- **GPT-2 on modules (Decisions AO to AQ).** `GPT2` is a `Module` whose variables have Hugging Face's names (`wte`, `wpe`, `h`, `ln_1`, `attn`, `c_attn`, `c_proj`, `mlp`, `c_fc`, `ln_f`), as nanoGPT's do, so the weights file loads by name with `load(prefix:, ignore:)`; `ignore` skips each block's stored causal mask, `attn.bias`, which PyTorch saves because it is a registered buffer. The model is built with `Init.placeholder`, a one-element zero expanded to the parameter's shape, so building it before loading allocates only the biases and norms. Its logits are bit-identical to the hand-written model's on CPU and BLAS, prefilling 64 tokens and decoding 8 (`bench/gpt2_digest.cr`): the attention's batch axis of 1 changes no bits. The KV cache is one `CausalSelfAttention::Cache` per block, passed through `call` as an argument.
+- **Scope names are set when parameters are listed,** as well as by `call`, because a model's own entry point, such as `GPT2#graph`, may run `forward` without `call`.
 
 ## Graph diagrams
 
@@ -683,7 +685,7 @@ flowchart TB
     class b11 root
 ```
 
-GPT-2 small at the same depth (`examples/gpt2_diagram.cr`) has the same shape: an embedding of 39.4M params, `block ×12` of 7.09M each, whose attention has 14 ops to the Shakespeare model's 12 because its projections have biases.
+GPT-2 small at the same depth (`examples/gpt2_diagram.cr`) has the same shape, with Hugging Face's names: an embedding of 39.4M params, `h ×12` of 7.09M each, whose `attn` has 13 ops to the Shakespeare model's 11 because its projections have biases.
 
 Box ids follow the graph's order, so the same graph always gives the same text, and diagrams can be compared as text.
 
