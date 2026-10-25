@@ -4,7 +4,7 @@ What the next session, or the next person, needs in order to carry on without th
 
 **Keeping it current.** Rewrite it rather than appending to it: at the end of each PR, and whenever a session's context passes about 70%. Anything that belongs in one of the other three documents goes there instead.
 
-*Last rewritten: 24 Oct 2026, with M7b part 2 open.*
+*Last rewritten: 25 Oct 2026, with M7b part 3 open.*
 
 ## Where things stand
 
@@ -14,8 +14,8 @@ What the next session, or the next person, needs in order to carry on without th
   - Metal decodes at 186 tokens/s against BLAS's 166, and prefills 64 tokens at 3,684 against 2,419;
   - macro kernels match their oracles and their gradients pass finite differences;
   - Shakespeare reached 1.573 nats/char in 20 minutes in the Linux container.
-- **Open PR:** M7b part 2 on `m7b-save-load`: `SafeTensors.write`, and `Module#save` and `Module#load` by name; the tutorial saves to safetensors instead of JSON. Part 1 (modules) is merged.
-- **Now: M7b, modules and a model DSL** (Decisions AH–AM in `PLAN.md`): modules first, then DSL candidates (a builder in plain Crystal, and a declarative macro) written against the same models, iterated with the modules. The next part is the Shakespeare model on modules, with a `CausalSelfAttention`.
+- **Open PR:** M7b part 3 on `m7b-chargpt`: `CausalSelfAttention`, and the Shakespeare model on modules (`Block`, `CharGPT`), trained with one `AdamW` and `step(loss)`; losses bit-identical to the hand-written model's. Parts 1 (modules) and 2 (safetensors writer, `save` and `load`) are merged.
+- **Now: M7b, modules and a model DSL** (Decisions AH–AM in `PLAN.md`): modules first, then DSL candidates (a builder in plain Crystal, and a declarative macro) written against the same models, iterated with the modules. The next part is the DSL candidates, written against the tutorial's and the Shakespeare models; then GPT-2 on modules.
 - **After that: M8, Vulkan.** Before planning it, settle where its kernels run. Its exit needs a Linux machine with a discrete GPU, and neither the cloud container (no GPU) nor the maintainer's Mac has one. The options to weigh include a cloud GPU runner for CI, a machine of the maintainer's, and MoltenVK on the Mac for development (Decision G chose native Metal for macOS, but that does not forbid testing Vulkan code there).
 - **A long-term goal:** inspecting running models (activations, attention, gradients) by the names of their parts; see "Inspectable" in `PLAN.md` and "Towards inspection" in `DESIGN.md`. Scopes are its first piece, and Decision AA must keep inspected nodes alive.
 - **Deferred:** Decision D, CPU threads (not needed for M7's exits). Decision AA, releasing buffers as soon as their last reader has run.

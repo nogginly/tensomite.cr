@@ -227,13 +227,14 @@ model.named_params.keys                  # => ["hidden.weight", "hidden.bias", "
 - **A `Parameter` is a slot** holding a tensor (`param.value`), with a name and a flag for weight decay. Tensors never change; training replaces the tensor in each slot.
 - **Weights are drawn from `Tensomite.rng`,** a generator seeded with 0, so the same program builds the same model on every run. Each built-in module also takes `rng:` and `device:` arguments.
 
-Built-in module                          |Parameters                                            |`forward`                                            
------------------------------------------|------------------------------------------------------|-----------------------------------------------------
-`Linear.new(inputs, outputs, bias: true)`|`weight [inputs, outputs]` (decayed), `bias [outputs]`|`x.matmul(weight) + bias`                            
-`Embedding.new(count, width)`            |`weight [count, width]` (decayed)                     |rows of the weight selected by `I32` ids of any shape
-`LayerNorm.new(width, eps: 1e-5)`        |`weight`, `bias`                                      |`x.layernorm(weight, bias, eps)`                     
-`Activation.gelu`, `Activation.tanh`     |none                                                  |the function                                         
-`Sequential.new(layer, layer, ...)`      |its steps'                                            |each step in turn                                    
+Built-in module                                    |Parameters                                            |`forward`                                                                                                                      
+---------------------------------------------------|------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------
+`Linear.new(inputs, outputs, bias: true)`          |`weight [inputs, outputs]` (decayed), `bias [outputs]`|`x.matmul(weight) + bias`                                                                                                      
+`Embedding.new(count, width)`                      |`weight [count, width]` (decayed)                     |rows of the weight selected by `I32` ids of any shape                                                                          
+`LayerNorm.new(width, eps: 1e-5)`                  |`weight`, `bias`                                      |`x.layernorm(weight, bias, eps)`                                                                                               
+`Activation.gelu`, `Activation.tanh`               |none                                                  |the function                                                                                                                   
+`Sequential.new(layer, layer, ...)`                |its steps'                                            |each step in turn                                                                                                              
+`CausalSelfAttention.new(width, heads, bias: true)`|`qkv`, `proj` (both `Linear`)                         |`call(x, mask)`: GPT-2's multi-head attention over `[batch × length, width]` rows, under a `Tensor.causal_mask(length, length)`
 
 `Linear` draws its weight uniformly from ±1/√inputs, and `Embedding` from a normal distribution with standard deviation 0.02. Either takes `init:` to change that: `Init.uniform(bound)`, `Init.normal(std)` or `Init.constant(value)`.
 

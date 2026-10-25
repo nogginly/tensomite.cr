@@ -34,8 +34,7 @@ module Tensomite
 
     # Returns `[*ids.shape, width]` for ids of any shape.
     def forward(x : Tensor) : Tensor
-      width = weight.shape[1]
-      weight.value.gather(x.reshape([x.size])).reshape(x.shape + [width])
+      weight.value.gather(x)
     end
   end
 
@@ -53,6 +52,48 @@ module Tensomite
 
     def forward(x : Tensor) : Tensor
       x.layernorm(weight.value, bias.value, eps)
+    end
+  end
+
+  # Multi-head causal self-attention over rows of `[batch * length, width]`, as
+  # in GPT-2: each position attends to itself and the positions before it.
+  #
+  # The queries, keys and values come from one `Linear` (`qkv`), whose output is
+  # split into thirds and each third into *heads*; `proj` maps the heads'
+  # joined outputs back to the width. Weights are drawn from *init*, and `proj`'s
+  # from *proj_init*, which GPT-2 scales down by the depth.
+  class CausalSelfAttention < Module
+    getter heads : Int32
+    getter qkv : Linear
+    getter proj : Linear
+
+    def initialize(width : Int32, @heads : Int32, bias : Bool = true,
+                   init : Init = Init.normal(0.02), proj_init : Init = init,
+                   rng : Random = Tensomite.rng, device : Device = CPU.default)
+      raise ShapeError.new("width #{width} does not divide into #{heads} heads") unless width % heads == 0
+      @qkv = Linear.new(width, 3 * width, bias: bias, init: init, rng: rng, device: device)
+      @proj = Linear.new(width, width, bias: bias, init: proj_init, rng: rng, device: device)
+    end
+
+    # Returns the attention of *x*, `[batch * length, width]`, under *mask*, a
+    # `[length, length]` mask such as `Tensor.causal_mask(length, length)`.
+    #
+    # 1. Projects *x* to queries, keys and values, each `[batch, heads, length, head width]`.
+    # 2. Scores queries against keys, scaled by 1/√(head width), masked, and
+    #    normalised with softmax; the weights then average the values.
+    # 3. Rejoins the heads and projects back to the width.
+    def forward(x : Tensor, mask : Tensor) : Tensor
+      rows, width = x.shape
+      length = mask.shape[0]
+      batch, head_width = rows // length, width // heads
+      joined = qkv.call(x)
+      q, k, v = (0..2).map do |part|
+        joined.slice(1, part * width, (part + 1) * width)
+          .reshape([batch, length, heads, head_width]).permute([0, 2, 1, 3])
+      end
+      scores = q.matmul(k.transpose) * (1 / Math.sqrt(head_width)) + mask
+      attended = scores.softmax.matmul(v).permute([0, 2, 1, 3]).reshape([batch * length, width])
+      proj.call(attended)
     end
   end
 
