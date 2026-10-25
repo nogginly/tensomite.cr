@@ -211,3 +211,37 @@ describe "saving and loading modules" do
     expect_raises(Error, /has other/) { TwoLayers.new(Random.new(1)).load(path) }
   end
 end
+
+describe CausalSelfAttention do
+  it "names its projections and refuses a width that heads do not divide" do
+    CausalSelfAttention.new(8, 2).named_params.keys.should eq ["qkv.weight", "qkv.bias", "proj.weight", "proj.bias"]
+    expect_raises(ShapeError, /heads/) { CausalSelfAttention.new(8, 3) }
+  end
+
+  it "computes the operations it stands for" do
+    attention = CausalSelfAttention.new(4, 2, rng: Random.new(1))
+    batch, length, width, heads = 2, 3, 4, 2
+    x = Tensor.from(random_values(batch * length * width, 3), [batch * length, width])
+    mask = Tensor.causal_mask(length, length)
+    joined = x.matmul(attention.qkv.weight.value) + attention.qkv.bias.as(Parameter).value
+    q, k, v = (0..2).map do |part|
+      joined.slice(1, part * width, (part + 1) * width).reshape([batch, length, heads, width // heads]).permute([0, 2, 1, 3])
+    end
+    scores = q.matmul(k.transpose) * (1 / Math.sqrt(width // heads)) + mask
+    attended = scores.softmax.matmul(v).permute([0, 2, 1, 3]).reshape([batch * length, width])
+    expected = attended.matmul(attention.proj.weight.value) + attention.proj.bias.as(Parameter).value
+    attention.call(x, mask).to_a(Float32).should eq expected.to_a(Float32)
+  end
+
+  it "lets no position see the positions after it" do
+    attention = CausalSelfAttention.new(4, 2, rng: Random.new(1))
+    mask = Tensor.causal_mask(3, 3)
+    values = random_values(12, 4)
+    changed = values.dup
+    changed[8, 4] = Array.new(4, 9f32)
+    before = attention.call(Tensor.from(values, [3, 4]), mask).to_a(Float32)
+    after = attention.call(Tensor.from(changed, [3, 4]), mask).to_a(Float32)
+    after[0, 8].should eq before[0, 8]
+    after[8, 4].should_not eq before[8, 4]
+  end
+end

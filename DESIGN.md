@@ -620,7 +620,8 @@ flowchart TB
 - **`call` and scopes.** `call(*args, **options)` names each child module's scope after its variable, without an array index, so the members of an array share a name and fold in diagrams. Then it runs `forward` inside the module's own scope; the root module has none. `Sequential` names its steps' scopes by kind instead (`linear`, `gelu`).
 - **`Layer`** is a `Module` whose `forward` takes one tensor and returns one, which is what `Sequential` holds. A method called on a value of the base type is compiled for every subclass, so `Sequential` cannot hold any `Module`: a transformer block's `forward(x, mask)` would fail to compile there.
 - **Initialisation (Decision AK).** Modules draw from `rng:`, by default `Tensomite.rng`, seeded with 0, so a program builds the same model every run. `Linear` draws uniformly from ±1/√inputs, PyTorch's default, and `Embedding` from a normal distribution with standard deviation 0.02, GPT-2's. Normal values use the Box–Muller transform exactly as `examples/shakespeare.cr` does, so that model can move onto modules with the same weights.
-- **Bit-identical to hand-written models.** The tutorial's model, rewritten on modules, gives the same loss bits for all 2,000 steps, and the same answers, as the tensor version: the operations and the draws from the generator are the same, in the same order.
+- **Bit-identical to hand-written models.** The tutorial's model, rewritten on modules, gives the same loss bits for all 2,000 steps, and the same answers, as the tensor version; so does the Shakespeare model, for every training and validation loss checked, in two shapes. The operations and the draws from the generator are the same, in the same order. The Shakespeare model keeps its position table as a bare `Parameter`, sliced as before: an `Embedding` over position ids would compute the same values, but its gradient goes through `ScatterAdd` rather than `Unview`, which adds in a different order.
+- **`CausalSelfAttention`** is GPT-2's attention as a module, over rows of `[batch × length, width]`, the sequence length taken from the mask. It keeps the rows flat rather than `[batch, length, width]`, because a batched matmul is a different shape to BLAS, which chooses its blocking by shape.
 
 ## Graph diagrams
 
@@ -631,37 +632,49 @@ flowchart TB
 
 **Scopes** name the parts of a model. `Tensomite.scope("block") { ... }` opens a scope, nested in the current one, and every node built inside records it, in one reference per node. The chain rules of `grad` build their nodes in the scope of the node they differentiate, so a block's gradients belong to the block. Leaves get names with `Tensor#named`; GPT-2 names its weights as the weights file does.
 
-A summary folds repetition: sibling scopes of one name whose graphs match (the same ops, shapes and parameter sizes, in order) become one box marked `×k`, with counts per instance, and edges from one instance into the next are drawn dashed as `next`. Scopes above the last level become subgraphs, and the nodes a scope holds directly, outside its children, are its "own ops", such as a block's residual adds. The Shakespeare model's loss at depth 2, from `examples/shakespeare.cr --diagram 2`:
+A summary folds repetition: sibling scopes of one name whose graphs match (the same ops, shapes and parameter sizes, in order) become one box marked `×k`, with counts per instance, and edges from one instance into the next are drawn dashed as `next`. Scopes above the last level become subgraphs, and the nodes a scope holds directly, outside its children, are its "own ops", such as a block's residual adds. The Shakespeare model's loss at depth 2, from `examples/shakespeare.cr --layers 4 --heads 6 --width 192 --context 128 --diagram 2`. The model is built from modules (see "Modules"), so its boxes are named after them:
 
 ```mermaid
 flowchart TB
     b1["ids · leaf [16,128] I32"]
-    b3["causal mask · leaf [128,128]"]
-    b8["leaf [2048] I32"]
-    b0["embedding<br/>2 ops · 37.1k params"]
-    subgraph sub1 ["block ×4"]
-        b4["own ops<br/>2 ops each"]
-        b2["attention<br/>12 ops · 148k params each"]
-        b5["mlp<br/>4 ops · 295k params each"]
+    b5["causal mask · leaf [128,128]"]
+    b12["leaf [2048] I32"]
+    subgraph sub1 ["embedding"]
+        b2["own ops<br/>1 op · 24.6k params"]
+        b0["tokens<br/>1 op · 12.5k params"]
     end
-    b6["head<br/>2 ops · 384 params"]
-    b7["loss<br/>5 ops"]
+    subgraph sub2 ["blocks ×4"]
+        b6["own ops<br/>2 ops each"]
+        b3["ln1<br/>1 op · 384 params each"]
+        b4["attention<br/>11 ops · 147k params each"]
+        b7["ln2<br/>1 op · 384 params each"]
+        b8["mlp<br/>3 ops · 295k params each"]
+    end
+    subgraph sub3 ["head"]
+        b10["own ops<br/>1 op"]
+        b9["ln<br/>1 op · 384 params"]
+    end
+    b11["loss<br/>5 ops"]
     b1 -- "[16,128]" --> b0
-    b0 -- "[2048,192]" --> b2
-    b3 -- "[16,6,128,128]" --> b2
-    b0 -- "[2048,192]" --> b4
-    b2 -- "[2048,192]" --> b4
-    b4 -- "[2048,192]" --> b5
-    b5 -- "[2048,192]" --> b4
-    b4 -. "next" .-> b2
-    b4 -. "next" .-> b4
+    b0 -- "[16,128,192]" --> b2
+    b2 -- "[2048,192]" --> b3
+    b3 -- "[2048,192]" --> b4
+    b5 -- "[16,6,128,128]" --> b4
+    b2 -- "[2048,192]" --> b6
     b4 -- "[2048,192]" --> b6
-    b6 -- "[2048,65]" --> b7
-    b8 -- "[2048]" --> b7
+    b6 -- "[2048,192]" --> b7
+    b7 -- "[2048,192]" --> b8
+    b8 -- "[2048,192]" --> b6
+    b6 -. "next" .-> b3
+    b6 -. "next" .-> b6
+    b6 -- "[2048,192]" --> b9
+    b9 -- "[2048,192]" --> b10
+    b10 -- "[2048,65]" --> b11
+    b12 -- "[2048]" --> b11
     classDef leaf stroke:#2b8a3e,stroke-width:2px
-    class b1,b3,b8 leaf
+    class b1,b5,b12 leaf
     classDef root stroke:#c92a2a,stroke-width:2px
-    class b7 root
+    class b11 root
 ```
 
 GPT-2 small at the same depth (`examples/gpt2_diagram.cr`) has the same shape: an embedding of 39.4M params, `block ×12` of 7.09M each, whose attention has 14 ops to the Shakespeare model's 12 because its projections have biases.
