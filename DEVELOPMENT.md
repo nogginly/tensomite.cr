@@ -52,6 +52,7 @@ Step                                   |Linux|macOS
 `crystal spec --release`               |yes  |yes  
 Type-check `bench/`, `examples/`       |yes  |yes  
 Cross-compile the Metal path           |yes  |     
+CUDA compiler specs (NVRTC, no GPU)    |yes  |     
 Formatting check                       |yes  |     
 `bin/ameba src/ spec/ bench/ examples/`|yes  |     
 
@@ -80,6 +81,7 @@ src/tensomite/kernel.cr     the Tensomite.kernel macro and the Kernel class
 src/tensomite/kernels.cr    the kernels tensomite's own ops use, such as gelu
 src/tensomite/buffer_pool.cr  BufferPool
 src/tensomite/optim.cr      SGD and AdamW
+src/tensomite/cuda.cr       opt-in CUDA (-Dcuda): versions, GPUs, NVRTC, contexts; cuda/lib.cr binds libcuda and libnvrtc
 src/tensomite/devices/      host.cr (shared host kernels), then one file per pure-Crystal device
 src/tensomite/blas.cr       opt-in BLAS binding and device; not required by src/tensomite.cr
 src/tensomite/metal.cr      opt-in Metal device (Apple Silicon); not required by src/tensomite.cr
@@ -89,7 +91,7 @@ src/tensomite/bpe.cr, sampler.cr               tokeniser and sampling
 src/tensomite/models/       one file per model architecture
 spec/                       specs, one file per type or kind of op
 spec/fixtures/              reference outputs and small reference files (see below)
-scripts/                    fixture generation, model download, document checks, and emulate_metal/ (Metal kernels on the CPU)
+scripts/                    fixture generation, model download, document checks, emulate_metal/ (Metal kernels on the CPU) and cuda_stub/ (CUDA builds without a driver)
 bench/                      benchmarks, run with --release
 examples/                   programs using the library, such as training on Shakespeare and TUTORIAL.md's multiply.cr
 models/, data/              downloaded weights and datasets (git-ignored)
@@ -218,6 +220,22 @@ type-checks and generates code for the Metal path without linking it, so mistake
 **Kernels on Linux.** MSL is close enough to C++ that a kernel can be run on the CPU before it reaches a GPU: compile its source with `g++ -std=c++20` behind a few defines (`kernel`, `device` and `constant` empty, `threadgroup` as `static`), run each threadgroup's threads as `std::thread`s, and make `threadgroup_barrier` a `std::barrier`. That checks indexing and order of arithmetic, though not MSL's own rules, such as matching widths of position attributes. `scripts/emulate_metal/run.sh` does this for the matmul kernels, checking every tiled variant against split-K bit for bit; it is a reference, not part of CI, and the pattern carries over to other kernels.
 
 CI runs the specs on macOS too. A hosted runner may have no usable GPU, in which case the Metal specs are pending rather than failing.
+
+## Working on the CUDA device
+
+CUDA is opt-in: `require "tensomite/cuda"` and build with `-Dcuda`, which links the NVIDIA driver's `libcuda` and NVRTC's `libnvrtc` (Decision AV). A build without the flag raises at compile time. NVRTC usually lives outside the linker's search path, so give its directory in `LIBRARY_PATH`; for running, it must be on the loader's path too, through `/etc/ld.so.conf.d` or `LD_LIBRARY_PATH`:
+
+```sh
+export LIBRARY_PATH=/usr/local/cuda-13.1/targets/sbsa-linux/lib   # x86-64: targets/x86_64-linux/lib
+crystal run -Dcuda examples/cuda_info.cr
+crystal spec -Dcuda spec/cuda_spec.cr
+```
+
+`examples/cuda_info.cr` prints the driver's and NVRTC's versions and every GPU, then squares a million floats on the first one, which checks compilation, loading, transfers and launches together.
+
+**Without a GPU,** `scripts/cuda_stub/setup.sh DIR` installs NVRTC from PyPI into `DIR` and builds a stand-in `libcuda` whose every call fails with `CUDA_ERROR_NO_DEVICE`. With `LIBRARY_PATH` and `LD_LIBRARY_PATH` set to `DIR`, the compiler specs run for real and the GPU specs are pending. CI does this on Linux, so every kernel's CUDA C++ is compiled on every PR; running kernels needs a machine with an NVIDIA GPU.
+
+**Kernels are compiled with `--fmad=false`** (Decision AU), so `a * b + c` is a multiply and an add, each rounded, as on the host. A spec checks the PTX for it.
 
 ## Debugging
 

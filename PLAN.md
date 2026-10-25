@@ -123,9 +123,14 @@ Met (25 Oct 2026, the Linux container and the M5 Pro):
 - `GUIDE.md` and `TUTORIAL.md` describe modules and the `Builder`;
 - the `Builder` is the DSL (Decisions AN and AR).
 
-8. **Vulkan backend.** Bind Vulkan compute, and port the hand-written kernels to GLSL compiled at build time. Kernel macros gain a GLSL backend beside Crystal and MSL (Decision V), so fused kernels come with it.
-   - Exit: the full op suite matches the oracle on a Linux discrete GPU, and GPT-2 runs there.
-9. **Quantisation.** Add `F16`, block dtypes, a GGUF loader, and Q8_0/Q4_0 matmul kernels for CPU, Metal and Vulkan.
+8. **CUDA backend (Decisions AS to AV).** A `CUDA` device on NVIDIA GPUs, through the driver API, with kernels in CUDA C++ compiled by NVRTC when first used, with fused multiply-adds off. It is opt-in: `require "tensomite/cuda"` and build with `-Dcuda`. Developed on a DGX Spark (ARM64, memory shared with the CPU), and proven on a T4 (x86-64, a discrete card). The device always copies between host and device memory explicitly, so the Spark runs the discrete code path. In PRs:
+   1. Bindings to `libcuda` and `libnvrtc`, a probe (`examples/cuda_info.cr`), and compiler specs that CI runs without a GPU.
+   2. The `CUDA` device: buffers, transfers, a stream, and the device specs `SimDiscrete` and `Metal` pass, with ops not yet ported run on the host.
+   3. Elementwise and reduction kernels, ported from the MSL ones, matching the oracle.
+   4. Matmul, split and tiled, in split-K's order, so prefill and decode stay bit-identical; fused row ops; kernel macros emitting CUDA C++.
+   5. GPT-2 and the Shakespeare trainer on CUDA; the exit runs on the Spark and a T4.
+   - Exit: the full op suite matches the oracle on a discrete GPU (a T4), GPT-2 runs there and on the Spark, and prefill equals decode bit for bit on both.
+9. **Quantisation.** Add `F16`, block dtypes, a GGUF loader, and Q8_0/Q4_0 matmul kernels for CPU, Metal and CUDA.
    - `F16` and `BF16` are tensomite's own `UInt16`-backed structs with conversions to and from `Float32`, because Crystal has no half-precision float. GGUF block scales are `F16`, so M9 needs them at the latest.
    - Host kernels read blocks as `Slice` of a block struct (`BlockQ4_0` is 18 bytes: an `F16` scale and 16 bytes of packed weights).
    - Block tensors follow the rules of Decision N: leaves only, sliced by whole rows, and consumed only by `MatMul` (as the weight) and `Gather` (as the table).
@@ -138,11 +143,13 @@ Met (25 Oct 2026, the Linux container and the M5 Pro):
     - Float reductions use a fixed number of accumulators combined in a fixed order, so they vectorise and stay shape-invariant.
     - Quantised matmul uses the integer Q4 × Q8 block dot product.
     - Exit: a quantised small model runs on the CPU faster than with f32 weights, its results match the oracle within tolerance, and prefill and decode logits stay bit-identical.
+12. **Vulkan backend.** Bind Vulkan compute, and port the hand-written kernels to GLSL compiled at build time. Kernel macros gain a GLSL backend beside Crystal, MSL and CUDA C++ (Decision V), so fused kernels come with it. It follows CUDA (Decision AT), for AMD and Intel GPUs.
+    - Exit: the full op suite matches the oracle on a Linux discrete GPU, and GPT-2 runs there.
 
 ## Decisions
 
 - **Decision A, own backends or bind ggml:** own backends (decided).
-- **Decision B, Linux GPU:** Vulkan (decided). It covers AMD, Intel and NVIDIA. CUDA can follow later through the same device interface.
+- **Decision B, Linux GPU:** Vulkan (decided), then superseded by Decision AT: CUDA first, Vulkan as M12. Vulkan still covers AMD, Intel and NVIDIA through one device.
 - **Decision C, first model:** GPT-2 small, then TinyLlama (decided).
 - **Decision D, CPU parallelism:** `-Dpreview_mt` or execution contexts. Defer until profiling shows the CPU path matters.
 - **Decision E, execution model:** lazy graph with `realize` (decided).
@@ -191,6 +198,10 @@ Met (25 Oct 2026, the Linux container and the M5 Pro):
 - **Decision AP, loading files with other tensors or prefixes:** `Module#load(prefix:, ignore:)` (decided), so strict loading still catches real mismatches while skipping stored masks such as `attn.bias` and adding prefixes such as `transformer.`.
 - **Decision AQ, where the KV cache lives:** one `CausalSelfAttention::Cache` per block, passed to `call` (decided). `GPT2` keeps its API: `load`, `new_cache`, `forward(ids, cache)` and `generate`.
 - **Decision AR, closing 7b:** the `Builder` stands as the model DSL, and the declarative macro's second look is a follow-up rather than part of 7b (decided). The builder removed the repetition that prompted a DSL; what a macro would still add is `ln1(x)` for `@ln1.call(x)` in `forward`.
+- **Decision AS, where M8 runs:** developed on the maintainer's DGX Spark, with the exit on a cloud T4 (decided). The Spark's GPU shares its memory with the CPU, but the device copies explicitly between host and device memory anyway, so the Spark exercises the discrete path and the T4 proves it on a PCIe card.
+- **Decision AT, the first Linux GPU backend:** CUDA, ahead of Vulkan (decided). Both machines are NVIDIA's and already run CUDA, while the Spark's compute-only driver lacks Vulkan's part (`libnvidia-gl`). AMD and Intel GPUs wait for Vulkan, M12.
+- **Decision AU, how CUDA kernels are compiled:** by NVRTC when first used, as Metal compiles MSL (decided). Building needs no CUDA toolkit, running needs `libnvrtc` beside the driver, and CI compiles every kernel without a GPU. Kernels are compiled with `--fmad=false`, so `a * b + c` rounds as on the host. PTX is built for the newest architecture NVRTC knows at or below the GPU's, and the driver compiles it for the GPU.
+- **Decision AV, how the CUDA libraries are reached:** linked at build time behind `-Dcuda` (decided), as BLAS and Metal are, rather than loaded with `dlopen`. A program is built for the machine it runs on; one built with `-Dcuda` needs the driver and NVRTC to start.
 
 ## Risks
 
@@ -205,5 +216,5 @@ Met (25 Oct 2026, the Linux container and the M5 Pro):
 - **Vulkan surface.** Vulkan compute needs far more ceremony than Metal (descriptor sets, pipeline layouts, fences, memory types). Keep it behind one file per concern and port only after the Metal path has settled the device interface.
 - **Kernel drift.** Hand-written and generated kernels can diverge from the oracle silently. Mitigate by running every op on every available device against the CPU in specs.
 - **Macro limits.** Crystal's macro language is small. Kernel generation that outgrows it moves into a compile-time helper program called with `{{ run(...) }}`, at some cost to build time.
-- **GPU CI.** Hosted macOS runners do run Metal compute, including GPT-2 small, so every PR exercises the Metal device. Hosted Linux runners have no GPU, so Vulkan specs in M8 need a local machine or a self-hosted runner.
-- **Scope creep.** Multi-GPU, CUDA and new architectures stay out until M10 passes.
+- **GPU CI.** Hosted macOS runners do run Metal compute, including GPT-2 small, so every PR exercises the Metal device. Hosted Linux runners have no GPU: they compile every CUDA kernel with NVRTC, which needs none, but CUDA specs that run kernels need the Spark, a T4, or a self-hosted runner on one.
+- **Scope creep.** Multi-GPU and new architectures stay out until M10 passes.
