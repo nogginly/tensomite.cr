@@ -75,6 +75,7 @@ src/tensomite/scope.cr      Tensomite.scope and Scope
 src/tensomite/diagram.cr    Tensor#to_mermaid: graphs and summaries as Mermaid
 src/tensomite/module.cr     Parameter, Init, Module and Layer
 src/tensomite/modules.cr    Linear, Embedding, LayerNorm, Activation, Sequential
+src/tensomite/builder.cr    Builder and Sequential.build: built-in modules with shared settings
 src/tensomite/kernel.cr     the Tensomite.kernel macro and the Kernel class
 src/tensomite/kernels.cr    the kernels tensomite's own ops use, such as gelu
 src/tensomite/buffer_pool.cr  BufferPool

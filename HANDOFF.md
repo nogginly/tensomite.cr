@@ -4,7 +4,7 @@ What the next session, or the next person, needs in order to carry on without th
 
 **Keeping it current.** Rewrite it rather than appending to it: at the end of each PR, and whenever a session's context passes about 70%. Anything that belongs in one of the other three documents goes there instead.
 
-*Last rewritten: 25 Oct 2026, with M7b part 3 open.*
+*Last rewritten: 25 Oct 2026, with M7b part 4 open.*
 
 ## Where things stand
 
@@ -14,8 +14,8 @@ What the next session, or the next person, needs in order to carry on without th
   - Metal decodes at 186 tokens/s against BLAS's 166, and prefills 64 tokens at 3,684 against 2,419;
   - macro kernels match their oracles and their gradients pass finite differences;
   - Shakespeare reached 1.573 nats/char in 20 minutes in the Linux container.
-- **Open PR:** M7b part 3 on `m7b-chargpt`: `CausalSelfAttention`, and the Shakespeare model on modules (`Block`, `CharGPT`), trained with one `AdamW` and `step(loss)`; losses bit-identical to the hand-written model's. Parts 1 (modules) and 2 (safetensors writer, `save` and `load`) are merged.
-- **Now: M7b, modules and a model DSL** (Decisions AH–AM in `PLAN.md`): modules first, then DSL candidates (a builder in plain Crystal, and a declarative macro) written against the same models, iterated with the modules. The next part is the DSL candidates, written against the tutorial's and the Shakespeare models; then GPT-2 on modules.
+- **Open PR:** M7b part 4 on `m7b-dsl`: a `Builder` and `Sequential.build` (Decision AN), with the tutorial's and the Shakespeare models moved onto them, bit for bit. Parts 1 (modules), 2 (safetensors writer, `save` and `load`) and 3 (the Shakespeare model on modules, `CausalSelfAttention`) are merged.
+- **Now: M7b, modules and a model DSL** (Decisions AH–AN in `PLAN.md`). The next part is GPT-2 on modules, loading Hugging Face's weights by name; then a second look at a declarative macro, which must pass ameba without suppressions (Decision AN).
 - **After that: M8, Vulkan.** Before planning it, settle where its kernels run. Its exit needs a Linux machine with a discrete GPU, and neither the cloud container (no GPU) nor the maintainer's Mac has one. The options to weigh include a cloud GPU runner for CI, a machine of the maintainer's, and MoltenVK on the Mac for development (Decision G chose native Metal for macOS, but that does not forbid testing Vulkan code there).
 - **A long-term goal:** inspecting running models (activations, attention, gradients) by the names of their parts; see "Inspectable" in `PLAN.md` and "Towards inspection" in `DESIGN.md`. Scopes are its first piece, and Decision AA must keep inspected nodes alive.
 - **Deferred:** Decision D, CPU threads (not needed for M7's exits). Decision AA, releasing buffers as soon as their last reader has run.
@@ -30,8 +30,8 @@ Stacked PRs         |When asked. The later PR's base is the earlier branch; GitH
 Merging             |The maintainer merges, by squash or by merge commit. After a squash, merge `main` into a stacked branch and resolve conflicts with the branch's side; never rewrite history or force-push (the session blocks it anyway).                                            
 Milestones          |Each ends with its exit criterion passing, with the evidence (numbers, logs) in the PR description.                                                                                                                                                                  
 Documents           |Updated in the same PR as the code (see "Workflow" in `DEVELOPMENT.md`), `GUIDE.md` included whenever the public API changes. Tables and diagrams follow "Documents" in `DEVELOPMENT.md`; check them with `scripts/format_tables.py` and `scripts/check_diagrams.sh`.
-Decisions           |Labelled with letters and recorded in `PLAN.md`. The next is **AN**; T to AG shape M7, and AH to AM shape M7b. P (how to get GPT-2 small's fixtures) was settled by allowing Hugging Face; Q made this document committed.                                           
-Understanding checks|Short questions labelled Q-A, Q-B and so on, after explaining something new. The next is **Q-Z**; Q-T to Q-Y are recent.                                                                                                                                             
+Decisions           |Labelled with letters and recorded in `PLAN.md`. The next is **AO**; T to AG shape M7, and AH to AN shape M7b. P (how to get GPT-2 small's fixtures) was settled by allowing Hugging Face; Q made this document committed.                                           
+Understanding checks|Short questions labelled Q-A, Q-B and so on, after explaining something new. The next is **Q-AB**; Q-T to Q-AA are recent.                                                                                                                                           
 Claims              |Measured before stated. Several assumptions were wrong when checked: decode time was dominated by the KV cache, not host kernels; GPT-2's file was unaligned. Say "I think" when something is unverified.                                                            
 
 ## Follow-ups found on the way

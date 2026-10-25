@@ -69,18 +69,6 @@ module Tensomite
     def tanh : Activation
       Activation.tanh
     end
-
-    # Returns a `Sequential` of the layers the block adds; see `Sequential.build`.
-    def sequential(&) : Sequential
-      steps = SequentialBuilder.new(self)
-      with steps yield
-      Sequential.new(steps.layers)
-    end
-
-    # :nodoc:
-    def within(&)
-      with self yield
-    end
   end
 
   class Sequential
@@ -96,8 +84,9 @@ module Tensomite
     # end
     # ```
     #
-    # An instance variable takes its type from this, but not from
-    # `build.sequential`, because Crystal infers types from class methods only.
+    # This is a class method, not a `Builder` method, so that an instance
+    # variable assigned from it gets its type: Crystal infers types from class
+    # methods called with a block, but not from instance methods.
     def self.build(build : Builder = Builder.new, &) : Sequential
       steps = SequentialBuilder.new(build)
       with steps yield
@@ -121,88 +110,5 @@ module Tensomite
         add @build.{{ name.id }}(*args, **options)
       end
     {% end %}
-  end
-
-  abstract class Module
-    # Declares a module's hyperparameters and parts, and writes its constructor.
-    #
-    # Each hyperparameter, a type declaration with an optional default, becomes
-    # a constructor argument and a getter. Each line of the block assigns a part;
-    # the constructor runs the block with a `Builder` as receiver, so calls such
-    # as `linear(2, 64)` make built-in modules with its generator, device and
-    # defaults, and the builder itself is `build`. Each part becomes an instance
-    # variable, a getter, and, for a module, a method of the same name that
-    # calls it: `output(x)` is `@output.call(x)`.
-    #
-    # A part's type is taken from the builder method or the `new` that makes it;
-    # declare it otherwise, as in `blocks : Array(Block) = ...`.
-    #
-    # ```
-    # class Block < Tensomite::Module
-    #   parts(width : Int32, heads : Int32) do
-    #     ln1 = layernorm(width)
-    #     attention = attention(width, heads)
-    #     ln2 = layernorm(width)
-    #     mlp = sequential { linear width, 4 * width; gelu; linear 4 * width, width }
-    #   end
-    #
-    #   def forward(x : Tensor, mask : Tensor) : Tensor
-    #     x = x + attention(ln1(x), mask)
-    #     x + mlp(ln2(x))
-    #   end
-    # end
-    #
-    # Block.new(64, 4, Builder.new(rng: Random.new(1)))
-    # ```
-    macro parts(*hypers, &block)
-      {% lines = block.body.is_a?(Expressions) ? block.body.expressions : [block.body] %}
-      {% names = [] of MacroId %}
-      {% for hyper in hypers %}
-        getter {{ hyper.var }} : {{ hyper.type }}
-      {% end %}
-      {% for line in lines %}
-        {% if line.is_a?(TypeDeclaration) %}
-          {% name = line.var %}
-          {% type = line.type %}
-        {% elsif line.is_a?(Assign) %}
-          {% name = line.target %}
-          {% value = line.value %}
-          {% if value.is_a?(Call) && value.name == "new" && value.receiver.is_a?(Path) && value.receiver.resolve.type_vars.empty? %}
-            {% type = value.receiver %}
-          {% elsif value.is_a?(Call) && !value.receiver && (method = ::Tensomite::Builder.methods.find(&.name.==(value.name))) %}
-            {% type = method.return_type %}
-          {% else %}
-            {% line.raise "can't tell the type of part #{name}; declare it, as in `#{name} : Type = ...`" %}
-          {% end %}
-        {% else %}
-          {% line.raise "each line of `parts` assigns one part, as in `output = linear(64, 1)`" %}
-        {% end %}
-        {% names << name.id %}
-        @{{ name.id }} : {{ type }}
-
-        def {{ name.id }} : {{ type }}
-          @{{ name.id }}
-        end
-
-        {% if type.resolve <= ::Tensomite::Module %}
-          def {{ name.id }}(x, *args, **options)
-            @{{ name.id }}.call(x, *args, **options)
-          end
-        {% end %}
-      {% end %}
-
-      def initialize({% for hyper in hypers %}{{ hyper }}, {% end %}build : ::Tensomite::Builder = ::Tensomite::Builder.new)
-        {% for hyper in hypers %}
-          @{{ hyper.var }} = {{ hyper.var }}
-        {% end %}
-        %parts = build.within do
-          {{ block.body }}
-          { {{ names.splat }} }
-        end
-        {% for name, i in names %}
-          @{{ name }} = %parts[{{ i }}]
-        {% end %}
-      end
-    end
   end
 end

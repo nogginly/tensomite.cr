@@ -112,8 +112,8 @@ Each milestone is done when its exit criterion passes.
 1. `Parameter`, `Module`, `Linear`, `Embedding`, `LayerNorm`, `Activation`, `Sequential`, and optimizers over parameters; the tutorial's model on modules.
 2. A safetensors writer, and `save` and `load` by name (Decision AM). Files round-trip with Hugging Face's `safetensors` package, and saving over a file that a loaded model still maps leaves the model's weights unchanged.
 3. The Shakespeare model on modules, with a `CausalSelfAttention`; its trainer simplified to one optimizer and one `step(loss)`. Training and validation losses are bit-identical to the hand-written model's, at the same speed.
-4. DSL candidates, a builder in plain Crystal (`with ... yield`) and a declarative macro, written against the same models; then a choice, and changes to the modules that the DSL shows a need for.
-5. GPT-2 on modules, loading Hugging Face's weights by name, if step 3 shows that its KV cache fits.
+4. DSL candidates, a builder in plain Crystal (`with ... yield`) and a declarative macro, written against the same models; then a choice, and changes to the modules that the DSL shows a need for. The builder was adopted, and the tutorial's and the Shakespeare models moved onto it with the same bits (Decision AN).
+5. GPT-2 on modules, loading Hugging Face's weights by name, if step 3 shows that its KV cache fits. Then a second look at a declarative macro (Decision AN).
 
 Exit of 7b: the tutorial, Shakespeare and GPT-2 models on modules, with training losses bit-identical to the hand-written versions; `GUIDE.md` and `TUTORIAL.md` updated; a DSL chosen and recorded.
 
@@ -180,6 +180,7 @@ Exit of 7b: the tutorial, Shakespeare and GPT-2 models on modules, with training
 - **Decision AK, initial weights:** each module takes an `rng:`, defaulting to `Tensomite.rng`, seeded, so runs repeat unless asked otherwise (decided). `Linear` follows PyTorch (uniform, ±1/√inputs) and `Embedding` GPT-2 (normal, 0.02).
 - **Decision AL, where modules sit in the plan:** milestone 7b, before Vulkan, so that later milestones keep their numbers (decided).
 - **Decision AM, saving:** a safetensors writer, so models save and load in the format GPT-2 already loads from (decided).
+- **Decision AN, the model DSL:** a `Builder` in plain Crystal now; a declarative macro reconsidered after GPT-2 is on modules (decided). The macro tried in M7b part 4 (`parts(...) do ln1 = layernorm(width) end`) gave `forward` the shorter `ln1(x)`, but ameba flags each part line as a useless assignment. A macro that returns must pass ameba without suppressing any rule.
 
 ## Risks
 
