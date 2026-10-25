@@ -143,30 +143,15 @@ The first three are good: pairs it never saw, answered to within a few tenths. T
 
 ## 7. Saving, loading and drawing the model
 
-Tensomite cannot write weight files yet, but every parameter has a name, a shape and a list of numbers, so JSON does the job, matched by name:
+A model saves its parameters to a safetensors file, the format Hugging Face uses, under their names. Loading matches them by name, so a model can load what a model of the same structure saved:
 
 ```crystal
-# Returns the parameters as JSON, by name: each one's shape and values.
-def to_json : String
-  named_params.transform_values { |param| {shape: param.shape, values: param.value.to_a(Float32)} }.to_json
-end
-
-# Replaces each parameter with the one of the same name in *json*, as
-# written by `#to_json`.
-def load_json(json : String) : self
-  saved = Hash(String, NamedTuple(shape: Array(Int32), values: Array(Float32))).from_json(json)
-  named_params.each { |name, param| param.value = Tensor.from(saved[name][:values], saved[name][:shape]) }
-  self
-end
-```
-
-```crystal
-File.write("multiplier.json", model.to_json)
-reloaded = Multiplier.new(rng: Random.new(2)).load_json(File.read("multiplier.json"))
+model.save("multiplier.safetensors")
+reloaded = Multiplier.new(rng: Random.new(2)).load("multiplier.safetensors")
 ```
 
 ```
-reloaded from multiplier.json: 3 × 4 = 11.96
+reloaded from multiplier.safetensors: 3 × 4 = 11.96
 ```
 
 The reloaded model starts from different random weights (seed 2) and gives exactly the same answer once loaded: the weights are the same bits, and tensomite's results repeat exactly.

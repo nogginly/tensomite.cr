@@ -136,6 +136,42 @@ module Tensomite
       result
     end
 
+    # Writes every parameter to a safetensors file at *path*, by name (see
+    # `SafeTensors.write`), with optional string *metadata*.
+    def save(path : String, metadata : Hash(String, String)? = nil) : Nil
+      SafeTensors.write(path, named_params.transform_values(&.value), metadata)
+    end
+
+    # Replaces each parameter's value with the tensor of the same name in the
+    # safetensors file at *path*, on the device the parameter is on, and returns
+    # `self`.
+    #
+    # Raises `ShapeError` or `DTypeError` for a tensor whose shape or dtype differs
+    # from its parameter's. When *strict*, also raises `Error` for a parameter the
+    # file lacks or a tensor the model lacks; otherwise those are skipped, so a
+    # model can load part of a larger file.
+    def load(path : String, strict : Bool = true) : self
+      file = SafeTensors.open(path)
+      params = named_params
+      if strict
+        missing = params.keys.reject { |name| file.has_key?(name) }
+        raise Error.new("#{path} lacks #{missing.join(", ")}") unless missing.empty?
+        extra = file.names.reject { |name| params.has_key?(name) }
+        raise Error.new("#{path} has #{extra.join(", ")}, which the model lacks") unless extra.empty?
+      end
+      params.each do |name, param|
+        next unless entry = file.entries[name]?
+        unless entry.shape == param.shape
+          raise ShapeError.new("#{name}: #{path} holds #{entry.shape}, the model #{param.shape}")
+        end
+        unless entry.dtype == param.value.dtype
+          raise DTypeError.new("#{name}: #{path} holds #{entry.dtype}, the model #{param.value.dtype}")
+        end
+        param.value = file[name, param.value.device]
+      end
+      self
+    end
+
     # Moves every parameter to *device*, and returns `self`.
     def to(device : Device) : self
       params.each { |param| param.value = param.value.to(device) }

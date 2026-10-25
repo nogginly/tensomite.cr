@@ -82,3 +82,47 @@ describe SafeTensors do
     expect_raises(Error, /overruns/) { SafeTensors.open(bad) }
   end
 end
+
+describe "SafeTensors.write" do
+  it "writes tensors that read back with the same names, dtypes, shapes and values" do
+    path = File.tempname("tensomite", ".safetensors")
+    a = Tensor.from(f32(1, 2, 3, 4, 5, 6), [2, 3])
+    SafeTensors.write(path, {"a" => a, "ids" => Tensor.from([7, 8, 9], [3]), "scalar" => Tensor.from(f32(2.5), [] of Int32)})
+    file = SafeTensors.open(path)
+    file.names.should eq ["a", "ids", "scalar"]
+    file.entries["ids"].dtype.should eq DType::I32
+    file["a"].shape.should eq [2, 3]
+    file["a"].to_a(Float32).should eq f32(1, 2, 3, 4, 5, 6)
+    file["ids"].to_a(Int32).should eq [7, 8, 9]
+    file["scalar"].to_a(Float32).should eq f32(2.5)
+  end
+
+  it "writes a view as the tensor it shows" do
+    path = File.tempname("tensomite", ".safetensors")
+    SafeTensors.write(path, {"t" => Tensor.from(f32(1, 2, 3, 4, 5, 6), [2, 3]).transpose})
+    file = SafeTensors.open(path)
+    file["t"].shape.should eq [3, 2]
+    file["t"].to_a(Float32).should eq f32(1, 4, 2, 5, 3, 6)
+  end
+
+  it "pads the header so that every tensor is aligned, and keeps metadata" do
+    path = File.tempname("tensomite", ".safetensors")
+    SafeTensors.write(path, {"a" => Tensor.from(f32(1), [1]), "b" => Tensor.from(f32(2, 3), [2])}, {"format" => "pt"})
+    bytes = File.read(path).to_slice
+    header_size = IO::ByteFormat::LittleEndian.decode(UInt64, bytes[0, 8])
+    (header_size % 8).should eq 0
+    header = JSON.parse(String.new(bytes[8, header_size.to_i]))
+    header["__metadata__"].as_h.should eq({"format" => JSON::Any.new("pt")})
+    SafeTensors.open(path)["b"].to_a(Float32).should eq f32(2, 3)
+  end
+
+  it "replaces a file whose tensors are still mapped without changing them" do
+    path = File.tempname("tensomite", ".safetensors")
+    SafeTensors.write(path, {"a" => Tensor.from(f32(1, 2), [2])})
+    mapped = SafeTensors.open(path)["a"]
+    SafeTensors.write(path, {"a" => Tensor.from(f32(8, 9), [2])})
+    mapped.to_a(Float32).should eq f32(1, 2)
+    SafeTensors.open(path)["a"].to_a(Float32).should eq f32(8, 9)
+    Dir.glob("#{path}.*.tmp").should be_empty
+  end
+end

@@ -179,3 +179,35 @@ describe "optimizers given parameters" do
     expect_raises(Error, /parameters/) { SGD.new(lr: 0.1).step(Tensor.from(f32(1), [1]).sum) }
   end
 end
+
+describe "saving and loading modules" do
+  it "loads a saved model's parameters by name" do
+    path = File.tempname("tensomite", ".safetensors")
+    trained = TwoLayers.new(Random.new(1))
+    trained.save(path)
+    SafeTensors.open(path).names.should eq ["first.weight", "first.bias", "second.weight"]
+    fresh = TwoLayers.new(Random.new(2)).load(path)
+    fresh.params.map(&.value.to_a(Float32)).should eq trained.params.map(&.value.to_a(Float32))
+    fresh.named_params["first.weight"].value.name.should eq "first.weight"
+  end
+
+  it "loads onto the device each parameter is on" do
+    path = File.tempname("tensomite", ".safetensors")
+    TwoLayers.new(Random.new(1)).save(path)
+    model = TwoLayers.new(Random.new(2)).to(SimDiscrete.default).load(path)
+    model.params.map(&.value.device).uniq!.should eq [SimDiscrete.default]
+  end
+
+  it "refuses missing, extra and misshapen tensors when strict, and skips the first two otherwise" do
+    path = File.tempname("tensomite", ".safetensors")
+    SafeTensors.write(path, {"first.weight" => Tensor.zeros([3, 4]), "other" => Tensor.zeros([1])})
+    expect_raises(Error, /lacks first.bias, second.weight/) { TwoLayers.new(Random.new(1)).load(path) }
+    TwoLayers.new(Random.new(1)).load(path, strict: false).named_params["first.weight"].value.to_a(Float32).should eq Array.new(12, 0f32)
+
+    SafeTensors.write(path, {"first.weight" => Tensor.zeros([4, 3]), "first.bias" => Tensor.zeros([4]), "second.weight" => Tensor.zeros([4, 2])})
+    expect_raises(ShapeError, /first.weight/) { TwoLayers.new(Random.new(1)).load(path) }
+
+    SafeTensors.write(path, {"first.weight" => Tensor.zeros([3, 4]), "first.bias" => Tensor.zeros([4]), "second.weight" => Tensor.zeros([4, 2]), "other" => Tensor.zeros([1])})
+    expect_raises(Error, /has other/) { TwoLayers.new(Random.new(1)).load(path) }
+  end
+end

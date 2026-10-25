@@ -2,7 +2,6 @@
 # asks it some questions. TUTORIAL.md walks through it.
 #
 #     crystal run --release examples/multiply.cr
-require "json"
 require "../src/tensomite"
 
 include Tensomite
@@ -27,19 +26,6 @@ class Multiplier < Tensomite::Module
   def multiply(a : Float64, b : Float64) : Float64
     x = Tensor.from([(a / 10).to_f32, (b / 10).to_f32], [1, 2])
     call(x).to_a(Float32).first.to_f64 * 100
-  end
-
-  # Returns the parameters as JSON, by name: each one's shape and values.
-  def to_json : String
-    named_params.transform_values { |param| {shape: param.shape, values: param.value.to_a(Float32)} }.to_json
-  end
-
-  # Replaces each parameter with the one of the same name in *json*, as
-  # written by `#to_json`.
-  def load_json(json : String) : self
-    saved = Hash(String, NamedTuple(shape: Array(Int32), values: Array(Float32))).from_json(json)
-    named_params.each { |name, param| param.value = Tensor.from(saved[name][:values], saved[name][:shape]) }
-    self
   end
 end
 
@@ -68,10 +54,10 @@ puts
   puts "#{a} × #{b} = #{(a * b).round(2)}, model says #{model.multiply(a, b).round(2)}"
 end
 
-File.write("multiplier.json", model.to_json)
-reloaded = Multiplier.new(rng: Random.new(2)).load_json(File.read("multiplier.json"))
+model.save("multiplier.safetensors")
+reloaded = Multiplier.new(rng: Random.new(2)).load("multiplier.safetensors")
 puts
-puts "reloaded from multiplier.json: 3 × 4 = #{reloaded.multiply(3.0, 4.0).round(2)}"
+puts "reloaded from multiplier.safetensors: 3 × 4 = #{reloaded.multiply(3.0, 4.0).round(2)}"
 
 puts
 puts model.call(Tensor.zeros([1, 2]).named("a, b")).to_mermaid(model: model, depth: 1)
