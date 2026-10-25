@@ -58,42 +58,64 @@ module Tensomite
   # Multi-head causal self-attention over rows of `[batch * length, width]`, as
   # in GPT-2: each position attends to itself and the positions before it.
   #
-  # The queries, keys and values come from one `Linear` (`qkv`), whose output is
-  # split into thirds and each third into *heads*; `proj` maps the heads'
-  # joined outputs back to the width. Weights are drawn from *init*, and `proj`'s
-  # from *proj_init*, which GPT-2 scales down by the depth.
+  # The queries, keys and values come from one `Linear` (`c_attn`), whose output
+  # is split into thirds and each third into *heads*; `c_proj` maps the heads'
+  # joined outputs back to the width. The names are GPT-2's, so its weights load
+  # by name. Weights are drawn from *init*, and `c_proj`'s from *proj_init*,
+  # which GPT-2 scales down by the depth.
   class CausalSelfAttention < Module
+    # The keys and values of the positions run so far, each `[batch, heads,
+    # positions, head width]`, so that later positions can attend to them
+    # without recomputing them.
+    class Cache
+      getter keys : Tensor?
+      getter values : Tensor?
+
+      # :nodoc:
+      def append(keys : Tensor, values : Tensor) : {Tensor, Tensor}
+        @keys = @keys.try { |past| Tensor.cat([past, keys], 2) } || keys
+        @values = @values.try { |past| Tensor.cat([past, values], 2) } || values
+        {@keys.as(Tensor), @values.as(Tensor)}
+      end
+    end
+
     getter heads : Int32
-    getter qkv : Linear
-    getter proj : Linear
+    getter c_attn : Linear
+    getter c_proj : Linear
 
     def initialize(width : Int32, @heads : Int32, bias : Bool = true,
                    init : Init = Init.normal(0.02), proj_init : Init = init,
                    rng : Random = Tensomite.rng, device : Device = CPU.default)
       raise ShapeError.new("width #{width} does not divide into #{heads} heads") unless width % heads == 0
-      @qkv = Linear.new(width, 3 * width, bias: bias, init: init, rng: rng, device: device)
-      @proj = Linear.new(width, width, bias: bias, init: proj_init, rng: rng, device: device)
+      @c_attn = Linear.new(width, 3 * width, bias: bias, init: init, rng: rng, device: device)
+      @c_proj = Linear.new(width, width, bias: bias, init: proj_init, rng: rng, device: device)
     end
 
-    # Returns the attention of *x*, `[batch * length, width]`, under *mask*, a
-    # `[length, length]` mask such as `Tensor.causal_mask(length, length)`.
+    # Returns the attention of *x*, `[batch * length, width]`, under *mask*,
+    # `[length, positions]`, such as `Tensor.causal_mask(length, length)`.
+    #
+    # With a *cache*, the new keys and values are appended to it and *x*'s
+    # positions attend to every position it holds, so *mask* covers them all:
+    # `Tensor.causal_mask(length, past + length)`.
     #
     # 1. Projects *x* to queries, keys and values, each `[batch, heads, length, head width]`.
-    # 2. Scores queries against keys, scaled by 1/√(head width), masked, and
+    # 2. Appends the keys and values to *cache*, if given.
+    # 3. Scores queries against keys, scaled by 1/√(head width), masked, and
     #    normalised with softmax; the weights then average the values.
-    # 3. Rejoins the heads and projects back to the width.
-    def forward(x : Tensor, mask : Tensor) : Tensor
+    # 4. Rejoins the heads and projects back to the width.
+    def forward(x : Tensor, mask : Tensor, cache : Cache? = nil) : Tensor
       rows, width = x.shape
       length = mask.shape[0]
       batch, head_width = rows // length, width // heads
-      joined = qkv.call(x)
+      joined = c_attn.call(x)
       q, k, v = (0..2).map do |part|
         joined.slice(1, part * width, (part + 1) * width)
           .reshape([batch, length, heads, head_width]).permute([0, 2, 1, 3])
       end
+      k, v = cache.append(k, v) if cache
       scores = q.matmul(k.transpose) * (1 / Math.sqrt(head_width)) + mask
       attended = scores.softmax.matmul(v).permute([0, 2, 1, 3]).reshape([batch * length, width])
-      proj.call(attended)
+      c_proj.call(attended)
     end
   end
 

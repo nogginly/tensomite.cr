@@ -7,28 +7,51 @@ module Tensomite
   # logits = model.forward(ids, cache)       # [ids.size, vocab]
   # logits = model.forward([next_id], cache) # one more position, reusing the cache
   # ```
-  class GPT2
+  #
+  # It is a `Module` whose parts are named as in Hugging Face's weights file
+  # (`wte`, `wpe`, `h.0.attn.c_attn`, `ln_f`), so the file loads by name.
+  class GPT2 < Module
     # Sizes of the model: transformer blocks, attention heads, embedding width,
     # longest context and vocabulary.
     record Config, layers : Int32, heads : Int32, width : Int32, context : Int32, vocab : Int32
 
-    # The weights of one transformer block, in GPT-2's `[in, out]` layout.
-    private record Block,
-      ln1_w : Tensor, ln1_b : Tensor, attn_w : Tensor, attn_b : Tensor,
-      proj_w : Tensor, proj_b : Tensor, ln2_w : Tensor, ln2_b : Tensor,
-      fc_w : Tensor, fc_b : Tensor, out_w : Tensor, out_b : Tensor
+    # GPT-2's MLP: a `Linear` to four times the width, `gelu`, and a `Linear` back.
+    class MLP < Layer
+      def initialize(width : Int32, build : Builder)
+        @c_fc = build.linear(width, 4 * width)
+        @c_proj = build.linear(4 * width, width)
+      end
 
-    # Keys and values of every position run so far, per layer, each `[heads, length, head width]`.
+      def forward(x : Tensor) : Tensor
+        @c_proj.call(@c_fc.call(x).gelu)
+      end
+    end
+
+    # A transformer block: attention, then an MLP, each after a layer norm and
+    # added back to the residual stream.
+    class Block < Module
+      def initialize(width : Int32, heads : Int32, build : Builder)
+        @ln_1 = build.layernorm(width)
+        @attn = build.attention(width, heads)
+        @ln_2 = build.layernorm(width)
+        @mlp = MLP.new(width, build)
+      end
+
+      def forward(x : Tensor, mask : Tensor, cache : CausalSelfAttention::Cache) : Tensor
+        x = x + @attn.call(@ln_1.call(x), mask, cache)
+        x + @mlp.call(@ln_2.call(x))
+      end
+    end
+
+    # Keys and values of every position run so far, one `CausalSelfAttention::Cache` per block.
     class Cache
-      getter keys : Array(Tensor?)
-      getter values : Array(Tensor?)
+      getter layers : Array(CausalSelfAttention::Cache)
 
       # Returns the number of positions held.
       getter length = 0
 
-      def initialize(layers : Int32)
-        @keys = Array(Tensor?).new(layers, nil)
-        @values = Array(Tensor?).new(layers, nil)
+      def initialize(count : Int32)
+        @layers = Array.new(count) { CausalSelfAttention::Cache.new }
       end
 
       protected def advance(count : Int32) : Nil
@@ -36,13 +59,15 @@ module Tensomite
       end
     end
 
+    # Tensors in Hugging Face's file that are not weights: each block's stored causal mask.
+    IGNORED = /\.attn\.(masked_)?bias$/
+
     getter config : Config
     getter device : Device
-    @wte : Tensor
-    @wpe : Tensor
-    @lnf_w : Tensor
-    @lnf_b : Tensor
-    @blocks : Array(Block)
+    @wte : Embedding
+    @wpe : Embedding
+    @h : Array(Block)
+    @ln_f : LayerNorm
 
     # Returns the model in the safetensors file at *path*, with *heads* attention
     # heads (12 for GPT-2 small), its weights on *device*.
@@ -52,27 +77,22 @@ module Tensomite
 
     # Returns the model from *weights*, named as by Hugging Face with or without the
     # `transformer.` prefix. Sizes other than *heads* come from the weight shapes.
-    def initialize(weights : SafeTensors, heads : Int32, @device : Device)
+    def self.new(weights : SafeTensors, heads : Int32, device : Device) : GPT2
       prefix = weights.has_key?("transformer.wte.weight") ? "transformer." : ""
-      fetch = ->(name : String) { weights[prefix + name, device].named(name) }
-      @wte = fetch.call("wte.weight")
-      @wpe = fetch.call("wpe.weight")
-      @lnf_w = fetch.call("ln_f.weight")
-      @lnf_b = fetch.call("ln_f.bias")
+      vocab, width = weights.entries[prefix + "wte.weight"].shape
+      context = weights.entries[prefix + "wpe.weight"].shape[0]
       layers = (0..).index! { |i| !weights.has_key?("#{prefix}h.#{i}.ln_1.weight") }
-      @blocks = Array(Block).new(layers) do |i|
-        part = ->(name : String) { fetch.call("h.#{i}.#{name}") }
-        Block.new(
-          part.call("ln_1.weight"), part.call("ln_1.bias"),
-          part.call("attn.c_attn.weight"), part.call("attn.c_attn.bias"),
-          part.call("attn.c_proj.weight"), part.call("attn.c_proj.bias"),
-          part.call("ln_2.weight"), part.call("ln_2.bias"),
-          part.call("mlp.c_fc.weight"), part.call("mlp.c_fc.bias"),
-          part.call("mlp.c_proj.weight"), part.call("mlp.c_proj.bias"))
-      end
-      vocab, width = @wte.shape
-      raise ShapeError.new("width #{width} does not divide into #{heads} heads") unless width % heads == 0
-      @config = Config.new(layers, heads, width, @wpe.shape[0], vocab)
+      config = Config.new(layers, heads, width, context, vocab)
+      new(config, Builder.new(device: device, init: Init.placeholder)).load(weights, prefix: prefix, ignore: IGNORED)
+    end
+
+    # Returns a model of *config*'s sizes, its parts made by *build*.
+    def initialize(@config : Config, build : Builder)
+      @device = build.device
+      @wte = build.embedding(config.vocab, config.width)
+      @wpe = build.embedding(config.context, config.width)
+      @h = Array.new(config.layers) { Block.new(config.width, config.heads, build) }
+      @ln_f = build.layernorm(config.width)
     end
 
     # Returns an empty cache for this model.
@@ -94,18 +114,10 @@ module Tensomite
     end
 
     # Returns the unrealised logits of *ids* from an empty cache, for diagrams
-    # (`Tensor#to_mermaid`). The graph is scoped as `embedding`, then `block`, each
-    # holding `attention` and `mlp`, then `head`.
+    # (`Tensor#to_mermaid`). The graph is scoped as `embedding`, then `h` for each
+    # block, holding `attn` and `mlp`, then `head`.
     def graph(ids : Array(Int32)) : Tensor
       logits(ids, new_cache)
-    end
-
-    # Returns every weight, named as in the weights file without its prefix.
-    def params : Array(Tensor)
-      [@wte, @wpe] + @blocks.flat_map do |block|
-        [block.ln1_w, block.ln1_b, block.attn_w, block.attn_b, block.proj_w, block.proj_b,
-         block.ln2_w, block.ln2_b, block.fc_w, block.fc_b, block.out_w, block.out_b]
-      end + [@lnf_w, @lnf_b]
     end
 
     # Returns *count* tokens generated after *prompt*, each chosen by *sampler* from
@@ -127,7 +139,7 @@ module Tensomite
     end
 
     # Returns the logits of *ids* after the positions in *cache*, unrealised, and
-    # sets the cache's keys and values; `#forward` advances it after realising.
+    # appends their keys and values to it; `#forward` advances it after realising.
     private def logits(ids : Array(Int32), cache : Cache) : Tensor
       count, past = ids.size, cache.length
       raise ShapeError.new("forward of no tokens") if count == 0
@@ -135,41 +147,11 @@ module Tensomite
         raise ShapeError.new("#{past + count} positions exceed the context of #{config.context}")
       end
       x = Tensomite.scope("embedding") do
-        @wte.gather(Tensor.from(ids, [count], device).named("ids")) + @wpe.slice(0, past, past + count)
+        @wte.call(Tensor.from(ids, [count], device).named("ids")) + @wpe.weight.value.slice(0, past, past + count)
       end
       mask = Tensor.causal_mask(count, past + count, device).named("causal mask")
-      @blocks.each_with_index do |block, layer|
-        x = Tensomite.scope("block") do
-          x = x + Tensomite.scope("attention") { attention(block, x.layernorm(block.ln1_w, block.ln1_b), cache, layer, mask) }
-          x + Tensomite.scope("mlp") do
-            hidden = x.layernorm(block.ln2_w, block.ln2_b).matmul(block.fc_w) + block.fc_b
-            hidden.gelu.matmul(block.out_w) + block.out_b
-          end
-        end
-      end
-      Tensomite.scope("head") { x.layernorm(@lnf_w, @lnf_b).matmul(@wte.transpose) }
-    end
-
-    # Returns causal self-attention over the cache and *h*, the normalised input.
-    #
-    # 1. Projects *h* to queries, keys and values, each split into heads.
-    # 2. Appends the new keys and values to the cache along the position axis.
-    # 3. Scores queries against all keys, scaled by 1/√(head width), masked, and
-    #    normalised with softmax; the weights then average the values.
-    # 4. Rejoins the heads and projects back to the model width.
-    private def attention(block : Block, h : Tensor, cache : Cache, layer : Int32, mask : Tensor) : Tensor
-      count, width, heads = h.shape[0], config.width, config.heads
-      head_width = width // heads
-      qkv = h.matmul(block.attn_w) + block.attn_b
-      q, k, v = (0..2).map do |part|
-        qkv.slice(1, part * width, (part + 1) * width).reshape([count, heads, head_width]).permute([1, 0, 2])
-      end
-      keys = cache.keys[layer].try { |past| Tensor.cat([past, k], 1) } || k
-      values = cache.values[layer].try { |past| Tensor.cat([past, v], 1) } || v
-      cache.keys[layer], cache.values[layer] = keys, values
-      scores = q.matmul(keys.transpose) * (1 / Math.sqrt(head_width)) + mask
-      attended = scores.softmax.matmul(values)
-      attended.permute([1, 0, 2]).reshape([count, width]).matmul(block.proj_w) + block.proj_b
+      @h.each_with_index { |block, layer| x = block.call(x, mask, cache.layers[layer]) }
+      Tensomite.scope("head") { @ln_f.call(x).matmul(@wte.weight.value.transpose) }
     end
   end
 end

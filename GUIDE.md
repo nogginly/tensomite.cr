@@ -227,14 +227,14 @@ model.named_params.keys                  # => ["hidden.weight", "hidden.bias", "
 - **A `Parameter` is a slot** holding a tensor (`param.value`), with a name and a flag for weight decay. Tensors never change; training replaces the tensor in each slot.
 - **Weights are drawn from `Tensomite.rng`,** a generator seeded with 0, so the same program builds the same model on every run. Each built-in module also takes `rng:` and `device:` arguments, which a `Builder` (below) fills in.
 
-Built-in module                                    |Parameters                                            |`forward`                                                                                                                      
----------------------------------------------------|------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------
-`Linear.new(inputs, outputs, bias: true)`          |`weight [inputs, outputs]` (decayed), `bias [outputs]`|`x.matmul(weight) + bias`                                                                                                      
-`Embedding.new(count, width)`                      |`weight [count, width]` (decayed)                     |rows of the weight selected by `I32` ids of any shape                                                                          
-`LayerNorm.new(width, eps: 1e-5)`                  |`weight`, `bias`                                      |`x.layernorm(weight, bias, eps)`                                                                                               
-`Activation.gelu`, `Activation.tanh`               |none                                                  |the function                                                                                                                   
-`Sequential.new(layer, layer, ...)`                |its steps'                                            |each step in turn                                                                                                              
-`CausalSelfAttention.new(width, heads, bias: true)`|`qkv`, `proj` (both `Linear`)                         |`call(x, mask)`: GPT-2's multi-head attention over `[batch × length, width]` rows, under a `Tensor.causal_mask(length, length)`
+Built-in module                                    |Parameters                                            |`forward`                                                                                                                                                                                                              
+---------------------------------------------------|------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+`Linear.new(inputs, outputs, bias: true)`          |`weight [inputs, outputs]` (decayed), `bias [outputs]`|`x.matmul(weight) + bias`                                                                                                                                                                                              
+`Embedding.new(count, width)`                      |`weight [count, width]` (decayed)                     |rows of the weight selected by `I32` ids of any shape                                                                                                                                                                  
+`LayerNorm.new(width, eps: 1e-5)`                  |`weight`, `bias`                                      |`x.layernorm(weight, bias, eps)`                                                                                                                                                                                       
+`Activation.gelu`, `Activation.tanh`               |none                                                  |the function                                                                                                                                                                                                           
+`Sequential.new(layer, layer, ...)`                |its steps'                                            |each step in turn                                                                                                                                                                                                      
+`CausalSelfAttention.new(width, heads, bias: true)`|`c_attn`, `c_proj` (both `Linear`)                    |`call(x, mask)`: GPT-2's multi-head attention over `[batch × length, width]` rows, under a `Tensor.causal_mask(length, length)`; `call(x, mask, cache)` also attends to the positions in a `CausalSelfAttention::Cache`
 
 `Linear` draws its weight uniformly from ±1/√inputs, and `Embedding` from a normal distribution with standard deviation 0.02. Either takes `init:` to change that: `Init.uniform(bound)`, `Init.normal(std)` or `Init.constant(value)`.
 
@@ -310,6 +310,7 @@ This is the same fit as in "Training", with the same result. `AdamW` applies wei
 **Other things modules do:**
 
 - `model.save(path)` writes every parameter to a safetensors file under its name, and `model.load(path)` replaces each parameter with the tensor of the same name. A missing or extra name raises `Error`, unless `strict: false`; a different shape raises `ShapeError`. The file can be read by other tools, such as Hugging Face's `safetensors` package.
+- `load(path, prefix: "transformer.")` reads names with a prefix in front, and `load(path, ignore: /\.attn\.bias$/)` skips tensors in the file that are not parameters. A model built only to be loaded can use `Init.placeholder`, zeros that take no memory, so building it allocates almost nothing.
 - `model.to(device)` moves every parameter to another device.
 - `tensor.to_mermaid(model: model, depth: 1)` draws a summary of the model's parts, with their parameter counts. [The tutorial](TUTORIAL.md) shows one.
 
@@ -387,6 +388,8 @@ puts bpe.decode(model.generate(bpe.encode("Once upon a time"), 10, sampler))
 ```
 
 `generate` returns only the new tokens. Without a sampler it picks the likeliest token each time (greedy), so the output is always the same. With a `Sampler` it picks at random, in proportion to each token's probability, among the `top_k` likeliest tokens (all of them when `top_k` is 0, the default). A `temperature` above 1 makes unlikely tokens more likely to be picked, and below 1 less likely. The same seed gives the same text.
+
+`GPT2` is a `Module`, and its parts have the names used in Hugging Face's file: `wte` and `wpe` (the token and position embeddings), `h.0` to `h.11` (the blocks, each with `ln_1`, `attn`, `ln_2` and `mlp`), and `ln_f`. So `model.named_params["h.0.attn.c_attn.weight"]` is that weight, and diagrams of the model use the same names.
 
 For other weights in safetensors files, `SafeTensors.open(path)` lists them (`names`) and loads each as a tensor (`file["name", device]`). `SafeTensors.write(path, {"name" => tensor, ...})` writes tensors to a new file.
 
