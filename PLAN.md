@@ -107,15 +107,21 @@ Each milestone is done when its exit criterion passes.
      - the Shakespeare model reached 1.573 nats/char at step 2,749 (20 minutes) and 1.494 after 5,000 steps (36 minutes).
      - Memory is planned by a pool fed by the collector (Decision U); releasing buffers as soon as their last reader has run is Decision AA, after M7.
 
-**7b. Modules and a model DSL (Decisions AH to AM).** Models are written as `Tensomite::Module`s: classes whose instance variables hold `Parameter`s and other modules, found and named at compile time, with a `forward` that combines them. Then a DSL over the modules, iterated with them. In PRs:
+**7b. Modules and a model DSL (Decisions AH to AR).** Models are written as `Tensomite::Module`s: classes whose instance variables hold `Parameter`s and other modules, found and named at compile time, with a `forward` that combines them. Then a DSL over the modules, iterated with them. In PRs:
 
 1. `Parameter`, `Module`, `Linear`, `Embedding`, `LayerNorm`, `Activation`, `Sequential`, and optimizers over parameters; the tutorial's model on modules.
 2. A safetensors writer, and `save` and `load` by name (Decision AM). Files round-trip with Hugging Face's `safetensors` package, and saving over a file that a loaded model still maps leaves the model's weights unchanged.
 3. The Shakespeare model on modules, with a `CausalSelfAttention`; its trainer simplified to one optimizer and one `step(loss)`. Training and validation losses are bit-identical to the hand-written model's, at the same speed.
 4. DSL candidates, a builder in plain Crystal (`with ... yield`) and a declarative macro, written against the same models; then a choice, and changes to the modules that the DSL shows a need for. The builder was adopted, and the tutorial's and the Shakespeare models moved onto it with the same bits (Decision AN).
-5. GPT-2 on modules, loading Hugging Face's weights by name, if step 3 shows that its KV cache fits. Then a second look at a declarative macro (Decision AN). The cache fits as an argument to `CausalSelfAttention#call`, and the logits are bit-identical to the hand-written model's (Decisions AO to AQ).
+5. GPT-2 on modules, loading Hugging Face's weights by name, if step 3 shows that its KV cache fits. The cache fits as an argument to `CausalSelfAttention#call`, and the logits are bit-identical to the hand-written model's (Decisions AO to AQ). The second look at a declarative macro became a follow-up (Decision AR).
 
 Exit of 7b: the tutorial, Shakespeare and GPT-2 models on modules, with training losses bit-identical to the hand-written versions; `GUIDE.md` and `TUTORIAL.md` updated; a DSL chosen and recorded.
+
+Met (25 Oct 2026, the Linux container and the M5 Pro):
+- the tutorial's model gives the same output, byte for byte, and the Shakespeare model the same training and validation losses, as hex, in two shapes, on modules and on the `Builder`; a 5,000-step run on the M5 Pro ended at 1.4936 nats/char, as the hand-written model's did;
+- GPT-2's logits, over a 64-token prefill and 8 decoded tokens, have the same SHA-256 digest as the hand-written model's on CPU and BLAS in the container, and on CPU, Accelerate and Metal on the M5 Pro (`bench/gpt2_digest.cr`);
+- `GUIDE.md` and `TUTORIAL.md` describe modules and the `Builder`;
+- the `Builder` is the DSL (Decisions AN and AR).
 
 8. **Vulkan backend.** Bind Vulkan compute, and port the hand-written kernels to GLSL compiled at build time. Kernel macros gain a GLSL backend beside Crystal and MSL (Decision V), so fused kernels come with it.
    - Exit: the full op suite matches the oracle on a Linux discrete GPU, and GPT-2 runs there.
@@ -184,6 +190,7 @@ Exit of 7b: the tutorial, Shakespeare and GPT-2 models on modules, with training
 - **Decision AO, names of GPT-2's parts:** Hugging Face's, in the modules themselves (decided): `CausalSelfAttention` holds `c_attn` and `c_proj`, and `GPT2` holds `wte`, `wpe`, `h`, `ln_f`, with `ln_1`, `attn`, `ln_2` and `mlp` (`c_fc`, `c_proj`) in each block. The file then loads by name with no table of renamings, and diagrams use the file's names.
 - **Decision AP, loading files with other tensors or prefixes:** `Module#load(prefix:, ignore:)` (decided), so strict loading still catches real mismatches while skipping stored masks such as `attn.bias` and adding prefixes such as `transformer.`.
 - **Decision AQ, where the KV cache lives:** one `CausalSelfAttention::Cache` per block, passed to `call` (decided). `GPT2` keeps its API: `load`, `new_cache`, `forward(ids, cache)` and `generate`.
+- **Decision AR, closing 7b:** the `Builder` stands as the model DSL, and the declarative macro's second look is a follow-up rather than part of 7b (decided). The builder removed the repetition that prompted a DSL; what a macro would still add is `ln1(x)` for `@ln1.call(x)` in `forward`.
 
 ## Risks
 
