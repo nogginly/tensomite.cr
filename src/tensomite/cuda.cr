@@ -75,13 +75,41 @@ module Tensomite
   #
   # Memory is the GPU's own: `#map` returns `nil`, and data moves through
   # `#upload` and `#download`, even on a GPU that shares memory with the CPU,
-  # so one code path serves both (Decision AS). An op without a CUDA kernel runs
-  # the host kernel: its sources are downloaded to host copies, and its output
-  # is computed there and uploaded. Results are then the host's, bit for bit.
+  # so one code path serves both (Decision AS).
+  #
+  # Ops with a CUDA kernel (`cuda/kernels.cu`) run on the GPU, queued in order
+  # on the default stream; copies to and from the host wait for the kernels
+  # before them. Every other op runs the host kernel: its sources are downloaded
+  # to host copies, and its output is computed there and uploaded. Arithmetic,
+  # comparisons and reductions of up to one chunk give the host's bits; `exp`,
+  # `log` and `tanh` may differ in the last bits, and so may longer sums, which
+  # add in fixed chunks (Decisions K and X), as on Metal.
   #
   # Work is issued from the thread that created the device, on which its context
   # is current.
   class CUDA < HostDevice
+    private SOURCE         = {{ read_file("#{__DIR__}/cuda/kernels.cu") }}
+    private MAX_DIMS       =   8
+    private REDUCE_THREADS = 256
+    private REDUCE_CHUNK   =  16
+    private BLOCK          = 256
+
+    private BINARY = {
+      Op::Add => "add_f32", Op::Sub => "sub_f32", Op::Mul => "mul_f32", Op::Div => "div_f32",
+      Op::Maximum => "maximum_f32", Op::GreaterEqual => "greater_equal_f32",
+    }
+    private UNARY = {
+      Op::Exp => "exp_f32", Op::Log => "log_f32", Op::Tanh => "tanh_f32", Op::Sqrt => "sqrt_f32",
+      Op::Copy => "copy_f32",
+    }
+
+    # A view as the kernels' `View` struct: ndim, offset, shape and strides of
+    # `MAX_DIMS` each, and whether it is dense.
+    alias ViewArgs = StaticArray(Int32, 19)
+
+    # The kernels' `Inverse` struct; see `#inverse_args`.
+    alias InverseArgs = StaticArray(Int32, 18)
+
     # Raised when NVRTC rejects a kernel's source; the message holds its log.
     class CompileError < DeviceError; end
 
@@ -112,11 +140,29 @@ module Tensomite
     # Returns the number of downloads since creation.
     getter downloads = 0
 
+    # Returns how many ops have run on the GPU and on the host since creation.
+    getter gpu_ops = 0
+    getter host_ops = 0
+
     @retired = [] of {LibCUDA::DevicePtr, Int32}
     @retired_lock = Atomic(Bool).new(false)
+    @kernels : Kernels? = nil
+    @kernels_loaded = false
+    @errors : LibCUDA::DevicePtr? = nil
+    @errors_pending = false
 
     def initialize(@gpu : GPU)
       @context = Context.new(gpu)
+    end
+
+    # Returns the hand-written kernels, compiled and loaded on first use, or
+    # `nil` when the GPU cannot load them, as the host stub cannot.
+    def kernels : Kernels?
+      unless @kernels_loaded
+        @kernels_loaded = true
+        @kernels = context.load?(CUDA.compile(SOURCE, CUDA.target_arch(gpu), "kernels.cu"))
+      end
+      @kernels
     end
 
     # The GPU's name, such as `NVIDIA GB10`.
@@ -160,10 +206,15 @@ module Tensomite
       alloc(bytes.size).tap { |buffer| upload(buffer, bytes) }
     end
 
-    # Runs the host kernel for *node* on host copies of its sources, and uploads
-    # its output.
+    # Queues the CUDA kernel for *node*, or, for an op without one, runs the
+    # host kernel on host copies of its sources and uploads its output.
     def execute(node : Node, output : Buffer) : Nil
       target = cuda(output)
+      if (kernels = self.kernels) && launch(kernels, node, target)
+        target.device_written
+        @gpu_ops += 1
+        return
+      end
       target.writing = true
       begin
         super
@@ -171,12 +222,15 @@ module Tensomite
         target.writing = false
       end
       target.host_written
+      @host_ops += 1
     end
 
-    # Waits for the GPU, and reuses or frees memory given back meanwhile.
+    # Waits for the GPU, reuses or frees memory given back meanwhile, and raises
+    # `ExecutionError` if a kernel found an index out of range.
     def sync : Nil
       context.synchronize
       recycle_retired
+      check_errors
     end
 
     # :nodoc:
@@ -213,6 +267,163 @@ module Tensomite
 
     private def cuda(buffer : Buffer) : CUDABuffer
       own(buffer).as?(CUDABuffer) || raise DeviceError.new("buffer is not a CUDA buffer")
+    end
+
+    # Queues the kernel for *node* and returns true, or returns false when it has
+    # none: an op not yet ported, a dtype other than `F32`, a view of more than 8
+    # dimensions, or a view `Unview` cannot invert.
+    private def launch(kernels : Kernels, node : Node, output : CUDABuffer) : Bool
+      return false unless node.dtype.f32? && node.srcs.all? { |src| src.ndim <= MAX_DIMS }
+      case node.op
+      when Op::Sum, Op::Max           then launch_reduce(kernels, node, output)
+      when Op::Cat                    then launch_cat(kernels, node, output)
+      when Op::Gather, Op::ScatterAdd then launch_rows(kernels, node, output)
+      when Op::Unview                 then return launch_unview(kernels, node, output)
+      else                                 return launch_elementwise(kernels, node, output)
+      end
+      true
+    end
+
+    # The elementwise primitives: one thread per element. Returns false for an op
+    # with no elementwise kernel.
+    private def launch_elementwise(kernels : Kernels, node : Node, output : CUDABuffer) : Bool
+      srcs = node.srcs
+      n = node.size.to_u32
+      if srcs.size == 2 && (name = BINARY[node.op]?)
+        a, b = srcs
+        run(kernels[name], node.size, pointer(a), pointer(b), output.pointer, view_args(a.view), view_args(b.view), n)
+      elsif srcs.size == 1 && (name = UNARY[node.op]?)
+        a = srcs.first
+        run(kernels[name], node.size, pointer(a), output.pointer, view_args(a.view), n)
+      else
+        return false
+      end
+      true
+    end
+
+    # Sum and Max, folding each output's run of the source permuted so the reduced
+    # axis is last: one block per output, with a thread per chunk of the run up
+    # to `REDUCE_THREADS`, or one thread per output when the run is one chunk.
+    private def launch_reduce(kernels : Kernels, node : Node, output : CUDABuffer) : Nil
+      src = node.srcs.first
+      view = src.view
+      run = view.size
+      if axis = node.axis
+        view = view.permute((0...view.ndim).reject(axis) + [axis])
+        run = view.shape.last
+      end
+      name = node.op == Op::Sum ? "sum" : "max"
+      chunks = (run + REDUCE_CHUNK - 1) // REDUCE_CHUNK
+      # A run along the (permuted) last axis, or over a dense or constant view, is
+      # walked by stride; one over several dimensions of another view is not.
+      walk = (node.axis || view.dense? || view.constant? ? 1 : 0).to_u32
+      if chunks <= 1
+        run(kernels["#{name}_short_f32"], node.size, pointer(src), output.pointer, view_args(view), run.to_u32, node.size.to_u32, walk)
+      elsif node.size > 0
+        context.launch(kernels["#{name}_f32"], node.size, Math.min(chunks, REDUCE_THREADS),
+          pointer(src), output.pointer, view_args(view), run.to_u32, walk)
+      end
+    end
+
+    # Cat: one launch per source, copying it into its slice of the output.
+    private def launch_cat(kernels : Kernels, node : Node, output : CUDABuffer) : Nil
+      axis = node.axis || raise Error.new("cat needs an axis")
+      out_view = View.contiguous(node.shape)
+      start = 0
+      node.srcs.each do |src|
+        stop = start + src.shape[axis]
+        region = out_view.slice(axis, start, stop)
+        run(kernels["copy_into_f32"], src.size, pointer(src), output.pointer, view_args(src.view), view_args(region), src.size.to_u32)
+        start = stop
+      end
+    end
+
+    # Gather, one thread per output element, and ScatterAdd, one thread per column.
+    # Both report an id out of range through the error buffer (see `#sync`).
+    private def launch_rows(kernels : Kernels, node : Node, output : CUDABuffer) : Nil
+      rows_src, ids = node.srcs
+      rows, width = node.op == Op::Gather ? rows_src.shape : node.shape
+      @errors_pending = true
+      args = {pointer(rows_src), pointer(ids), output.pointer, errors, view_args(rows_src.view), view_args(ids.view), width.to_u32, rows}
+      if node.op == Op::Gather
+        run(kernels["gather_f32"], node.size, *args, node.size.to_u32)
+      else
+        run(kernels["scatter_add_f32"], width, *args, ids.size.to_u32)
+      end
+    end
+
+    # Unview: one thread per output position, summing what the view reads from it.
+    # Returns false for a view whose positions are not each read by a regular grid
+    # of indices; see `#inverse_args`.
+    private def launch_unview(kernels : Kernels, node : Node, output : CUDABuffer) : Bool
+      view = node.source_view || raise Error.new("unview needs a source view")
+      return false unless view.ndim <= MAX_DIMS && (inverse = inverse_args(view))
+      src = node.srcs.first
+      run(kernels["unview_f32"], node.size, pointer(src), output.pointer, view_args(src.view), view_args(view), inverse, node.size.to_u32)
+      true
+    end
+
+    # Returns the kernels' `Inverse` for *view*: the dimensions with a nonzero
+    # stride and more than one index, largest stride first, then the rest.
+    #
+    # Returns `nil` unless each of those strides exceeds the furthest the smaller
+    # ones can reach together, which makes the decomposition of a position unique.
+    # Every view tensomite builds satisfies it; overlapping views run on the host.
+    private def inverse_args(view : View) : InverseArgs?
+      dims = (0...view.ndim)
+      strided = dims.select { |dim| view.strides[dim] != 0 && view.shape[dim] > 1 }.sort_by! { |dim| -view.strides[dim] }
+      reach = 0
+      strided.reverse_each do |dim|
+        stride = view.strides[dim]
+        return unless stride > reach
+        reach += stride * (view.shape[dim] - 1)
+      end
+      repeated = dims.reject { |dim| strided.includes?(dim) }
+      args = InverseArgs.new(0)
+      args[0] = strided.size
+      strided.each_with_index { |dim, k| args[1 + k] = dim }
+      args[1 + MAX_DIMS] = repeated.size
+      repeated.each_with_index { |dim, k| args[2 + MAX_DIMS + k] = dim }
+      args
+    end
+
+    # Queues *function* over *threads* threads, in blocks of `BLOCK`.
+    private def run(function : Void*, threads : Int32, *args) : Nil
+      return if threads == 0
+      context.launch(function, (threads + BLOCK - 1) // BLOCK, BLOCK, *args)
+    end
+
+    private def view_args(view : View) : ViewArgs
+      args = ViewArgs.new(0)
+      args[0], args[1] = view.ndim, view.offset
+      view.ndim.times do |dim|
+        args[2 + dim] = view.shape[dim]
+        args[2 + MAX_DIMS + dim] = view.strides[dim]
+      end
+      args[2 + 2 * MAX_DIMS] = view.dense? ? 1 : 0
+      args
+    end
+
+    private def pointer(tensor : Tensor) : LibCUDA::DevicePtr
+      cuda(tensor.node.buffer!).pointer
+    end
+
+    # The error buffer that `gather_f32` and `scatter_add_f32` report into:
+    # a count, then the first id out of range and the number of rows.
+    private def errors : LibCUDA::DevicePtr
+      @errors ||= context.alloc(12).tap { |pointer| context.upload(pointer, Bytes.new(12)) }
+    end
+
+    # Raises `ExecutionError` for the first id out of range a kernel reported
+    # since the last check, and clears the report.
+    private def check_errors : Nil
+      return unless @errors_pending && (pointer = @errors)
+      @errors_pending = false
+      reports = Slice(Int32).new(3)
+      context.download(pointer, reports.to_unsafe_bytes)
+      return if reports[0] == 0
+      context.upload(pointer, Bytes.new(12))
+      raise ExecutionError.new("index #{reports[1]} out of range for #{reports[2]} rows")
     end
 
     # Returns whether the driver has started and found at least one GPU.
@@ -374,9 +585,19 @@ module Tensomite
 
       # Loads *ptx*, which the driver compiles for this GPU, and returns its kernels.
       def load(ptx : String) : Kernels
-        CUDA.check LibCUDA.cuModuleLoadData(out handle, ptx.to_unsafe), "cuModuleLoadData"
+        load?(ptx) || raise DeviceError.new("cuModuleLoadData: CUDA_ERROR_NOT_SUPPORTED")
+      end
+
+      # As `#load`, but returns `nil` when the driver does not support loading
+      # modules, as the host stub (`scripts/cuda_stub`) does not.
+      def load?(ptx : String) : Kernels?
+        result = LibCUDA.cuModuleLoadData(out handle, ptx.to_unsafe)
+        return if result == NOT_SUPPORTED
+        CUDA.check result, "cuModuleLoadData"
         Kernels.new(handle)
       end
+
+      private NOT_SUPPORTED = 801
 
       # Queues *function* on *blocks* blocks of *threads* threads, with *args*:
       # device pointers (`UInt64`) and numbers, in the kernel's parameter order.
@@ -394,13 +615,17 @@ module Tensomite
 
     # The kernels of one loaded PTX module, by name.
     class Kernels
+      @functions = {} of String => Void*
+
       def initialize(@handle : Void*)
       end
 
       # Returns the kernel *name*, declared `extern "C" __global__` in the source.
       def [](name : String) : Void*
-        CUDA.check LibCUDA.cuModuleGetFunction(out function, @handle, name), "cuModuleGetFunction(#{name})"
-        function
+        @functions[name] ||= begin
+          CUDA.check LibCUDA.cuModuleGetFunction(out function, @handle, name), "cuModuleGetFunction(#{name})"
+          function
+        end
       end
     end
   end

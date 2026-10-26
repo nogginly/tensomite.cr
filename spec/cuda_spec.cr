@@ -51,8 +51,9 @@ require "./spec_helper"
     end
   end
 
-  # The stand-in libcuda of scripts/cuda_stub has a GPU that runs no kernels.
-  private RUNS_KERNELS = CUDA.available? && !CUDA.gpus.first.name.includes?("host stub")
+  # The stand-in libcuda of scripts/cuda_stub has a GPU in host memory, which
+  # runs the device's own kernels compiled as host C++, or none, but never PTX.
+  private REAL_GPU = CUDA.available? && !CUDA.gpus.first.name.includes?("host stub")
 
   describe "CUDA, the device" do
     pending "no CUDA GPU on this machine" unless CUDA.available?
@@ -72,15 +73,29 @@ require "./spec_helper"
         (cuda.downloads - downloads).should eq 1
       end
 
+      # I32 ops have no CUDA kernels, so they run on the host.
       it "downloads a buffer once for host kernels, until the GPU writes it again" do
-        t = Tensor.from(f32(1, 2, 3), [3], cuda)
+        t = Tensor.from([1, 2, 3], [3], cuda)
         buffer = t.node.buffer!.as(CUDABuffer)
         buffer.current_copy.should be_nil
-        ((t * 2) + (t * 3)).to_a(Float32).should eq f32(5, 10, 15)
+        ((t * 2) + (t * 3)).to_a(Int32).should eq [5, 10, 15]
         buffer.current_copy.should_not be_nil
         cuda.upload(buffer, Bytes.new(12))
         buffer.current_copy.should be_nil
-        (t + 1).to_a(Float32).should eq f32(1, 1, 1)
+        (t + 1).to_a(Int32).should eq [1, 1, 1]
+      end
+
+      it "runs ported ops on the GPU when it can load kernels, and the rest on the host" do
+        gpu, host = cuda.gpu_ops, cuda.host_ops
+        a = Tensor.from(f32(1, 2, 3, 4), [2, 2], cuda)
+        # a + a = [[2, 4], [6, 8]], summed by rows = [6, 14].
+        (a + a).sum(1).to_a(Float32).should eq f32(6, 14)
+        (Tensor.from([1, 2], [2], cuda) + Tensor.from([3, 4], [2], cuda)).to_a(Int32).should eq [4, 6]
+        if cuda.kernels
+          {cuda.gpu_ops - gpu, cuda.host_ops - host}.should eq({2, 1})
+        else
+          {cuda.gpu_ops - gpu, cuda.host_ops - host}.should eq({0, 3})
+        end
       end
 
       it "rejects buffers belonging to another device" do
@@ -108,10 +123,10 @@ require "./spec_helper"
     end
   end
 
-  describe "CUDA kernels" do
-    pending "no CUDA GPU that runs kernels on this machine" unless RUNS_KERNELS
+  describe "CUDA kernels compiled from PTX" do
+    pending "no CUDA GPU on this machine" unless REAL_GPU
 
-    if RUNS_KERNELS
+    if REAL_GPU
       gpu = CUDA.gpus.first
       context = CUDA::Context.new(gpu)
       kernels = context.load(CUDA.compile(SOURCE, CUDA.target_arch(gpu)))

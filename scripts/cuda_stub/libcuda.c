@@ -1,7 +1,12 @@
 /* A stand-in for libcuda on machines with no NVIDIA driver. It reports one GPU,
  * "tensomite host stub", whose memory is host memory: allocations and copies
- * work, so the CUDA device runs its host kernels and transfers. Loading PTX
- * fails with CUDA_ERROR_NOT_SUPPORTED, so nothing runs a CUDA kernel. */
+ * work, so the CUDA device runs its host kernels and transfers.
+ *
+ * Loading PTX fails with CUDA_ERROR_NOT_SUPPORTED, unless TENSOMITE_CUDA_KERNELS
+ * names a library of kernels compiled as host C++ (emulate.h). Then loading any
+ * module succeeds, its kernels are that library's, found by name, and a launch
+ * runs them on the host. */
+#include <dlfcn.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,6 +17,7 @@ typedef uint64_t CUdeviceptr;
 #define SUCCESS 0
 #define INVALID_VALUE 1
 #define OUT_OF_MEMORY 2
+#define NOT_FOUND 500
 #define NOT_SUPPORTED 801
 
 static int context;
@@ -20,7 +26,7 @@ CUresult cuInit(unsigned flags) { return SUCCESS; }
 CUresult cuDriverGetVersion(int *version) { *version = 13020; return SUCCESS; }
 
 CUresult cuGetErrorName(CUresult result, const char **name) {
-  *name = result == NOT_SUPPORTED ? "CUDA_ERROR_NOT_SUPPORTED" : result == OUT_OF_MEMORY ? "CUDA_ERROR_OUT_OF_MEMORY" : "CUDA_ERROR_INVALID_VALUE";
+  *name = result == NOT_SUPPORTED ? "CUDA_ERROR_NOT_SUPPORTED" : result == NOT_FOUND ? "CUDA_ERROR_NOT_FOUND" : result == OUT_OF_MEMORY ? "CUDA_ERROR_OUT_OF_MEMORY" : "CUDA_ERROR_INVALID_VALUE";
   return SUCCESS;
 }
 
@@ -74,11 +80,31 @@ CUresult cuMemcpyDtoH_v2(void *destination, CUdeviceptr source, size_t bytes) {
   return SUCCESS;
 }
 
-CUresult cuModuleLoadData(void **module, const void *image) { return NOT_SUPPORTED; }
-CUresult cuModuleUnload(void *module) { return NOT_SUPPORTED; }
-CUresult cuModuleGetFunction(void **function, void *module, const char *name) { return NOT_SUPPORTED; }
+static void *(*find_kernel)(const char *);
+static void (*launch_kernel)(void *, unsigned, unsigned, void **);
 
+CUresult cuModuleLoadData(void **module, const void *image) {
+  const char *path = getenv("TENSOMITE_CUDA_KERNELS");
+  void *library = path ? dlopen(path, RTLD_NOW) : NULL;
+  if (!library) return NOT_SUPPORTED;
+  find_kernel = (void *(*)(const char *))dlsym(library, "tensomite_kernel");
+  launch_kernel = (void (*)(void *, unsigned, unsigned, void **))dlsym(library, "tensomite_launch");
+  if (!find_kernel || !launch_kernel) return NOT_SUPPORTED;
+  *module = library;
+  return SUCCESS;
+}
+
+CUresult cuModuleUnload(void *module) { return SUCCESS; }
+
+CUresult cuModuleGetFunction(void **function, void *module, const char *name) {
+  *function = find_kernel(name);
+  return *function ? SUCCESS : NOT_FOUND;
+}
+
+/* Runs a 1-D grid; the kernels launch no other shape yet. */
 CUresult cuLaunchKernel(void *function, unsigned gx, unsigned gy, unsigned gz, unsigned bx, unsigned by,
                         unsigned bz, unsigned shared, void *stream, void **params, void **extra) {
-  return NOT_SUPPORTED;
+  if (gy != 1 || gz != 1 || by != 1 || bz != 1) return NOT_SUPPORTED;
+  launch_kernel(function, gx, bx, params);
+  return SUCCESS;
 }
