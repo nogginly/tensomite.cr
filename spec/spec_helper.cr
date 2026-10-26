@@ -4,6 +4,9 @@ require "../src/tensomite/blas"
 {% if flag?(:darwin) && flag?(:aarch64) %}
   require "../src/tensomite/metal"
 {% end %}
+{% if flag?(:cuda) %}
+  require "../src/tensomite/cuda"
+{% end %}
 
 include Tensomite
 
@@ -11,9 +14,12 @@ include Tensomite
 DEVICES = [CPU.default, SimDiscrete.default, BLAS.default] of Device
 
 # GPU devices present on this machine, compared with the CPU in `gpu_spec.cr`.
-# Empty where there is none, such as on Linux or a hosted macOS runner.
+# Empty where there is none, such as on Linux or a hosted macOS runner. CUDA
+# joins when built with `-Dcuda`.
 GPUS = {% if flag?(:darwin) && flag?(:aarch64) %}
          Metal.available? ? [Metal.default] of Device : [] of Device
+       {% elsif flag?(:cuda) %}
+         CUDA.available? ? [CUDA.default] of Device : [] of Device
        {% else %}
          [] of Device
        {% end %}

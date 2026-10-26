@@ -1,8 +1,6 @@
 require "./spec_helper"
 
 {% if flag?(:cuda) %}
-  require "../src/tensomite/cuda"
-
   private SOURCE = <<-CUDA
     extern "C" __global__ void add_f32(const float* a, const float* b, float* out, int n) {
       int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -53,10 +51,67 @@ require "./spec_helper"
     end
   end
 
-  describe CUDA do
+  # The stand-in libcuda of scripts/cuda_stub has a GPU that runs no kernels.
+  private RUNS_KERNELS = CUDA.available? && !CUDA.gpus.first.name.includes?("host stub")
+
+  describe "CUDA, the device" do
     pending "no CUDA GPU on this machine" unless CUDA.available?
 
     if CUDA.available?
+      cuda = CUDA.default
+
+      it "never exposes its memory to the host" do
+        cuda.map(Tensor.from(f32(1, 2), [2], cuda).node.buffer!).should be_nil
+      end
+
+      it "runs ops without CUDA kernels on the host, moving data through counted transfers" do
+        uploads, downloads = cuda.uploads, cuda.downloads
+        t = Tensor.from(f32(1, 2, 3), [3], cuda)
+        (t + t).to_a(Float32).should eq f32(2, 4, 6)
+        (cuda.uploads - uploads).should eq 1
+        (cuda.downloads - downloads).should eq 1
+      end
+
+      it "downloads a buffer once for host kernels, until the GPU writes it again" do
+        t = Tensor.from(f32(1, 2, 3), [3], cuda)
+        buffer = t.node.buffer!.as(CUDABuffer)
+        buffer.current_copy.should be_nil
+        ((t * 2) + (t * 3)).to_a(Float32).should eq f32(5, 10, 15)
+        buffer.current_copy.should_not be_nil
+        cuda.upload(buffer, Bytes.new(12))
+        buffer.current_copy.should be_nil
+        (t + 1).to_a(Float32).should eq f32(1, 1, 1)
+      end
+
+      it "rejects buffers belonging to another device" do
+        expect_raises(DeviceError) { cuda.download(Tensor.from(f32(1), [1]).node.buffer!, Bytes.new(4)) }
+      end
+
+      it "copies tensors loaded from a file to the GPU" do
+        path = File.tempname("tensomite", ".safetensors")
+        SafeTensors.write(path, {"w" => Tensor.from(f32(1, 2, 3, 4), [2, 2])})
+        w = SafeTensors.open(path)["w", cuda]
+        w.node.buffer!.should be_a CUDABuffer
+        w.matmul(w).to_a(Float32).should eq f32(7, 10, 15, 22)
+      end
+
+      it "reuses the device memory of collected buffers" do
+        hits = cuda.buffer_pool.hits
+        10.times do
+          100.times { (Tensor.from(Array.new(256, 1f32), [256], cuda) * 2).realize }
+          GC.collect
+          cuda.sync
+          break if cuda.buffer_pool.hits > hits
+        end
+        cuda.buffer_pool.hits.should be > hits
+      end
+    end
+  end
+
+  describe "CUDA kernels" do
+    pending "no CUDA GPU that runs kernels on this machine" unless RUNS_KERNELS
+
+    if RUNS_KERNELS
       gpu = CUDA.gpus.first
       context = CUDA::Context.new(gpu)
       kernels = context.load(CUDA.compile(SOURCE, CUDA.target_arch(gpu)))

@@ -20,6 +20,12 @@ module Tensomite
       super(device, @bytes.size)
     end
 
+    # For a subclass that holds its data elsewhere, such as in GPU memory, and
+    # makes a host copy only when one is needed: *bytes* may be empty.
+    def initialize(device : Device, bytesize : Int32, @bytes : Bytes)
+      super(device, bytesize)
+    end
+
     # Gives the memory back to the device's pool, unless it belongs to a file mapping.
     def finalize
       return if @owner

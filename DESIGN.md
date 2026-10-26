@@ -433,6 +433,19 @@ flowchart LR
 - **Compiled by NVRTC on first use** (Decision AU), from CUDA C++ to PTX, with `--fmad=false`, so a multiply and an add round separately, as on the host and as MSL does with fast math off. PTX targets the newest architecture NVRTC supports at or below the GPU's (`CUDA.target_arch`); the driver compiles it to the GPU's machine code when the module loads.
 - **A primary context per GPU** (`CUDA::Context`), current on the thread that made it: device memory, synchronous copies, loaded modules and launches. Launch arguments are passed as pointers to their values, as `cuLaunchKernel` expects.
 - **Explicit transfers, even on shared memory.** The DGX Spark's GPU shares memory with its CPU, but tensomite allocates device memory and copies to and from it as on a discrete card, so one code path serves both (Decision AS).
+- **The `CUDA` device** is a `HostDevice` whose buffers live in device memory, so every op without a CUDA kernel runs the host kernel and gives the host's bits. A `CUDABuffer` keeps a host copy, made when a host kernel first reads it and valid until the device memory is written again:
+
+  ```mermaid
+  flowchart LR
+      U["upload"] --> D["device memory current<br/>host copy stale"]
+      D -->|"a host kernel reads it"| B["download once:<br/>both current"]
+      B -->|"another reader"| B
+      B -->|"upload, or a CUDA kernel writes it"| D
+      H["a host kernel writes it"] -->|"upload the result"| B
+  ```
+
+  So a graph of host ops downloads each source once, not once per reader, and uploads each output once. Device memory comes from a pool, as on Metal. A buffer's finalizer hands its memory to a retired list, which the device moves into the pool at its next allocation or sync, on its own thread. If the list is busy, the finalizer frees the memory at once instead, making the context current on its thread first, so it never waits.
+- **Testing without a GPU.** `scripts/cuda_stub/libcuda.c` stands in for the driver: one "GPU" whose memory is host memory, which runs no kernels. With NVRTC from PyPI, CI runs the compiler specs, the CUDA device's own specs, and the GPU and GPT-2 specs on the CUDA device, so the transfers and the host copies are tested on every PR.
 
 ## Realisation
 
