@@ -71,13 +71,15 @@ jobs:
           done
 
       # NVRTC needs no GPU, and the stand-in libcuda gives the CUDA device a GPU
-      # in host memory: the compiler specs run for real, and so does the device,
-      # on host kernels and transfers. Only specs that run CUDA kernels are pending.
+      # in host memory that runs its kernels compiled as host C++: NVRTC compiles
+      # every kernel, and the GPU specs compare the kernels with the CPU. Only the
+      # specs that load PTX are pending.
       - name: Run the CUDA specs on the host stub (Linux)
         if: ${{ runner.os == 'Linux' }}
         run: |
           dir="$(scripts/cuda_stub/setup.sh /tmp/tensomite-cuda | tail -1)"
-          LIBRARY_PATH="$dir" LD_LIBRARY_PATH="$dir" crystal spec -Dcuda spec/cuda_spec.cr spec/gpu_spec.cr spec/device_spec.cr spec/gpt2_spec.cr
+          LIBRARY_PATH="$dir" LD_LIBRARY_PATH="$dir" TENSOMITE_CUDA_KERNELS="$dir/libkernels.so" \
+            crystal spec -Dcuda spec/cuda_spec.cr spec/gpu_spec.cr spec/device_spec.cr spec/gpt2_spec.cr
 
       # Metal code builds only for Apple Silicon; cross-compiling checks it without linking.
       - name: Cross-compile the Metal path (Linux)

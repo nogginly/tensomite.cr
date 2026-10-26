@@ -318,13 +318,13 @@ This is the same fit as in "Training", with the same result. `AdamW` applies wei
 
 Each tensor lives on a device, given by the `device:` argument when it is created. All of an operation's operands must be on the same device; `t.to(device)` copies a tensor to another.
 
-Device       |How to get it                                  |Use                                                                                                                                                                           
--------------|-----------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-`CPU`        |built in; the default                          |correct and simple, the reference the others are tested against; slow for large matrices                                                                                      
-`BLAS`       |`require "tensomite/blas"`                     |the CPU with matrix products from Accelerate (macOS) or OpenBLAS (Linux): far faster for real models                                                                          
-`Metal`      |`require "tensomite/metal"`, on Apple Silicon  |the GPU; `Metal.available?` says whether there is one                                                                                                                         
-`CUDA`       |`require "tensomite/cuda"`, built with `-Dcuda`|an NVIDIA GPU; `CUDA.available?` says whether there is one. Until its kernels arrive, ops run on the CPU with data kept in the GPU's memory, so it is correct but not yet fast
-`SimDiscrete`|built in                                       |behaves like a GPU with separate memory, for testing code that moves data between devices                                                                                     
+Device       |How to get it                                  |Use                                                                                                                                                                                                                         
+-------------|-----------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+`CPU`        |built in; the default                          |correct and simple, the reference the others are tested against; slow for large matrices                                                                                                                                    
+`BLAS`       |`require "tensomite/blas"`                     |the CPU with matrix products from Accelerate (macOS) or OpenBLAS (Linux): far faster for real models                                                                                                                        
+`Metal`      |`require "tensomite/metal"`, on Apple Silicon  |the GPU; `Metal.available?` says whether there is one                                                                                                                                                                       
+`CUDA`       |`require "tensomite/cuda"`, built with `-Dcuda`|an NVIDIA GPU; `CUDA.available?` says whether there is one. Elementwise ops and reductions run on the GPU; matrix products and the rest still run on the CPU, with data kept in the GPU's memory, until their kernels arrive
+`SimDiscrete`|built in                                       |behaves like a GPU with separate memory, for testing code that moves data between devices                                                                                                                                   
 
 ```crystal
 sim = SimDiscrete.default

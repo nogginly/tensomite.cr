@@ -233,14 +233,18 @@ crystal spec -Dcuda spec/cuda_spec.cr
 
 `examples/cuda_info.cr` prints the driver's and NVRTC's versions and every GPU, then squares a million floats on the first one, which checks compilation, loading, transfers and launches together.
 
-**Without a GPU,** `scripts/cuda_stub/setup.sh DIR` installs NVRTC from PyPI into `DIR` and builds a stand-in `libcuda` (`scripts/cuda_stub/libcuda.c`): one "GPU", named `tensomite host stub`, whose memory is host memory and which runs no kernels. With `LIBRARY_PATH` and `LD_LIBRARY_PATH` set to `DIR`, the compiler specs run, the `CUDA` device runs on host kernels and transfers, and specs that run CUDA kernels are pending:
+**Without a GPU,** `scripts/cuda_stub/setup.sh DIR` prepares `DIR`:
+- NVRTC from PyPI;
+- a stand-in `libcuda` (`libcuda.c`): one "GPU", named `tensomite host stub`, whose memory is host memory;
+- `libkernels.so`: `src/tensomite/cuda/kernels.cu` compiled as host C++ behind `emulate.h`, with a registry of its kernels that `register.py` writes.
 
 ```sh
 dir=$(scripts/cuda_stub/setup.sh /tmp/tensomite-cuda | tail -1)
-LIBRARY_PATH=$dir LD_LIBRARY_PATH=$dir crystal spec -Dcuda
+export LIBRARY_PATH=$dir LD_LIBRARY_PATH=$dir TENSOMITE_CUDA_KERNELS=$dir/libkernels.so
+crystal spec -Dcuda
 ```
 
-CI does this on Linux for `cuda_spec`, `gpu_spec`, `device_spec` and `gpt2_spec`. Running CUDA kernels needs a machine with an NVIDIA GPU.
+The `CUDA` device then compiles its kernels with NVRTC, as on a GPU, and the stub runs them on the host, so `gpu_spec` compares every kernel with the CPU. Without `TENSOMITE_CUDA_KERNELS`, the stub cannot load modules and the device runs every op on host kernels. Specs that load PTX of their own need a real GPU. CI runs `cuda_spec`, `gpu_spec`, `device_spec` and `gpt2_spec` this way on Linux. A new kernel needs nothing more: `register.py` finds it.
 
 **Errors from kernels arrive late.** `cuLaunchKernel` only queues a kernel, so a fault inside it is reported by the next call that waits for the GPU, such as a download. To find which kernel failed, call `context.synchronize` after each launch.
 
