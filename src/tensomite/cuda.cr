@@ -99,6 +99,20 @@ module Tensomite
       end
     end
 
+    # Returns *args* as `cuLaunchKernel` takes them: a pointer to each value, in
+    # memory of the value's own type.
+    #
+    # The loop is unrolled at compile time so that each value keeps its exact
+    # type; a block over the tuple would see their union, and box a type tag
+    # with each value.
+    def self.kernel_params(*args : *T) : Array(Void*) forall T
+      params = Array(Void*).new({{ T.size }})
+      {% for i in 0...T.size %}
+        params << Pointer.malloc(1, args[{{ i }}]).as(Void*)
+      {% end %}
+      params
+    end
+
     # Raises `DeviceError` naming *call* and the driver's error, unless *result* is success.
     def self.check(result : LibCUDA::Result, call : String) : Nil
       return if result == 0
@@ -175,7 +189,7 @@ module Tensomite
       # Queues *function* on *blocks* blocks of *threads* threads, with *args*:
       # device pointers (`UInt64`) and numbers, in the kernel's parameter order.
       def launch(function : Void*, blocks : Int32, threads : Int32, *args) : Nil
-        params = args.map { |arg| Pointer.malloc(1, arg).as(Void*) }.to_a
+        params = CUDA.kernel_params(*args)
         CUDA.check LibCUDA.cuLaunchKernel(function, blocks.to_u32, 1, 1, threads.to_u32, 1, 1, 0,
           Pointer(Void).null, params.to_unsafe, Pointer(Void*).null), "cuLaunchKernel"
       end

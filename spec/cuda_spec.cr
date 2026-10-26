@@ -41,6 +41,13 @@ require "./spec_helper"
       body.should_not contain "fma"
     end
 
+    it "passes each kernel argument as a pointer to a value of its own type" do
+      params = CUDA.kernel_params(0x1234_5678_9abc_u64, 7, 2.5f32)
+      params[0].as(UInt64*).value.should eq 0x1234_5678_9abc_u64
+      params[1].as(Int32*).value.should eq 7
+      params[2].as(Float32*).value.should eq 2.5f32
+    end
+
     it "reports compile errors with NVRTC's log" do
       expect_raises(CUDA::CompileError, /broken.cu.*error/m) { CUDA.compile("this is not CUDA", CUDA.supported_archs.min, "broken.cu") }
     end
