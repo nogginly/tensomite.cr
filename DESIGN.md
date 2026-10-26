@@ -425,6 +425,15 @@ flowchart LR
 - **`Gather`** copies row `ids[i]` of a 2-D table into output row `i`. An id outside the table raises `ExecutionError`.
 - **`MatMul`** computes each output as a dot product over `k`, added in index order. Its sources arrive already expanded to the common batch shape. It is the one kernel that does not call `offset_of` per element: it finds where each batch matrix starts, then walks rows, columns and `k` with the sources' strides directly. The order of additions is unchanged, so the result is bit-identical to indexing each element (`spec/host_kernels_spec.cr`), and about 10 times faster.
 
+### CUDA
+
+`src/tensomite/cuda.cr` reaches NVIDIA GPUs through CUDA's driver API (Decisions AS to AV). M8's first part is the layer under the device to come:
+
+- **Linked, opt-in.** `-Dcuda` links `libcuda` and `libnvrtc` (Decision AV); without the flag, requiring the file is a compile error. The bindings name the exported symbols, so `cuMemAlloc_v2` rather than the header's `cuMemAlloc`.
+- **Compiled by NVRTC on first use** (Decision AU), from CUDA C++ to PTX, with `--fmad=false`, so a multiply and an add round separately, as on the host and as MSL does with fast math off. PTX targets the newest architecture NVRTC supports at or below the GPU's (`CUDA.target_arch`); the driver compiles it to the GPU's machine code when the module loads.
+- **A primary context per GPU** (`CUDA::Context`), current on the thread that made it: device memory, synchronous copies, loaded modules and launches. Launch arguments are passed as pointers to their values, as `cuLaunchKernel` expects.
+- **Explicit transfers, even on shared memory.** The DGX Spark's GPU shares memory with its CPU, but tensomite allocates device memory and copies to and from it as on a discrete card, so one code path serves both (Decision AS).
+
 ## Realisation
 
 `Scheduler.realize(node)`:

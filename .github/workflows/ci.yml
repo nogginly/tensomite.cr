@@ -64,7 +64,19 @@ jobs:
         run: crystal spec --release
 
       - name: Type-check benchmarks and examples
-        run: for f in bench/*.cr examples/*.cr; do crystal build --no-codegen "$f"; done
+        run: |
+          for f in bench/*.cr examples/*.cr; do
+            case "$f" in *cuda*) flags=-Dcuda ;; *) flags= ;; esac
+            crystal build --no-codegen $flags "$f"
+          done
+
+      # NVRTC needs no GPU: with it from PyPI and a stand-in libcuda, the CUDA
+      # compiler specs run for real and the GPU specs are pending.
+      - name: Run the CUDA compiler specs (Linux)
+        if: ${{ runner.os == 'Linux' }}
+        run: |
+          dir="$(scripts/cuda_stub/setup.sh /tmp/tensomite-cuda | tail -1)"
+          LIBRARY_PATH="$dir" LD_LIBRARY_PATH="$dir" crystal spec -Dcuda spec/cuda_spec.cr
 
       # Metal code builds only for Apple Silicon; cross-compiling checks it without linking.
       - name: Cross-compile the Metal path (Linux)
