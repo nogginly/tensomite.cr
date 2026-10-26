@@ -1,6 +1,7 @@
 module Tensomite
   # An elementwise expression fused into one kernel: one pass over memory on host
-  # devices, one dispatch on Metal. Define one with `Tensomite.kernel`.
+  # devices, one dispatch on Metal and one launch on CUDA. Define one with
+  # `Tensomite.kernel`.
   #
   # A kernel's inputs are broadcast to a common shape, like a binary op's, and must
   # all be `F32` tensors on one device.
@@ -28,12 +29,22 @@ module Tensomite
     # is its own statement, so the compiler cannot fuse a multiply and an add.
     abstract def msl : String
 
+    # Returns the kernel as a CUDA C++ function named `#cuda_name`, declared
+    # `extern "C" __global__`, to compile after `cuda/prelude.cu`. As with `#msl`,
+    # every operation is its own statement; NVRTC runs with fused multiply-adds
+    # off, so a multiply and an add each round.
+    abstract def cuda : String
+
     # Returns the kernel that computes the gradient of input *index* from the
     # output's gradient and the inputs, or `nil` for a kernel that is itself a
     # gradient.
     abstract def gradient(index : Int32) : Kernel?
 
     def msl_name : String
+      "k_#{name}"
+    end
+
+    def cuda_name : String
       "k_#{name}"
     end
 
@@ -312,6 +323,39 @@ module Tensomite
               io << "  float {{ s[0].id }} = -{{ operands[0].id }};\n"
             {% elsif %w[tanh exp log sqrt].includes?(s[1]) %}
               io << "  float {{ s[0].id }} = precise::{{ s[1].id }}({{ operands[0].id }});\n"
+            {% else %}
+              io << "  float {{ s[0].id }} = {{ operands[0].id }} {{ s[1].id }} {{ operands[1].id }};\n"
+            {% end %}
+          {% end %}
+          io << "  dst[i] = {{ (result == "zero" ? "0.0f" : result).id }};\n}\n"
+        end
+      end
+
+      def cuda : String
+        String.build do |io|
+          io << "extern \"C\" __global__ void " << cuda_name << "("
+          {% for input, i in inputs %}
+            io << "const float* s{{ i }}, "
+          {% end %}
+          io << "float* dst, "
+          {% for input, i in inputs %}
+            io << "View v{{ i }}, "
+          {% end %}
+          io << "unsigned int count) {\n"
+          io << "  unsigned int i = thread_index();\n"
+          io << "  if (i >= count) return;\n"
+          {% for input, i in inputs %}
+            io << "  float {{ input.id }} = s{{ i }}[offset_of(v{{ i }}, i)];\n"
+          {% end %}
+          {% for c, i in consts %}
+            io << "  float c{{ i }} = " << ::Tensomite::Kernel.msl_float(C{{ i }}) << ";\n"
+          {% end %}
+          {% for s in statements %}
+            {% operands = [s[2], s[3]].map { |v| v == "one" ? "1.0f" : (v == "two" ? "2.0f" : (v == "zero" ? "0.0f" : v)) } %}
+            {% if s[1] == "neg" %}
+              io << "  float {{ s[0].id }} = -{{ operands[0].id }};\n"
+            {% elsif %w[tanh exp log sqrt].includes?(s[1]) %}
+              io << "  float {{ s[0].id }} = {{ s[1].id }}f({{ operands[0].id }});\n"
             {% else %}
               io << "  float {{ s[0].id }} = {{ operands[0].id }} {{ s[1].id }} {{ operands[1].id }};\n"
             {% end %}

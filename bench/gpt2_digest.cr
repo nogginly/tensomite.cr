@@ -3,10 +3,15 @@
 # digests compute the same bits.
 #
 #     crystal run --release bench/gpt2_digest.cr -- path/to/model.safetensors [heads]
+#
+# Built with `-Dcuda`, it adds CUDA.
 require "digest/sha256"
 require "../src/tensomite/blas"
 {% if flag?(:darwin) && flag?(:aarch64) %}
   require "../src/tensomite/metal"
+{% end %}
+{% if flag?(:cuda) %}
+  require "../src/tensomite/cuda"
 {% end %}
 
 include Tensomite
@@ -17,6 +22,9 @@ heads = (ARGV[1]? || "12").to_i
 devices = [{"CPU", CPU.default.as(Device)}, {"BLAS", BLAS.default.as(Device)}]
 {% if flag?(:darwin) && flag?(:aarch64) %}
   devices << {"Metal", Metal.default.as(Device)} if Metal.available?
+{% end %}
+{% if flag?(:cuda) %}
+  devices << {"CUDA", CUDA.default.as(Device)} if CUDA.available?
 {% end %}
 
 devices.each do |label, device|

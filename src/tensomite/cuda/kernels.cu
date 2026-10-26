@@ -1,40 +1,6 @@
-// Hand-written kernels for the CUDA device, compiled by NVRTC with fused
-// multiply-adds off, so +, -, * and comparisons give the same bits as the host
-// kernels. Each is a port of the Metal kernel of the same name.
-
-#define MAX_DIMS 8
-
-// A view as the host describes it: offset, then shape and strides per dimension.
-struct View {
-    int ndim;
-    int offset;
-    int shape[MAX_DIMS];
-    int strides[MAX_DIMS];
-    int dense;  // 1 when the strides are row-major: element i is at offset + i
-};
-
-// Returns the storage position of logical element `flat` of `v`, peeling indices
-// off from the last dimension, or directly when the view is dense.
-__device__ int offset_of(const View& v, int flat) {
-    if (v.dense) return v.offset + flat;
-    int pos = v.offset;
-    for (int d = v.ndim - 1; d >= 0; d--) {
-        int dim = v.shape[d];
-        pos += (flat % dim) * v.strides[d];
-        flat /= dim;
-    }
-    return pos;
-}
-
-// Returns the step between the positions of consecutive elements along the last
-// dimension.
-__device__ int run_stride(const View& v) {
-    return v.ndim > 0 ? v.strides[v.ndim - 1] : 0;
-}
-
-__device__ unsigned int thread_index() {
-    return blockIdx.x * blockDim.x + threadIdx.x;
-}
+// Hand-written kernels for the CUDA device, compiled by NVRTC after prelude.cu
+// with fused multiply-adds off, so +, -, * and comparisons give the same bits as
+// the host kernels. Each is a port of the Metal kernel of the same name.
 
 #define BINARY(name, expr)                                                          \
     extern "C" __global__ void name(const float* a, const float* b, float* dst,    \
@@ -251,4 +217,295 @@ extern "C" __global__ void unview_f32(const float* src, float* dst, View vs, Vie
         }
     }
     dst[p] = acc;
+}
+
+// Output element i of a batched matrix product, [..., m, k] by [..., k, n], as a
+// dot product over k in index order, as the host does. dims holds m, k and n.
+//
+// Each batch matrix's start comes from offset_of once; rows, columns and k then
+// step by the views' last two strides. The product and the sum are separate
+// statements, and NVRTC runs with fused multiply-adds off, so each rounds.
+extern "C" __global__ void matmul_f32(const float* a, const float* b, float* dst, View va, View vb,
+                                      unsigned int m, unsigned int k, unsigned int n, unsigned int total) {
+    unsigned int i = thread_index();
+    if (i >= total) return;
+    unsigned int col = i % n;
+    unsigned int row = (i / n) % m;
+    unsigned int batch = i / (m * n);
+    int pa = offset_of(va, batch * m * k) + int(row) * va.strides[va.ndim - 2];
+    int pb = offset_of(vb, batch * k * n) + int(col) * vb.strides[vb.ndim - 1];
+    int sa = va.strides[va.ndim - 1];
+    int sb = vb.strides[vb.ndim - 2];
+    float acc = 0.0f;
+    for (unsigned int s = 0; s < k; s++) {
+        float product = a[pa + int(s) * sa] * b[pb + int(s) * sb];
+        acc = acc + product;
+    }
+    dst[i] = acc;
+}
+
+// Split-K matrix products, for when one thread per output leaves the GPU idle, as
+// in a matrix-vector product.
+//
+// A block owns COLS adjacent output columns of one output row, with SLICES
+// threads per column. k is cut into chunks of CHUNK elements at fixed offsets, so
+// a chunk boundary never depends on k, m or n. Each thread sums whole chunks in
+// index order, and adjacent threads read adjacent columns of b.
+#define COLS 32
+#define SLICES 8
+#define CHUNK 64
+
+// Returns the sum of chunk c of the dot product for one output, in index order.
+__device__ float chunk_sum(const float* a, const float* b, int pa, int pb, int sa, int sb,
+                           unsigned int k, unsigned int c) {
+    float acc = 0.0f;
+    unsigned int stop = min(k, (c + 1) * CHUNK);
+    for (unsigned int s = c * CHUNK; s < stop; s++) {
+        float product = a[pa + int(s) * sa] * b[pb + int(s) * sb];
+        acc = acc + product;
+    }
+    return acc;
+}
+
+// Deterministic: in each pass the SLICES threads of a column compute SLICES
+// consecutive chunks, and the first thread adds them to the column's total in
+// chunk order. The total is therefore ((c0 + c1) + c2) + ..., whatever the
+// block size; extra chunks past k add exact zeros.
+extern "C" __global__ void matmul_split_f32(const float* a, const float* b, float* dst, View va, View vb,
+                                            unsigned int m, unsigned int k, unsigned int n) {
+    __shared__ float partial[SLICES][COLS];
+    unsigned int lane = threadIdx.x, slice = threadIdx.y;
+    unsigned int col = blockIdx.x * COLS + lane;
+    unsigned int out_row = blockIdx.y;
+    unsigned int batch = out_row / m, row = out_row % m;
+    bool live = col < n;
+    int pa = offset_of(va, batch * m * k) + int(row) * va.strides[va.ndim - 2];
+    int pb = live ? offset_of(vb, batch * k * n) + int(col) * vb.strides[vb.ndim - 1] : 0;
+    int sa = va.strides[va.ndim - 1];
+    int sb = vb.strides[vb.ndim - 2];
+    unsigned int chunks = (k + CHUNK - 1) / CHUNK;
+    float total = 0.0f;
+    for (unsigned int first = 0; first < chunks; first += SLICES) {
+        unsigned int c = first + slice;
+        partial[slice][lane] = live && c < chunks ? chunk_sum(a, b, pa, pb, sa, sb, k, c) : 0.0f;
+        __syncthreads();
+        if (slice == 0) {
+            for (unsigned int t = 0; t < SLICES; t++) total = total + partial[t][lane];
+        }
+        __syncthreads();
+    }
+    if (slice == 0 && live) dst[out_row * n + col] = total;
+}
+
+// Tiled matrix products, for when there are enough rows to share operands.
+//
+// A block owns a BM x BN block of outputs of one batch matrix, and each of its
+// (BM / TM) x (BN / TN) threads a TM x TN patch, whose rows and columns are
+// strided by the thread grid so that neighbouring threads read neighbouring
+// memory. k is walked in tiles of BK, which divides CHUNK: the threads first copy
+// a BM x BK tile of a and a BK x BN tile of b into shared memory, each element
+// once, then every thread reads its operands from there.
+//
+// Bit-identical to matmul_split_f32, so the two can be chosen by speed alone:
+// each output sums every chunk of CHUNK in index order from zero, and adds the
+// chunk sums to its total in chunk order, never reading past k; it then adds the
+// exact zero split-K adds for chunks past k when their number is not a multiple
+// of SLICES, which turns a total of -0 into +0 as split-K does.
+template <unsigned int BM, unsigned int BN, unsigned int BK, unsigned int TM, unsigned int TN>
+__device__ void matmul_tiled(const float* a, const float* b, float* dst, const View& va, const View& vb,
+                             unsigned int m, unsigned int k, unsigned int n) {
+    constexpr unsigned int TX = BN / TN, TY = BM / TM, THREADS = TX * TY;
+    // a's tile is stored k-major and b's row-major, each row padded by one, so
+    // that the reads of the inner loop and most stores avoid bank conflicts.
+    __shared__ float as[BK * (BM + 1)];
+    __shared__ float bs[BK * (BN + 1)];
+    unsigned int batch = blockIdx.z, row0 = blockIdx.y * BM, col0 = blockIdx.x * BN;
+    unsigned int t = threadIdx.y * TX + threadIdx.x;
+    int pa = offset_of(va, batch * m * k);
+    int pb = offset_of(vb, batch * k * n);
+    int ra = va.strides[va.ndim - 2], sa = va.strides[va.ndim - 1];
+    int sb = vb.strides[vb.ndim - 2], cb = vb.strides[vb.ndim - 1];
+    float total[TM][TN];
+    float partial[TM][TN];
+    for (unsigned int i = 0; i < TM; i++) {
+        for (unsigned int j = 0; j < TN; j++) {
+            total[i][j] = 0.0f;
+            partial[i][j] = 0.0f;
+        }
+    }
+    for (unsigned int k0 = 0; k0 < k; k0 += BK) {
+        unsigned int width = min(BK, k - k0);
+        // Copies the tiles, walking whichever index is contiguous in memory
+        // fastest across threads, and zero outside the matrices.
+        for (unsigned int e = t; e < BM * BK; e += THREADS) {
+            unsigned int r = sa == 1 ? e / BK : e % BM;
+            unsigned int s = sa == 1 ? e % BK : e / BM;
+            bool inside = row0 + r < m && s < width;
+            as[s * (BM + 1) + r] = inside ? a[pa + int(row0 + r) * ra + int(k0 + s) * sa] : 0.0f;
+        }
+        for (unsigned int e = t; e < BK * BN; e += THREADS) {
+            unsigned int s = cb == 1 ? e / BN : e % BK;
+            unsigned int c = cb == 1 ? e % BN : e / BK;
+            bool inside = col0 + c < n && s < width;
+            bs[s * (BN + 1) + c] = inside ? b[pb + int(k0 + s) * sb + int(col0 + c) * cb] : 0.0f;
+        }
+        __syncthreads();
+        for (unsigned int s = 0; s < width; s++) {
+            float x[TM], y[TN];
+            for (unsigned int i = 0; i < TM; i++) x[i] = as[s * (BM + 1) + threadIdx.y + i * TY];
+            for (unsigned int j = 0; j < TN; j++) y[j] = bs[s * (BN + 1) + threadIdx.x + j * TX];
+            for (unsigned int i = 0; i < TM; i++) {
+                for (unsigned int j = 0; j < TN; j++) {
+                    float product = x[i] * y[j];
+                    partial[i][j] = partial[i][j] + product;
+                }
+            }
+        }
+        if ((k0 + BK) % CHUNK == 0 || k0 + BK >= k) {
+            for (unsigned int i = 0; i < TM; i++) {
+                for (unsigned int j = 0; j < TN; j++) {
+                    total[i][j] = total[i][j] + partial[i][j];
+                    partial[i][j] = 0.0f;
+                }
+            }
+        }
+        __syncthreads();
+    }
+    unsigned int chunks = (k + CHUNK - 1) / CHUNK;
+    bool padded = chunks % SLICES != 0;
+    for (unsigned int i = 0; i < TM; i++) {
+        unsigned int row = row0 + threadIdx.y + i * TY;
+        for (unsigned int j = 0; j < TN; j++) {
+            unsigned int col = col0 + threadIdx.x + j * TX;
+            if (row < m && col < n) dst[(batch * m + row) * n + col] = padded ? total[i][j] + 0.0f : total[i][j];
+        }
+    }
+}
+
+#define TILED(name, BM, BN, BK)                                                         \
+    extern "C" __global__ void name(const float* a, const float* b, float* dst, View va, View vb, \
+                                    unsigned int m, unsigned int k, unsigned int n) {    \
+        matmul_tiled<BM, BN, BK, 4, 4>(a, b, dst, va, vb, m, k, n);                     \
+    }
+
+TILED(matmul_tiled_32x32_f32, 32, 32, 64)
+TILED(matmul_tiled_64x64_f32, 64, 64, 32)
+TILED(matmul_tiled_32x64_f32, 32, 64, 32)
+
+// Fused row ops: one block per row along the last axis. Each pass folds the
+// row's chunks of REDUCE_CHUNK at fixed offsets, a thread per chunk, and the
+// first thread folds the chunk results in chunk order, as the reductions above
+// do, so a row padded with -inf (softmax) keeps its bits. Each thread then
+// rewrites only the chunks it wrote itself. A row lies along the last dimension,
+// so its elements are found from its start by the last stride.
+//
+// Returns the maximum of row `base` of `n` elements of `a` through `v`.
+__device__ float row_max(const float* a, const View& v, unsigned int base, unsigned int n,
+                         float* partial, float* shared, unsigned int t, unsigned int threads) {
+    unsigned int chunks = (n + REDUCE_CHUNK - 1) / REDUCE_CHUNK;
+    int start = offset_of(v, base);
+    int stride = run_stride(v);
+    float top = a[start];
+    for (unsigned int first = 0; first < chunks; first += threads) {
+        unsigned int c = first + t;
+        if (c < chunks) {
+            unsigned int stop = min(n, (c + 1) * REDUCE_CHUNK);
+            float acc = a[start + int(c * REDUCE_CHUNK) * stride];
+            for (unsigned int s = c * REDUCE_CHUNK + 1; s < stop; s++) {
+                float x = a[start + int(s) * stride];
+                acc = x > acc ? x : acc;
+            }
+            partial[t] = acc;
+        }
+        __syncthreads();
+        if (t == 0) {
+            unsigned int m = min(threads, chunks - first);
+            for (unsigned int k = 0; k < m; k++) top = partial[k] > top ? partial[k] : top;
+        }
+        __syncthreads();
+    }
+    if (t == 0) *shared = top;
+    __syncthreads();
+    return *shared;
+}
+
+// Returns the sum, in chunk order, of the partial sums each thread puts in
+// `partial` for the chunks it owns, one pass of `threads` chunks at a time.
+#define ROW_SUM(total, chunk_sum)                                              \
+    {                                                                          \
+        unsigned int chunks = (n + REDUCE_CHUNK - 1) / REDUCE_CHUNK;           \
+        total = 0.0f;                                                          \
+        for (unsigned int first = 0; first < chunks; first += threads) {       \
+            unsigned int c = first + t;                                        \
+            float acc = 0.0f;                                                  \
+            if (c < chunks) {                                                  \
+                unsigned int stop = min(n, (c + 1) * REDUCE_CHUNK);            \
+                for (unsigned int s = c * REDUCE_CHUNK; s < stop; s++) { chunk_sum } \
+            }                                                                  \
+            partial[t] = acc;                                                  \
+            __syncthreads();                                                   \
+            if (t == 0) {                                                      \
+                unsigned int m = min(threads, chunks - first);                 \
+                for (unsigned int k = 0; k < m; k++) total = total + partial[k]; \
+            }                                                                  \
+            __syncthreads();                                                   \
+        }                                                                      \
+        if (t == 0) shared = total;                                            \
+        __syncthreads();                                                       \
+        total = shared;                                                        \
+    }
+
+// Visits every element of the chunks this thread owns.
+#define OWN_ELEMENTS(body)                                                     \
+    for (unsigned int c = t; c < (n + REDUCE_CHUNK - 1) / REDUCE_CHUNK; c += threads) { \
+        unsigned int stop = min(n, (c + 1) * REDUCE_CHUNK);                    \
+        for (unsigned int s = c * REDUCE_CHUNK; s < stop; s++) { body }        \
+    }
+
+extern "C" __global__ void softmax_f32(const float* a, float* dst, View v, unsigned int n) {
+    __shared__ float partial[REDUCE_THREADS];
+    __shared__ float shared;
+    unsigned int row = blockIdx.x, t = threadIdx.x, threads = blockDim.x;
+    unsigned int base = row * n;
+    int start = offset_of(v, base);
+    int stride = run_stride(v);
+    float top = row_max(a, v, base, n, partial, &shared, t, threads);
+    float total;
+    ROW_SUM(total, float e = expf(a[start + int(s) * stride] - top); dst[base + s] = e; acc = acc + e;)
+    OWN_ELEMENTS(dst[base + s] = dst[base + s] / total;)
+}
+
+extern "C" __global__ void log_softmax_f32(const float* a, float* dst, View v, unsigned int n) {
+    __shared__ float partial[REDUCE_THREADS];
+    __shared__ float shared;
+    unsigned int row = blockIdx.x, t = threadIdx.x, threads = blockDim.x;
+    unsigned int base = row * n;
+    int start = offset_of(v, base);
+    int stride = run_stride(v);
+    float top = row_max(a, v, base, n, partial, &shared, t, threads);
+    float total;
+    ROW_SUM(total, float shifted = a[start + int(s) * stride] - top; dst[base + s] = shifted; acc = acc + expf(shifted);)
+    float log_total = logf(total);
+    OWN_ELEMENTS(dst[base + s] = dst[base + s] - log_total;)
+}
+
+extern "C" __global__ void layernorm_f32(const float* a, const float* w, const float* b, float* dst,
+                                         View v, View vw, View vb, unsigned int n, float epsilon) {
+    __shared__ float partial[REDUCE_THREADS];
+    __shared__ float shared;
+    unsigned int row = blockIdx.x, t = threadIdx.x, threads = blockDim.x;
+    unsigned int base = row * n;
+    int start = offset_of(v, base);
+    int stride = run_stride(v);
+    int wstart = offset_of(vw, base);
+    int bstart = offset_of(vb, base);
+    float count = float(n);
+    float total;
+    ROW_SUM(total, acc = acc + a[start + int(s) * stride];)
+    float mean = total / count;
+    float squares;
+    ROW_SUM(squares, float centred = a[start + int(s) * stride] - mean; dst[base + s] = centred; float sq = centred * centred; acc = acc + sq;)
+    float variance = squares / count;
+    float deviation = sqrtf(variance + epsilon);
+    OWN_ELEMENTS(float scaled = dst[base + s] / deviation; float weighted = scaled * w[wstart + int(s) * run_stride(vw)]; dst[base + s] = weighted + b[bstart + int(s) * run_stride(vb)];)
 }

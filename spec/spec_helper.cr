@@ -78,7 +78,5 @@ def check_gradients(shapes : Array(Array(Int32)), data : Array(Array(Float32))? 
   end
 end
 
-# Kernels used only by the specs, defined here so that every spec file sees them.
-Tensomite.kernel(:spec_axpb) { |x, a, b| x * a + b }
-Tensomite.kernel(:spec_mixed) { |x, y| (-x / (y * y + 1)).exp + (x * x + 1).log - (y * y + 1).sqrt }
-Tensomite.kernel(:spec_folded) { |x| x * (Math::PI / 2) - 1 / 3 }
+# Kernels used only by the specs, so that every spec file sees them.
+require "./support/kernels"
