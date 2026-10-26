@@ -52,7 +52,7 @@ Step                                   |Linux|macOS
 `crystal spec --release`               |yes  |yes  
 Type-check `bench/`, `examples/`       |yes  |yes  
 Cross-compile the Metal path           |yes  |     
-CUDA compiler specs (NVRTC, no GPU)    |yes  |     
+CUDA specs on the host stub            |yes  |     
 Formatting check                       |yes  |     
 `bin/ameba src/ spec/ bench/ examples/`|yes  |     
 
@@ -233,7 +233,16 @@ crystal spec -Dcuda spec/cuda_spec.cr
 
 `examples/cuda_info.cr` prints the driver's and NVRTC's versions and every GPU, then squares a million floats on the first one, which checks compilation, loading, transfers and launches together.
 
-**Without a GPU,** `scripts/cuda_stub/setup.sh DIR` installs NVRTC from PyPI into `DIR` and builds a stand-in `libcuda` whose every call fails with `CUDA_ERROR_NO_DEVICE`. With `LIBRARY_PATH` and `LD_LIBRARY_PATH` set to `DIR`, the compiler specs run for real and the GPU specs are pending. CI does this on Linux, so every kernel's CUDA C++ is compiled on every PR; running kernels needs a machine with an NVIDIA GPU.
+**Without a GPU,** `scripts/cuda_stub/setup.sh DIR` installs NVRTC from PyPI into `DIR` and builds a stand-in `libcuda` (`scripts/cuda_stub/libcuda.c`): one "GPU", named `tensomite host stub`, whose memory is host memory and which runs no kernels. With `LIBRARY_PATH` and `LD_LIBRARY_PATH` set to `DIR`, the compiler specs run, the `CUDA` device runs on host kernels and transfers, and specs that run CUDA kernels are pending:
+
+```sh
+dir=$(scripts/cuda_stub/setup.sh /tmp/tensomite-cuda | tail -1)
+LIBRARY_PATH=$dir LD_LIBRARY_PATH=$dir crystal spec -Dcuda
+```
+
+CI does this on Linux for `cuda_spec`, `gpu_spec`, `device_spec` and `gpt2_spec`. Running CUDA kernels needs a machine with an NVIDIA GPU.
+
+**Errors from kernels arrive late.** `cuLaunchKernel` only queues a kernel, so a fault inside it is reported by the next call that waits for the GPU, such as a download. To find which kernel failed, call `context.synchronize` after each launch.
 
 **Kernels are compiled with `--fmad=false`** (Decision AU), so `a * b + c` is a multiply and an add, each rounded, as on the host. A spec checks the PTX for it.
 

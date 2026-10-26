@@ -4,7 +4,7 @@ What the next session, or the next person, needs in order to carry on without th
 
 **Keeping it current.** Rewrite it rather than appending to it: at the end of each PR, and whenever a session's context passes about 70%. Anything that belongs in one of the other three documents goes there instead.
 
-*Last rewritten: 25 Oct 2026, with M8 part 1 open.*
+*Last rewritten: 26 Oct 2026, with M8 part 2 open.*
 
 ## Where things stand
 
@@ -15,8 +15,8 @@ What the next session, or the next person, needs in order to carry on without th
   - macro kernels match their oracles and their gradients pass finite differences;
   - Shakespeare reached 1.573 nats/char in 20 minutes in the Linux container.
 - **M7b's exit, met** (evidence under 7b in `PLAN.md`): the tutorial, Shakespeare and GPT-2 models on modules with the same bits as the hand-written ones, on every device; the `Builder` chosen as the DSL (Decisions AN and AR).
-- **Open PR:** M8 part 1 on `m8-cuda-probe`: CUDA bindings (`libcuda`, `libnvrtc`), `examples/cuda_info.cr`, and NVRTC specs that CI runs without a GPU. It contains `m7b-close`, which closes M7b in the documents.
-- **Now: M8, a CUDA backend** (Decisions AS–AV in `PLAN.md`; Vulkan moved to M12). Development is on the maintainer's DGX Spark, the exit on a cloud T4. Nothing in the container runs CUDA kernels: the maintainer runs them on the Spark, as with Metal on the Mac. Next is part 2, the `CUDA` device.
+- **Open PR:** M8 part 2 on `m8-cuda-device`: the `CUDA` device, with host kernels on host copies of device memory, and a stand-in driver that lets CI run it. Part 1 (bindings, NVRTC, `examples/cuda_info.cr`) is merged, and ran correctly on the Spark.
+- **Now: M8, a CUDA backend** (Decisions AS–AV in `PLAN.md`; Vulkan moved to M12). Development is on the maintainer's DGX Spark, the exit on a cloud T4. Nothing in the container runs CUDA kernels: the maintainer runs them on the Spark, as with Metal on the Mac. The container and CI do run the `CUDA` device itself, on `scripts/cuda_stub`'s stand-in driver. Next is part 3, the elementwise and reduction kernels.
 - **A long-term goal:** inspecting running models (activations, attention, gradients) by the names of their parts; see "Inspectable" in `PLAN.md` and "Towards inspection" in `DESIGN.md`. Scopes are its first piece, and Decision AA must keep inspected nodes alive.
 - **Deferred:** Decision D, CPU threads (not needed for M7's exits). Decision AA, releasing buffers as soon as their last reader has run.
 
@@ -31,7 +31,7 @@ Merging             |The maintainer merges, by squash or by merge commit. After 
 Milestones          |Each ends with its exit criterion passing, with the evidence (numbers, logs) in the PR description.                                                                                                                                                                  
 Documents           |Updated in the same PR as the code (see "Workflow" in `DEVELOPMENT.md`), `GUIDE.md` included whenever the public API changes. Tables and diagrams follow "Documents" in `DEVELOPMENT.md`; check them with `scripts/format_tables.py` and `scripts/check_diagrams.sh`.
 Decisions           |Labelled with letters and recorded in `PLAN.md`. The next is **AW**; T to AG shape M7, AH to AR shape M7b, and AS to AV shape M8. P (how to get GPT-2 small's fixtures) was settled by allowing Hugging Face; Q made this document committed.                        
-Understanding checks|Short questions labelled Q-A, Q-B and so on, after explaining something new. The next is **Q-AI**; Q-T to Q-AH are recent.                                                                                                                                           
+Understanding checks|Short questions labelled Q-A, Q-B and so on, after explaining something new. The next is **Q-AJ**; Q-T to Q-AI are recent.                                                                                                                                           
 Claims              |Measured before stated. Several assumptions were wrong when checked: decode time was dominated by the KV cache, not host kernels; GPT-2's file was unaligned. Say "I think" when something is unverified.                                                            
 
 ## Follow-ups found on the way

@@ -12,9 +12,76 @@ require "./cuda/lib"
 #
 #     LIBRARY_PATH=/usr/local/cuda-13.1/targets/sbsa-linux/lib crystal build -Dcuda app.cr
 module Tensomite
-  # NVIDIA GPUs through CUDA's driver API, with kernels compiled from CUDA C++ by
-  # NVRTC when they are first needed.
-  class CUDA
+  # A buffer in a CUDA GPU's memory, with a host copy made when a host kernel
+  # needs one.
+  #
+  # Device memory always holds the current data. The host copy is valid until
+  # the device memory is written again: by an upload, or, once ops have CUDA
+  # kernels, by a kernel.
+  class CUDABuffer < HostBuffer
+    # The device memory.
+    getter pointer : LibCUDA::DevicePtr
+    @copy : Bytes? = nil
+    @copy_valid = false
+    # :nodoc:
+    property? writing = false
+
+    def initialize(device : CUDA, @pointer : LibCUDA::DevicePtr, bytesize : Int32)
+      super(device, bytesize, Bytes.empty)
+    end
+
+    # Returns the host copy, current: downloaded when the device memory has
+    # changed since, except while a host kernel writes this buffer.
+    def bytes : Bytes
+      copy = @copy ||= cuda.host_bytes(bytesize)
+      unless @copy_valid || writing?
+        cuda.context.download(pointer, copy) unless bytesize == 0
+        @copy_valid = true
+      end
+      copy
+    end
+
+    # Returns the host copy if it is current, otherwise `nil`.
+    def current_copy : Bytes?
+      @copy if @copy_valid
+    end
+
+    # Notes that the device memory was written, so the host copy is stale.
+    def device_written : Nil
+      @copy_valid = false
+    end
+
+    # Uploads the host copy, which a host kernel has just written.
+    def host_written : Nil
+      copy = @copy || raise DeviceError.new("no host copy to upload")
+      cuda.context.upload(pointer, copy) unless bytesize == 0
+      @copy_valid = true
+    end
+
+    # Gives the host copy to the device's host pool and the device memory to the
+    # device, which reuses or frees it.
+    def finalize
+      @copy.try { |copy| cuda.recycle(copy) }
+      cuda.retire(pointer, bytesize)
+    end
+
+    private def cuda : CUDA
+      device.as(CUDA)
+    end
+  end
+
+  # An NVIDIA GPU through CUDA's driver API, with kernels compiled from CUDA C++
+  # by NVRTC when they are first needed.
+  #
+  # Memory is the GPU's own: `#map` returns `nil`, and data moves through
+  # `#upload` and `#download`, even on a GPU that shares memory with the CPU,
+  # so one code path serves both (Decision AS). An op without a CUDA kernel runs
+  # the host kernel: its sources are downloaded to host copies, and its output
+  # is computed there and uploaded. Results are then the host's, bit for bit.
+  #
+  # Work is issued from the thread that created the device, on which its context
+  # is current.
+  class CUDA < HostDevice
     # Raised when NVRTC rejects a kernel's source; the message holds its log.
     class CompileError < DeviceError; end
 
@@ -28,6 +95,125 @@ module Tensomite
     end
 
     @@initialised : Bool? = nil
+
+    # Returns the device on the first GPU; raises `DeviceError` if there is none.
+    class_getter default : CUDA { CUDA.new(CUDA.gpus.first? || raise DeviceError.new("no CUDA GPU")) }
+
+    getter gpu : GPU
+    getter context : Context
+
+    # Freed device memory kept for reuse; see `BufferPool`. Holds up to 1 GiB by
+    # default. (`#pool`, inherited, holds host copies.)
+    getter buffer_pool = BufferPool(LibCUDA::DevicePtr).new(1_i64 << 30)
+
+    # Returns the number of uploads since creation.
+    getter uploads = 0
+
+    # Returns the number of downloads since creation.
+    getter downloads = 0
+
+    @retired = [] of {LibCUDA::DevicePtr, Int32}
+    @retired_lock = Atomic(Bool).new(false)
+
+    def initialize(@gpu : GPU)
+      @context = Context.new(gpu)
+    end
+
+    # The GPU's name, such as `NVIDIA GB10`.
+    def name : String
+      gpu.name
+    end
+
+    # Returns a buffer of *bytesize* bytes of device memory, from the pool when
+    # one is free.
+    def alloc(bytesize : Int32) : Buffer
+      recycle_retired
+      pointer = buffer_pool.take(bytesize) || context.alloc(Math.max(bytesize, 4))
+      CUDABuffer.new(self, pointer, bytesize)
+    end
+
+    def map(buffer : Buffer) : Bytes?
+      cuda(buffer)
+      nil
+    end
+
+    def upload(buffer : Buffer, data : Bytes) : Nil
+      target = cuda(buffer)
+      @uploads += 1
+      context.upload(target.pointer, data) unless data.empty?
+      target.device_written
+    end
+
+    def download(buffer : Buffer, data : Bytes) : Nil
+      source = cuda(buffer)
+      @downloads += 1
+      if copy = source.current_copy
+        copy[0, data.size].copy_to(data)
+      elsif !data.empty?
+        context.download(source.pointer, data)
+      end
+    end
+
+    # Copies *bytes* to a new buffer in device memory; a file mapping cannot be
+    # shared with the GPU.
+    def adopt(bytes : Bytes, owner : MappedFile) : Buffer
+      alloc(bytes.size).tap { |buffer| upload(buffer, bytes) }
+    end
+
+    # Runs the host kernel for *node* on host copies of its sources, and uploads
+    # its output.
+    def execute(node : Node, output : Buffer) : Nil
+      target = cuda(output)
+      target.writing = true
+      begin
+        super
+      ensure
+        target.writing = false
+      end
+      target.host_written
+    end
+
+    # Waits for the GPU, and reuses or frees memory given back meanwhile.
+    def sync : Nil
+      context.synchronize
+      recycle_retired
+    end
+
+    # :nodoc:
+    def host_bytes(bytesize : Int32) : Bytes
+      pool.take(bytesize) || Bytes.new(bytesize)
+    end
+
+    # Takes back the device memory of a collected buffer. Finalizers run on any
+    # thread and must never wait, so when the list is busy the memory is freed
+    # at once instead, which needs this context current on that thread.
+    protected def retire(pointer : LibCUDA::DevicePtr, bytesize : Int32) : Nil
+      unless @retired_lock.compare_and_set(false, true)[1]
+        context.free_from_any_thread(pointer)
+        return
+      end
+      begin
+        @retired << {pointer, bytesize}
+      ensure
+        @retired_lock.set(false)
+      end
+    end
+
+    # Moves retired device memory into the pool, freeing what it cannot hold.
+    private def recycle_retired : Nil
+      return if @retired.empty?
+      fresh = [] of {LibCUDA::DevicePtr, Int32}
+      until @retired_lock.compare_and_set(false, true)[1]
+        Thread.yield
+      end
+      retired, @retired = @retired, fresh
+      @retired_lock.set(false)
+      retired.each { |(pointer, bytesize)| context.free(pointer) unless buffer_pool.give(pointer, bytesize) }
+    end
+
+    private def cuda(buffer : Buffer) : CUDABuffer
+      own(buffer).as?(CUDABuffer) || raise DeviceError.new("buffer is not a CUDA buffer")
+    end
 
     # Returns whether the driver has started and found at least one GPU.
     def self.available? : Bool
@@ -168,6 +354,12 @@ module Tensomite
 
       def free(pointer : LibCUDA::DevicePtr) : Nil
         CUDA.check LibCUDA.cuMemFree_v2(pointer), "cuMemFree"
+      end
+
+      # Frees *pointer* from any thread, such as a finalizer's, without raising.
+      def free_from_any_thread(pointer : LibCUDA::DevicePtr) : Nil
+        LibCUDA.cuCtxSetCurrent(@context)
+        LibCUDA.cuMemFree_v2(pointer)
       end
 
       # Copies *bytes* from the host to device memory at *pointer*.

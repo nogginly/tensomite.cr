@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Prepares DIR (default /tmp/tensomite-cuda) so that `-Dcuda` builds link and
-# NVRTC runs on a machine with no NVIDIA driver: NVRTC from PyPI, and a stand-in
-# libcuda whose every call fails with CUDA_ERROR_NO_DEVICE. Then:
+# run on a machine with no NVIDIA driver: NVRTC from PyPI, and a stand-in
+# libcuda whose one "GPU" uses host memory and runs no kernels (libcuda.c). Then:
 #
 #     LIBRARY_PATH=DIR LD_LIBRARY_PATH=DIR crystal spec -Dcuda spec/cuda_spec.cr
 #
-# The compiler specs run for real; the ones that need a GPU are pending.
+# The compiler specs run for real, and so does the CUDA device, on host kernels
+# and transfers; specs that run CUDA kernels are pending.
 set -euo pipefail
 dir="${1:-/tmp/tensomite-cuda}"
 mkdir -p "$dir"
