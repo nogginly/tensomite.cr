@@ -4,7 +4,7 @@ What the next session, or the next person, needs in order to carry on without th
 
 **Keeping it current.** Rewrite it rather than appending to it: at the end of each PR, and whenever a session's context passes about 70%. Anything that belongs in one of the other three documents goes there instead.
 
-*Last rewritten: 27 Oct 2026, with a per-op CUDA profile and a preallocated KV cache open.*
+*Last rewritten: 27 Oct 2026, with a preallocated KV cache open.*
 
 ## Where things stand
 
@@ -15,7 +15,7 @@ What the next session, or the next person, needs in order to carry on without th
   - macro kernels match their oracles and their gradients pass finite differences;
   - Shakespeare reached 1.573 nats/char in 20 minutes in the Linux container.
 - **M7b's exit, met** (evidence under 7b in `PLAN.md`): the tutorial, Shakespeare and GPT-2 models on modules with the same bits as the hand-written ones, on every device; the `Builder` chosen as the DSL (Decisions AN and AR).
-- **Open PRs:** the CUDA profile by op (`m8-cuda-profile-ops`, Decisions AZ and BA), and the preallocated KV cache (`m8-kv-cache`, Decision BB): `Tensor#write`, the one op that writes in place, and `CausalSelfAttention::Cache.new(capacity:)`, which `GPT2#new_cache` uses, with logits bit-identical to before on every device. Merged: parts 1 to 4, the profiler (Decision AW) and the two-pass decode matmul (Decisions AX, AY), with which `Auto` decodes at 211 tokens/s on the GB10, from 171.
+- **Open PR:** the preallocated KV cache (`m8-kv-cache`, Decision BB): `Tensor#write`, the one op that writes in place, and `CausalSelfAttention::Cache.new(capacity:)`, which `GPT2#new_cache` uses, with logits bit-identical to before on every device. Merged: parts 1 to 4, the profiler (Decision AW), the two-pass decode matmul (Decisions AX, AY), with which `Auto` decodes at 211 tokens/s on the GB10, from 171, and the profile by op (Decisions AZ, BA), which put the cache's `Cat` at 11% of a decoded token's GPU time.
 - **Now: M8, a CUDA backend** (Decisions AS–AV in `PLAN.md`; Vulkan moved to M12). Development is on the maintainer's DGX Spark, the exit on a cloud T4. Nothing in the container runs CUDA kernels: the maintainer runs them on the Spark, as with Metal on the Mac. The container and CI run the `CUDA` device and its kernels on `scripts/cuda_stub`, which compiles `kernels.cu` as host C++. Next: measure the KV cache on the GB10, then a few-row kernel for contiguous weights (Decision BB), then part 5, the Shakespeare trainer on CUDA and the exit runs on the Spark and a T4.
 - **A long-term goal:** inspecting running models (activations, attention, gradients) by the names of their parts; see "Inspectable" in `PLAN.md` and "Towards inspection" in `DESIGN.md`. Scopes are its first piece, and Decision AA must keep inspected nodes alive.
 - **Deferred:** Decision D, CPU threads (not needed for M7's exits). Decision AA, releasing buffers as soon as their last reader has run.
