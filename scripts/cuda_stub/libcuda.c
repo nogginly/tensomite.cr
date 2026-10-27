@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 typedef int CUresult;
 typedef uint64_t CUdeviceptr;
@@ -77,6 +78,28 @@ CUresult cuMemcpyHtoD_v2(CUdeviceptr destination, const void *source, size_t byt
 
 CUresult cuMemcpyDtoH_v2(void *destination, CUdeviceptr source, size_t bytes) {
   memcpy(destination, (const void *)(uintptr_t)source, bytes);
+  return SUCCESS;
+}
+
+/* Events hold the host's clock when recorded, since kernels run synchronously. */
+CUresult cuEventCreate(void **event, unsigned flags) {
+  *event = calloc(1, sizeof(double));
+  return *event ? SUCCESS : OUT_OF_MEMORY;
+}
+
+CUresult cuEventDestroy_v2(void *event) { free(event); return SUCCESS; }
+
+CUresult cuEventRecord(void *event, void *stream) {
+  struct timespec now;
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  *(double *)event = now.tv_sec * 1e3 + now.tv_nsec / 1e6;
+  return SUCCESS;
+}
+
+CUresult cuEventSynchronize(void *event) { return SUCCESS; }
+
+CUresult cuEventElapsedTime(float *milliseconds, void *start, void *stop) {
+  *milliseconds = (float)(*(double *)stop - *(double *)start);
   return SUCCESS;
 }
 

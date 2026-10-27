@@ -196,6 +196,20 @@ require "./spec_helper"
         Tensor.from(padded, [1, 500], cuda).softmax.to_a(Float32)[0, 300].should eq short
       end
 
+      it "profiles launches, transfers and GPU time per op" do
+        a = Tensor.from(f32(1, 2, 3, 4), [2, 2], cuda)
+        profile = CUDA::Profile.new(per_kernel: true, shapes: true)
+        cuda.profile = profile
+        # (a + 1) * a = [2, 6, 12, 20], which sums to 40.
+        ((a + 1) * a).sum.to_a(Float32).should eq f32(40)
+        (Tensor.from([1], [1], cuda) + Tensor.from([2], [1], cuda)).realize
+        cuda.profile = nil
+        profile.launches.should eq 3
+        profile.kernels.keys.should eq ["Add [2,2]", "Mul [2,2]", "Sum []"]
+        profile.host_ops.keys.should eq ["Add I32"]
+        {profile.uploads, profile.downloads}.should eq({3, 1})
+      end
+
       it "runs GPT-2's ops on the GPU, kernels and row ops included" do
         model = GPT2.load("#{__DIR__}/fixtures/tiny_gpt2/model.safetensors", heads: 4, device: cuda)
         host = cuda.host_ops

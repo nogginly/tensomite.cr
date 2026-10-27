@@ -35,6 +35,12 @@ module Tensomite
     fun cuModuleLoadData(module : Void**, image : Void*) : Result
     fun cuModuleUnload(module : Void*) : Result
     fun cuModuleGetFunction(function : Void**, module : Void*, name : UInt8*) : Result
+    fun cuEventCreate(event : Void**, flags : UInt32) : Result
+    fun cuEventDestroy_v2(event : Void*) : Result
+    fun cuEventRecord(event : Void*, stream : Void*) : Result
+    fun cuEventSynchronize(event : Void*) : Result
+    fun cuEventElapsedTime(milliseconds : Float32*, start : Void*, stop : Void*) : Result
+
     fun cuLaunchKernel(function : Void*, grid_x : UInt32, grid_y : UInt32, grid_z : UInt32,
                        block_x : UInt32, block_y : UInt32, block_z : UInt32, shared_bytes : UInt32,
                        stream : Void*, params : Void**, extra : Void**) : Result

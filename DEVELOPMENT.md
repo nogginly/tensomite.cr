@@ -246,7 +246,7 @@ crystal spec -Dcuda
 
 The `CUDA` device then compiles its kernels with NVRTC, as on a GPU, and the stub runs them on the host, so `gpu_spec` compares every kernel with the CPU. Without `TENSOMITE_CUDA_KERNELS`, the stub cannot load modules and the device runs every op on host kernels. Specs that load PTX of their own need a real GPU. CI runs `cuda_spec`, `gpu_spec`, `device_spec` and `gpt2_spec` this way on Linux. A new kernel needs nothing more: `register.py` finds it, and marks one with `__shared__` memory to run its threads as OS threads, since it may wait at `__syncthreads`.
 
-`bench/gpt2.cr` and `bench/gpt2_digest.cr` add CUDA when built with `-Dcuda`: `crystal run --release -Dcuda bench/gpt2.cr -- models/gpt2/model.safetensors`.
+`bench/gpt2.cr` and `bench/gpt2_digest.cr` add CUDA when built with `-Dcuda`: `crystal run --release -Dcuda bench/gpt2.cr -- models/gpt2/model.safetensors`. `bench/profile_gpt2_cuda.cr` breaks a decoded token or a prefill down into launching, allocating, copying, waiting and host ops, then times each op on the GPU alone with CUDA events (`CUDA::Profile`); on the stub its times are the emulator's, not a GPU's.
 
 **Errors from kernels arrive late.** `cuLaunchKernel` only queues a kernel, so a fault inside it is reported by the next call that waits for the GPU, such as a download. To find which kernel failed, call `context.synchronize` after each launch.
 

@@ -202,6 +202,7 @@ Met (25 Oct 2026, the Linux container and the M5 Pro):
 - **Decision AT, the first Linux GPU backend:** CUDA, ahead of Vulkan (decided). Both machines are NVIDIA's and already run CUDA, while the Spark's compute-only driver lacks Vulkan's part (`libnvidia-gl`). AMD and Intel GPUs wait for Vulkan, M12.
 - **Decision AU, how CUDA kernels are compiled:** by NVRTC when first used, as Metal compiles MSL (decided). Building needs no CUDA toolkit, running needs `libnvrtc` beside the driver, and CI compiles every kernel without a GPU. Kernels are compiled with `--fmad=false`, so `a * b + c` rounds as on the host. PTX is built for the newest architecture NVRTC knows at or below the GPU's, and the driver compiles it for the GPU.
 - **Decision AV, how the CUDA libraries are reached:** linked at build time behind `-Dcuda` (decided), as BLAS and Metal are, rather than loaded with `dlopen`. A program is built for the machine it runs on; one built with `-Dcuda` needs the driver and NVRTC to start.
+- **Decision AW, CUDA's decode speed:** profile before changing anything, then fix the largest cost (decided). On the GB10, GPT-2 small decodes at 171 tokens/s, about three times the floor its memory bandwidth sets, as Metal on the M5 Pro does; the suspects are host overhead per launch, the output head reading its weights through a transpose, and small synchronous copies each token. The preallocated KV cache is a separate change, for every device.
 
 ## Risks
 
