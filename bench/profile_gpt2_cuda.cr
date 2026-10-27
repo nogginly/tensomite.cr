@@ -10,7 +10,7 @@
 #    (graph building and scheduling).
 # 2. Per kernel: each op timed on the GPU alone between two events, which slows
 #    the wall time but shows the GPU time per op. A prefill's ops are listed by
-#    shape.
+#    shape, first by op whatever the shape, then by op and shape.
 #
 # The GPU time of the second run, against the wall time of the first, shows how
 # much of a token the GPU spends working, and how much waiting for the host.
@@ -76,8 +76,23 @@ normal.host_ops.each { |name, (count, seconds)| puts "host op #{name}: #{count /
 timed = CUDA::Profile.new(per_kernel: true, shapes: true)
 run(model, cuda, timed, prefill)
 gpu = timed.kernels.values.sum(&.[1])
+per_run = ->(count : Int32) { "%.1f" % (count / runs) }
 puts
-puts "GPU time per #{unit}, each op timed alone (total #{ms.call(gpu)} ms, #{(gpu / wall * 100).round}% of the first run's wall time):"
+puts "GPU time per #{unit}, each op timed alone (total #{ms.call(gpu)} ms, #{(gpu / wall * 100).round}% of the first run's wall time), by op:"
+puts
+puts "op|count|GPU ms|share"
+puts "--|-----|------|-----"
+by_op = Hash(String, {Int32, Float64}).new({0, 0.0})
+timed.kernels.each do |name, (count, seconds)|
+  op = name.split(' ', 2).first
+  total = by_op[op]
+  by_op[op] = {total[0] + count, total[1] + seconds}
+end
+by_op.to_a.sort_by { |(_, (_, seconds))| -seconds }.each do |op, (count, seconds)|
+  puts "#{op}|#{per_run.call(count)}|#{ms.call(seconds)}|#{(seconds / gpu * 100).round}%"
+end
+puts
+puts "By op and shape, the 20 largest:"
 puts
 puts "op|count|GPU ms|share|GB/s or GFLOP/s"
 puts "--|-----|------|-----|---------------"
@@ -92,5 +107,5 @@ timed.kernels.to_a.sort_by { |(_, (_, seconds))| -seconds }.first(20).each do |n
              "%.1f GFLOP/s" % (2.0 * a.product(1) * b.last * count / seconds / 1e9)
            end
   end
-  puts "#{name}|#{count // runs}|#{ms.call(seconds)}|#{(seconds / gpu * 100).round}%|#{rate}"
+  puts "#{name}|#{per_run.call(count)}|#{ms.call(seconds)}|#{(seconds / gpu * 100).round}%|#{rate}"
 end
