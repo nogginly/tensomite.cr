@@ -177,6 +177,13 @@ require "./spec_helper"
         end
       end
 
+      it "gives split's bits in two passes, with few rows or many, batched and transposed" do
+        (shapes + [{[1, 768], [300, 768], true}, {[2, 3, 1, 129], [2, 3, 129, 200], false}, {[1, 0], [0, 5], false}]).each do |(a_shape, b_shape, b_transposed)|
+          split = tiled_product.call(CUDA::MatMulMode::Split, CUDA::MatMulTile::T64x64, a_shape, b_shape, b_transposed)
+          tiled_product.call(CUDA::MatMulMode::TwoPass, CUDA::MatMulTile::T64x64, a_shape, b_shape, b_transposed).should eq split
+        end
+      end
+
       it "gives a tiled prefill the bits of a decode" do
         model = GPT2.load("#{__DIR__}/fixtures/tiny_gpt2/model.safetensors", heads: 4, device: cuda)
         ids = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200]

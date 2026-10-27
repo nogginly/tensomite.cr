@@ -128,6 +128,7 @@ Met (25 Oct 2026, the Linux container and the M5 Pro):
    2. The `CUDA` device: buffers, transfers, a stream, and the device specs `SimDiscrete` and `Metal` pass, with ops not yet ported run on the host. Done without a stream, which arrives with the first kernels, since host ops are synchronous; CI runs the device on a stand-in driver in host memory.
    3. Elementwise and reduction kernels, ported from the MSL ones, matching the oracle. With them, the stub runs the kernels compiled as host C++, so CI compares each with the CPU.
    4. Matmul, split and tiled, in split-K's order, so prefill and decode stay bit-identical; fused row ops; kernel macros emitting CUDA C++. With them, GPT-2's forward pass runs no host ops on CUDA.
+   - Profiling decode (Decision AW), then a two-pass matmul for decode (Decision AX).
    5. GPT-2 and the Shakespeare trainer on CUDA; the exit runs on the Spark and a T4.
    - Exit: the full op suite matches the oracle on a discrete GPU (a T4), GPT-2 runs there and on the Spark, and prefill equals decode bit for bit on both.
 9. **Quantisation.** Add `F16`, block dtypes, a GGUF loader, and Q8_0/Q4_0 matmul kernels for CPU, Metal and CUDA.
@@ -203,6 +204,7 @@ Met (25 Oct 2026, the Linux container and the M5 Pro):
 - **Decision AU, how CUDA kernels are compiled:** by NVRTC when first used, as Metal compiles MSL (decided). Building needs no CUDA toolkit, running needs `libnvrtc` beside the driver, and CI compiles every kernel without a GPU. Kernels are compiled with `--fmad=false`, so `a * b + c` rounds as on the host. PTX is built for the newest architecture NVRTC knows at or below the GPU's, and the driver compiles it for the GPU.
 - **Decision AV, how the CUDA libraries are reached:** linked at build time behind `-Dcuda` (decided), as BLAS and Metal are, rather than loaded with `dlopen`. A program is built for the machine it runs on; one built with `-Dcuda` needs the driver and NVRTC to start.
 - **Decision AW, CUDA's decode speed:** profile before changing anything, then fix the largest cost (decided). On the GB10, GPT-2 small decodes at 171 tokens/s, about three times the floor its memory bandwidth sets, as Metal on the M5 Pro does; the suspects are host overhead per launch, the output head reading its weights through a transpose, and small synchronous copies each token. The preallocated KV cache is a separate change, for every device.
+- **Decision AX, the first decode fix:** a two-pass matmul for products of fewer than 16 rows, bit-identical to `Split` (decided). The profile put 3.8 of a decoded token's 6.4 ms in matmuls reading weights at about 129 GB/s, the output head at 94: `Split` launches too few blocks for one row and reads the transposed head across its rows. The first pass sums each chunk of 64 along `k` in its own block, with the weights staged in shared memory along their contiguous axis; the second adds the chunk sums in chunk order. Estimated, not measured: about 4.8 ms a token, 210 tokens/s.
 
 ## Risks
 

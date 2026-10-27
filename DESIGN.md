@@ -1066,6 +1066,26 @@ CUDA, `Auto` (default)|**4,587**                     |**170.7**       |**6**
 - **`Auto` takes the best of both,** as on Metal: tiled products prefill nearly ten times faster than split ones, and split products decode 1.6 times faster than tiled ones.
 - **Decode has room to grow.** A decoded token takes 5.9 ms; `bench/profile_gpt2_cuda.cr` shows where it goes. Reading GPT-2 small's 0.5 GB of `F32` weights once at the GB10's memory bandwidth would take about 2 ms, I think, so most of the time is elsewhere: about 316 launches a token, the logits copied back to the host, and a KV cache that `Cat` copies whole every token.
 
+**Where a decoded token goes on the GB10** (Decision AW; `bench/profile_gpt2_cuda.cr`, part 4's kernels):
+
+Cost                         |ms per token
+-----------------------------|------------
+wall                         |6.38        
+GPU time, every kernel       |5.63        
+matmuls, 493 MB of weights   |3.83        
+the output head alone        |1.64        
+launching (316 launches)     |0.94        
+allocating                   |1.04        
+copying                      |0.03        
+
+- **Decode is GPU-bound, and the matmuls are most of it.** They read weights at about 129 GB/s; the output head, `[1,768]·[768,50257]`, at 94.
+- **`Split` has too few blocks for one row.** It launches one per 32 output columns, so the 768-column products get 24 blocks, and every block walks all of `k`.
+- **The head reads across its weights.** Its `b` is the token embedding transposed, so `k` is contiguous in memory and neighbouring columns are 768 floats apart. `Split`'s neighbouring threads read neighbouring columns, so no two reads share a transaction.
+
+**Two passes for few rows (Decision AX).** `TwoPass` cuts each product into blocks of 128 columns by one chunk of 64 along `k` (and 16 rows). Each block copies its chunk of `b` into shared memory along whichever axis is contiguous, then each thread sums its column's chunk in index order, as `Split` does, and stores the sum in scratch memory. A second kernel adds each output's chunk sums in chunk order from zero. The sums and their order are `Split`'s, so the bits are too; `Auto` now sends products of fewer than 16 rows here instead. The head becomes 393 × 12 blocks instead of 1,571 blocks each walking 768. The scratch is one buffer kept by the device, grown as needed (2.4 MB for the head): kernels run one after another, so each launch may reuse it. `spec/cuda_spec.cr` checks `TwoPass` against `Split` bit for bit, and a change to the order of the second pass fails it.
+
+Metal keeps `Split` at decode: its decode was not profiled for this, and the fix there would be the same.
+
 **Training step in the Linux container through M7** (the 0.8M-param model, 30 steps, identical losses):
 
 Build                             |ms per step
