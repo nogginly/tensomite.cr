@@ -55,12 +55,18 @@ runs.each do |label, device, setup|
   end
   prefill = prefills.sort[repeats // 2]
 
-  cache = model.new_cache
-  model.forward(prompt, cache)
-
-  start = Time.instant
-  DECODE.times { |i| model.forward([i], cache) }
-  decode = (Time.instant - start).total_seconds
+  # Decode is the median of as many runs, each after a fresh prefill, with the
+  # previous runs' models collected first so that their finalizers do not land
+  # inside a timing.
+  GC.collect
+  decodes = Array.new(repeats) do
+    cache = model.new_cache
+    model.forward(prompt, cache)
+    start = Time.instant
+    DECODE.times { |i| model.forward([i], cache) }
+    (Time.instant - start).total_seconds
+  end
+  decode = decodes.sort[repeats // 2]
 
   puts "%s|%.1f|%.2f|%.0f" % {label, PROMPT / prefill, DECODE / decode, decode / DECODE * 1000}
 end
