@@ -1100,7 +1100,19 @@ attention out, `[1,768]·[768,768]`|126          |99             |0.286
 
 **`Auto` chooses by layout (Decision AY).** Below 16 rows it now uses `TwoPass` only when `b`'s columns are not contiguous, as in the head and attention's `q·kᵀ`, and `Split` otherwise. On the GB10 the profile gives 4.71 ms a decoded token, about 212 tokens/s, in 329 launches; attention out is back at `Split`'s 126 GB/s. qkv stayed at 149 GB/s under `Split`, against 171 in part 4's profile, so some of the earlier gap between the two was run-to-run variation.
 
-**Timing decode.** Until this change `bench/gpt2.cr` timed decode once, 32 tokens, straight after loading each device's model. One such run put `Auto` at 169 tokens/s and `TwoPass`, which `Auto` mostly matches, at 206, while the profile put `Auto` at 212. I think the collector, finalizing the models of earlier runs, landed inside that timing. Decode is now the median of five runs, after a `GC.collect`, as prefill already was.
+**Timing decode.** Until this change `bench/gpt2.cr` timed decode once, 32 tokens, straight after loading each device's model. One such run put `Auto` at 169 tokens/s and `TwoPass`, which `Auto` mostly matches, at 206, while the profile put `Auto` at 212. I think the collector, finalizing the models of earlier runs, landed inside that timing. Decode is now the median of five runs, after a `GC.collect`, as prefill already was. Rerun that way on the GB10:
+
+Device                |Prefill of 64 tokens, tokens/s|Decode, tokens/s|ms per decoded token
+----------------------|------------------------------|----------------|--------------------
+`BLAS` (OpenBLAS)     |773                           |70.9            |14                  
+CUDA, `Serial`        |617                           |123.3           |8                   
+CUDA, `Split`         |445                           |178.5           |6                   
+CUDA, `Tiled`         |4,834                         |94.8            |11                  
+CUDA, `TwoPass`       |3,718                         |203.2           |5                   
+CUDA, `Auto` (default)|**4,585**                     |**211.4**       |**5**               
+
+- **`Auto` decodes at 211 tokens/s,** from part 4's 171, and agrees with the profile's 212. It beats `TwoPass` alone by keeping `Split` where `b`'s columns are contiguous.
+- **What remains** is mostly outside the matmuls: about 1.2 ms of small ops (adds, layer norms, copies) and 0.7 ms of launching 329 kernels a token.
 
 Metal keeps `Split` at decode: its decode was not profiled for this, and the fix there would be the same.
 
