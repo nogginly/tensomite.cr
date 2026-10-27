@@ -1051,6 +1051,21 @@ Metal, `Auto` (default)|**3,684**                     |**186.1**
 - **A decoded token takes 5.07 ms** of wall time, 4.77 ms of it GPU work, in 316 dispatches and 5 command buffers.
 - **`Tiled` alone decodes slowly** (66 tokens/s), because one row fills a sixty-fourth of a block; `Auto` sends such products to `Split`. The spread between `Split`, `Atomic` and `Auto` at decode, 186 to 199 tokens/s, is mostly run-to-run noise: they run the same kernels there.
 
+**CUDA on the DGX Spark** (GB10, M8 part 4; `bench/gpt2.cr` with `-Dcuda`, prefill timed warm as the median of five):
+
+Device                |Prefill of 64 tokens, tokens/s|Decode, tokens/s|ms per decoded token
+----------------------|------------------------------|----------------|--------------------
+CPU oracle            |8.2                           |7.21            |139                 
+`BLAS` (OpenBLAS)     |836                           |67.2            |15                  
+CUDA, `Serial`        |600                           |108.8           |9                   
+CUDA, `Split`         |447                           |154.3           |6                   
+CUDA, `Tiled`         |4,616                         |95.9            |10                  
+CUDA, `Auto` (default)|**4,587**                     |**170.7**       |**6**               
+
+- **CUDA leads on both counts:** 5.5 times `BLAS` at a 64-token prefill and 2.5 times at decode, with every op of the forward pass on the GPU.
+- **`Auto` takes the best of both,** as on Metal: tiled products prefill nearly ten times faster than split ones, and split products decode 1.6 times faster than tiled ones.
+- **Decode has room to grow.** A decoded token takes 5.9 ms. Reading GPT-2 small's 0.5 GB of `F32` weights once at the GB10's memory bandwidth would take about 2 ms, I think, so most of the time is elsewhere: about 316 launches a token, the logits copied back to the host, and a KV cache that `Cat` copies whole every token.
+
 **Training step in the Linux container through M7** (the 0.8M-param model, 30 steps, identical losses):
 
 Build                             |ms per step
