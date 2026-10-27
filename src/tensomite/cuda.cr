@@ -98,6 +98,9 @@ module Tensomite
     private COLS           =  32
     private SLICES         =   8
     private TILE_PATCH     =   4
+    private DECODE_COLS    = 128
+    private DECODE_ROWS    =  16
+    private CHUNK          =  64
 
     # How `MatMul` divides its work; the kernels are Metal's (see `Metal::MatMulMode`).
     enum MatMulMode
@@ -109,8 +112,14 @@ module Tensomite
       # Blocks of outputs per thread block, with tiles of both operands in shared
       # memory (`#matmul_tile`): bit-identical to `Split`.
       Tiled
-      # `Tiled` for products of at least `TILED_ROWS` rows, `Split` otherwise, as
-      # in decoding one token. Bit-identical to both. The default.
+      # Two kernels: blocks of columns per chunk of `k` writing each chunk's sum,
+      # then a thread per output adding them in chunk order. Bit-identical to
+      # `Split`, with many more blocks when there are few rows.
+      TwoPass
+      # `Tiled` for products of at least `TILED_ROWS` rows. Below that, as in
+      # decoding one token, `Split` when b's columns are contiguous in memory and
+      # `TwoPass` when they are not, as in a transposed b. Bit-identical to all
+      # three. The default.
       Auto
     end
 
@@ -253,6 +262,7 @@ module Tensomite
     @events : {Void*, Void*}? = nil
 
     @retired = [] of {LibCUDA::DevicePtr, Int32}
+    @scratch : CUDABuffer? = nil
     @retired_lock = Atomic(Bool).new(false)
     @kernels : Kernels? = nil
     @kernels_loaded = false
@@ -523,7 +533,9 @@ module Tensomite
     # `Split` launches one block per output row and block of `COLS` columns, with
     # `SLICES` threads per column, each summing chunks of `k`. `Tiled` launches
     # one block per `#matmul_tile` outputs of each batch matrix, with a thread per
-    # `TILE_PATCH` x `TILE_PATCH` patch.
+    # `TILE_PATCH` x `TILE_PATCH` patch. `TwoPass` launches one block per
+    # `DECODE_COLS` columns, chunk of `k` and `DECODE_ROWS` rows of each batch
+    # matrix, then one thread per output.
     private def launch_matmul(kernels : Kernels, node : Node, output : CUDABuffer) : Nil
       a, b = node.srcs
       m, k, n = a.shape[-2], a.shape[-1], b.shape[-1]
@@ -537,10 +549,38 @@ module Tensomite
           rows, cols = matmul_tile.block
           grid = {(n + cols - 1) // cols, (m + rows - 1) // rows, node.size // (m * n)}
           context.launch(kernels[matmul_tile.kernel], grid, {cols // TILE_PATCH, rows // TILE_PATCH}, *args)
-        else
+        elsif matmul_mode.split? || b.view.strides.last == 1
           context.launch(kernels["matmul_split_f32"], {(n + COLS - 1) // COLS, node.size // n, 1}, {COLS, SLICES}, *args)
+        else
+          launch_two_pass(kernels, node, output, m, k, n)
         end
+      in .two_pass?
+        launch_two_pass(kernels, node, output, m, k, n)
       end
+    end
+
+    private def launch_two_pass(kernels : Kernels, node : Node, output : CUDABuffer, m : Int32, k : Int32, n : Int32) : Nil
+      a, b = node.srcs
+      chunks = (k + CHUNK - 1) // CHUNK
+      scratch = scratch(node.size * chunks * 4)
+      if chunks > 0
+        grid = {(n + DECODE_COLS - 1) // DECODE_COLS, chunks, node.size // (m * n) * ((m + DECODE_ROWS - 1) // DECODE_ROWS)}
+        context.launch(kernels["matmul_chunks_f32"], grid, {DECODE_COLS, 1}, pointer(a), pointer(b), scratch,
+          view_args(a.view), view_args(b.view), m.to_u32, k.to_u32, n.to_u32)
+      end
+      run(kernels["matmul_chunk_sums_f32"], node.size, scratch, output.pointer, m.to_u32, k.to_u32, n.to_u32, node.size.to_u32)
+    end
+
+    # Returns device memory of at least *bytesize* bytes for a kernel's partial
+    # results, kept between launches: kernels run one after another, so the next
+    # launch may reuse it.
+    private def scratch(bytesize : Int32) : LibCUDA::DevicePtr
+      current = @scratch
+      if current.nil? || current.bytesize < bytesize
+        current = alloc(Math.max(bytesize, 4)).as(CUDABuffer)
+        @scratch = current
+      end
+      current.pointer
     end
 
     # Softmax, LogSoftmax and LayerNorm: one block per row along the last axis,

@@ -1066,6 +1066,56 @@ CUDA, `Auto` (default)|**4,587**                     |**170.7**       |**6**
 - **`Auto` takes the best of both,** as on Metal: tiled products prefill nearly ten times faster than split ones, and split products decode 1.6 times faster than tiled ones.
 - **Decode has room to grow.** A decoded token takes 5.9 ms; `bench/profile_gpt2_cuda.cr` shows where it goes. Reading GPT-2 small's 0.5 GB of `F32` weights once at the GB10's memory bandwidth would take about 2 ms, I think, so most of the time is elsewhere: about 316 launches a token, the logits copied back to the host, and a KV cache that `Cat` copies whole every token.
 
+**Where a decoded token goes on the GB10** (Decision AW; `bench/profile_gpt2_cuda.cr`, part 4's kernels):
+
+Cost                      |ms per token
+--------------------------|------------
+wall                      |6.38        
+GPU time, every kernel    |5.63        
+matmuls, 493 MB of weights|3.83        
+the output head alone     |1.64        
+launching (316 launches)  |0.94        
+allocating                |1.04        
+copying                   |0.03        
+
+- **Decode is GPU-bound, and the matmuls are most of it.** They read weights at about 129 GB/s; the output head, `[1,768]·[768,50257]`, at 94.
+- **`Split` has too few blocks for one row.** It launches one per 32 output columns, so the 768-column products get 24 blocks, and every block walks all of `k`.
+- **The head reads across its weights.** Its `b` is the token embedding transposed, so `k` is contiguous in memory and neighbouring columns are 768 floats apart. `Split`'s neighbouring threads read neighbouring columns, so no two reads share a transaction.
+
+**Two passes for few rows (Decision AX).** `TwoPass` cuts each product into blocks of 128 columns by one chunk of 64 along `k` (and 16 rows). Each block copies its chunk of `b` into shared memory along whichever axis is contiguous, then each thread sums its column's chunk in index order, as `Split` does, and stores the sum in scratch memory. A second kernel adds each output's chunk sums in chunk order from zero. The sums and their order are `Split`'s, so the bits are too. The head becomes 393 × 12 blocks instead of 1,571 blocks each walking 768. The scratch is one buffer kept by the device, grown as needed (2.4 MB for the head): kernels run one after another, so each launch may reuse it. `spec/cuda_spec.cr` checks `TwoPass` against `Split` bit for bit, and a change to the order of the second pass fails it.
+
+Measured on the GB10 (`bench/gpt2.cr`, then `bench/profile_gpt2_cuda.cr`):
+
+Product, decoding one token       |`Split`, GB/s|`TwoPass`, GB/s|`TwoPass`, ms
+----------------------------------|-------------|---------------|-------------
+head, `[1,768]·[768,50257]`       |94           |203            |0.761        
+mlp out, `[1,3072]·[3072,768]`    |137          |140            |0.806        
+mlp in, `[1,768]·[768,3072]`      |175          |172            |0.658        
+qkv, `[1,768]·[768,2304]`         |171          |151            |0.562        
+attention out, `[1,768]·[768,768]`|126          |99             |0.286        
+
+- **Decode rose from 170.7 to 198.1 tokens/s,** 5.0 ms a token from 6.4, below the 210 estimated. `TwoPass` alone decodes at 181 and `Split` alone at 159.
+- **The head gained, the rest did not.** Two passes more than doubled the head's bandwidth, because its reads now coalesce. The products whose weights are contiguous along `n` already coalesced under `Split`, so they gained nothing from coalescing. qkv and attention out got slower: I think from the extra launch and the 32 KB of shared memory per block, which limits how many blocks share a multiprocessor (not yet measured).
+- **Launches rose from 316 to 389,** one more per matmul.
+
+**`Auto` chooses by layout (Decision AY).** Below 16 rows it now uses `TwoPass` only when `b`'s columns are not contiguous, as in the head and attention's `q·kᵀ`, and `Split` otherwise. On the GB10 the profile gives 4.71 ms a decoded token, about 212 tokens/s, in 329 launches; attention out is back at `Split`'s 126 GB/s. qkv stayed at 149 GB/s under `Split`, against 171 in part 4's profile, so some of the earlier gap between the two was run-to-run variation.
+
+**Timing decode.** Until this change `bench/gpt2.cr` timed decode once, 32 tokens, straight after loading each device's model. One such run put `Auto` at 169 tokens/s and `TwoPass`, which `Auto` mostly matches, at 206, while the profile put `Auto` at 212. I think the collector, finalizing the models of earlier runs, landed inside that timing. Decode is now the median of five runs, after a `GC.collect`, as prefill already was. Rerun that way on the GB10:
+
+Device                |Prefill of 64 tokens, tokens/s|Decode, tokens/s|ms per decoded token
+----------------------|------------------------------|----------------|--------------------
+`BLAS` (OpenBLAS)     |773                           |70.9            |14                  
+CUDA, `Serial`        |617                           |123.3           |8                   
+CUDA, `Split`         |445                           |178.5           |6                   
+CUDA, `Tiled`         |4,834                         |94.8            |11                  
+CUDA, `TwoPass`       |3,718                         |203.2           |5                   
+CUDA, `Auto` (default)|**4,585**                     |**211.4**       |**5**               
+
+- **`Auto` decodes at 211 tokens/s,** from part 4's 171, and agrees with the profile's 212. It beats `TwoPass` alone by keeping `Split` where `b`'s columns are contiguous.
+- **What remains** is mostly outside the matmuls: about 1.2 ms of small ops (adds, layer norms, copies) and 0.7 ms of launching 329 kernels a token.
+
+Metal keeps `Split` at decode: its decode was not profiled for this, and the fix there would be the same.
+
 **Training step in the Linux container through M7** (the 0.8M-param model, 30 steps, identical losses):
 
 Build                             |ms per step

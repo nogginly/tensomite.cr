@@ -297,6 +297,70 @@ extern "C" __global__ void matmul_split_f32(const float* a, const float* b, floa
     if (slice == 0 && live) dst[out_row * n + col] = total;
 }
 
+// Two-pass matrix products, for products of few rows, as in decoding one token,
+// where split-K has too few blocks and reads a transposed b across its rows.
+//
+// The first pass launches a block per DECODE_COLS adjacent output columns, chunk
+// of CHUNK elements of k, and DECODE_ROWS rows of each batch matrix. The block
+// copies its chunk of b into shared memory along whichever axis is contiguous,
+// and its rows' chunk of a, then each thread sums its column's chunk in index
+// order for each row, writing the sums to scratch, [batch][chunk][row][column].
+// The second pass adds each output's chunk sums in chunk order from zero.
+//
+// Bit-identical to matmul_split_f32: the same chunk sums, added in the same
+// order, with the exact zero split-K adds when the chunks are not a multiple of
+// SLICES (see matmul_tiled).
+#define DECODE_COLS 128u
+#define DECODE_ROWS 16u
+
+extern "C" __global__ void matmul_chunks_f32(const float* a, const float* b, float* scratch, View va, View vb,
+                                             unsigned int m, unsigned int k, unsigned int n) {
+    __shared__ float as[DECODE_ROWS * CHUNK];
+    __shared__ float bs[CHUNK * (DECODE_COLS + 1)];
+    unsigned int t = threadIdx.x, col0 = blockIdx.x * DECODE_COLS, c = blockIdx.y;
+    unsigned int groups = (m + DECODE_ROWS - 1) / DECODE_ROWS;
+    unsigned int batch = blockIdx.z / groups, row0 = blockIdx.z % groups * DECODE_ROWS;
+    unsigned int rows = min(DECODE_ROWS, m - row0);
+    unsigned int k0 = c * CHUNK, width = min(k - k0, unsigned(CHUNK));
+    int pa = offset_of(va, batch * m * k);
+    int pb = offset_of(vb, batch * k * n);
+    int ra = va.strides[va.ndim - 2], sa = va.strides[va.ndim - 1];
+    int sb = vb.strides[vb.ndim - 2], cb = vb.strides[vb.ndim - 1];
+    for (unsigned int e = t; e < rows * CHUNK; e += DECODE_COLS) {
+        unsigned int r = e / CHUNK, s = e % CHUNK;
+        as[e] = s < width ? a[pa + int(row0 + r) * ra + int(k0 + s) * sa] : 0.0f;
+    }
+    for (unsigned int e = t; e < CHUNK * DECODE_COLS; e += DECODE_COLS) {
+        unsigned int s = cb == 1 ? e / DECODE_COLS : e % CHUNK;
+        unsigned int col = cb == 1 ? e % DECODE_COLS : e / CHUNK;
+        bool inside = col0 + col < n && s < width;
+        bs[s * (DECODE_COLS + 1) + col] = inside ? b[pb + int(k0 + s) * sb + int(col0 + col) * cb] : 0.0f;
+    }
+    __syncthreads();
+    unsigned int col = col0 + t;
+    if (col >= n) return;
+    unsigned int chunks = (k + CHUNK - 1) / CHUNK;
+    for (unsigned int r = 0; r < rows; r++) {
+        float acc = 0.0f;
+        for (unsigned int s = 0; s < width; s++) {
+            float product = as[r * CHUNK + s] * bs[s * (DECODE_COLS + 1) + t];
+            acc = acc + product;
+        }
+        scratch[((batch * chunks + c) * m + row0 + r) * n + col] = acc;
+    }
+}
+
+extern "C" __global__ void matmul_chunk_sums_f32(const float* scratch, float* dst, unsigned int m, unsigned int k,
+                                                 unsigned int n, unsigned int total) {
+    unsigned int i = thread_index();
+    if (i >= total) return;
+    unsigned int col = i % n, row = (i / n) % m, batch = i / (m * n);
+    unsigned int chunks = (k + CHUNK - 1) / CHUNK;
+    float sum = 0.0f;
+    for (unsigned int c = 0; c < chunks; c++) sum = sum + scratch[((batch * chunks + c) * m + row) * n + col];
+    dst[i] = chunks % SLICES != 0 ? sum + 0.0f : sum;
+}
+
 // Tiled matrix products, for when there are enough rows to share operands.
 //
 // A block owns a BM x BN block of outputs of one batch matrix, and each of its
