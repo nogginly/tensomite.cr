@@ -49,6 +49,10 @@ module Tensomite
     # scaled and offset by sources 1 and 2 (weight and bias, expanded to the
     # output shape), fused.
     LayerNorm
+    # Source 1 copied into the region `Node#source_view` of source 0, in place:
+    # the node's buffer is source 0's, and every other element keeps its value.
+    # See `Tensor#write`.
+    Write
   end
 
   # A vertex of the compute graph, producing one contiguous array of `shape`.
@@ -62,7 +66,7 @@ module Tensomite
     getter dtype : DType
     getter device : Device
     getter axis : Int32?
-    # The view an `Unview` node inverts.
+    # The view an `Unview` node inverts, or the region a `Write` node fills.
     getter source_view : View?
     # The fused kernel a `Kernel` node runs.
     getter kernel : Kernel?

@@ -316,6 +316,7 @@ module Tensomite
       case node.op
       when Op::Sum, Op::Max                           then encode_reduce(node, output)
       when Op::Cat                                    then encode_cat(node, output)
+      when Op::Write                                  then encode_write(node, output)
       when Op::Gather, Op::ScatterAdd                 then encode_rows(node, output)
       when Op::Unview                                 then return encode_unview(node, output)
       when Op::MatMul                                 then encode_matmul(node, output)
@@ -403,6 +404,13 @@ module Tensomite
         dispatch("copy_into_f32", src.size, [mtl(src), output.mtl], [view_args(src.view), view_args(region), u32(src.size)])
         start = stop
       end
+    end
+
+    # Write: one thread per element written, into the target's own buffer.
+    private def encode_write(node : Node, output : MetalBuffer) : Nil
+      value = node.srcs.last
+      region = node.source_view || raise Error.new("write needs a region")
+      dispatch("copy_into_f32", value.size, [mtl(value), output.mtl], [view_args(value.view), view_args(region), u32(value.size)])
     end
 
     # Gather, one thread per output element, and ScatterAdd, one thread per column.

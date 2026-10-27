@@ -263,6 +263,19 @@ describe CausalSelfAttention do
     cache.keys.as(Tensor).shape.should eq [1, 2, 3, 2]
   end
 
+  it "gives the same values with a cache written in place, and refuses to overflow it" do
+    attention = CausalSelfAttention.new(4, 2, rng: Random.new(1))
+    x = Tensor.from(random_values(12, 5), [3, 4])
+    whole = attention.call(x, Tensor.causal_mask(3, 3)).to_a(Float32)
+    cache = CausalSelfAttention::Cache.new(capacity: 3)
+    first = attention.call(x.slice(0, 0, 2), Tensor.causal_mask(2, 2), cache).realize.to_a(Float32)
+    last = attention.call(x.slice(0, 2, 3), Tensor.causal_mask(1, 3), cache).realize.to_a(Float32)
+    (first + last).should eq whole
+    cache.length.should eq 3
+    cache.keys.as(Tensor).shape.should eq [1, 2, 3, 2]
+    expect_raises(ShapeError) { attention.call(x.slice(0, 0, 1), Tensor.causal_mask(1, 4), cache) }
+  end
+
   it "lets no position see the positions after it" do
     attention = CausalSelfAttention.new(4, 2, rng: Random.new(1))
     mask = Tensor.causal_mask(3, 3)

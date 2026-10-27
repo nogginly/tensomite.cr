@@ -120,6 +120,15 @@ table.gather(Tensor.from([2, 0], [2])).to_a(Float32)   # => [20.0, 21.0, 0.0, 1.
 
 `gather` picks rows of a 2-D table by `I32` indices. It is how embeddings work: a token's id selects its row.
 
+One op changes a buffer instead of making a new one. `write(value, axis, start)` copies `value` into positions `start` onwards along `axis`, in place, and returns a tensor sharing the buffer:
+
+```crystal
+cache = Tensor.zeros([4, 2])
+cache = cache.write(Tensor.from([1f32, 2f32], [1, 2]), 0, 1)   # row 1 is now [1, 2]
+```
+
+The target must cover its whole buffer, and anything read from it before the write must be realised first, or it may see the new values. It exists for caches that grow without copying; `CausalSelfAttention::Cache.new(capacity: n)` uses it.
+
 ## Matrix products
 
 `matmul` multiplies `[..., m, k]` by `[..., k, n]`. Leading axes are batch axes, broadcast like elementwise operands.
@@ -227,14 +236,14 @@ model.named_params.keys                  # => ["hidden.weight", "hidden.bias", "
 - **A `Parameter` is a slot** holding a tensor (`param.value`), with a name and a flag for weight decay. Tensors never change; training replaces the tensor in each slot.
 - **Weights are drawn from `Tensomite.rng`,** a generator seeded with 0, so the same program builds the same model on every run. Each built-in module also takes `rng:` and `device:` arguments, which a `Builder` (below) fills in.
 
-Built-in module                                    |Parameters                                            |`forward`                                                                                                                                                                                                              
----------------------------------------------------|------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-`Linear.new(inputs, outputs, bias: true)`          |`weight [inputs, outputs]` (decayed), `bias [outputs]`|`x.matmul(weight) + bias`                                                                                                                                                                                              
-`Embedding.new(count, width)`                      |`weight [count, width]` (decayed)                     |rows of the weight selected by `I32` ids of any shape                                                                                                                                                                  
-`LayerNorm.new(width, eps: 1e-5)`                  |`weight`, `bias`                                      |`x.layernorm(weight, bias, eps)`                                                                                                                                                                                       
-`Activation.gelu`, `Activation.tanh`               |none                                                  |the function                                                                                                                                                                                                           
-`Sequential.new(layer, layer, ...)`                |its steps'                                            |each step in turn                                                                                                                                                                                                      
-`CausalSelfAttention.new(width, heads, bias: true)`|`c_attn`, `c_proj` (both `Linear`)                    |`call(x, mask)`: GPT-2's multi-head attention over `[batch × length, width]` rows, under a `Tensor.causal_mask(length, length)`; `call(x, mask, cache)` also attends to the positions in a `CausalSelfAttention::Cache`
+Built-in module                                    |Parameters                                            |`forward`                                                                                                                                                                                                                                                                                                   
+---------------------------------------------------|------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+`Linear.new(inputs, outputs, bias: true)`          |`weight [inputs, outputs]` (decayed), `bias [outputs]`|`x.matmul(weight) + bias`                                                                                                                                                                                                                                                                                   
+`Embedding.new(count, width)`                      |`weight [count, width]` (decayed)                     |rows of the weight selected by `I32` ids of any shape                                                                                                                                                                                                                                                       
+`LayerNorm.new(width, eps: 1e-5)`                  |`weight`, `bias`                                      |`x.layernorm(weight, bias, eps)`                                                                                                                                                                                                                                                                            
+`Activation.gelu`, `Activation.tanh`               |none                                                  |the function                                                                                                                                                                                                                                                                                                
+`Sequential.new(layer, layer, ...)`                |its steps'                                            |each step in turn                                                                                                                                                                                                                                                                                           
+`CausalSelfAttention.new(width, heads, bias: true)`|`c_attn`, `c_proj` (both `Linear`)                    |`call(x, mask)`: GPT-2's multi-head attention over `[batch × length, width]` rows, under a `Tensor.causal_mask(length, length)`; `call(x, mask, cache)` also attends to the positions in a `CausalSelfAttention::Cache`, which with a `capacity` writes new positions in place rather than copying the cache
 
 `Linear` draws its weight uniformly from ±1/√inputs, and `Embedding` from a normal distribution with standard deviation 0.02. Either takes `init:` to change that: `Init.uniform(bound)`, `Init.normal(std)` or `Init.constant(value)`.
 

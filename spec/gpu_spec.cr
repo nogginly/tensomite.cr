@@ -29,6 +29,7 @@ EXACT = {
   "cat of views"         => ->(d : Device) { Tensor.cat([random(d, [3, 2], 1).transpose, random(d, [2], 2).reshape([2, 1]).expand([2, 3])], 1) },
   "gather"               => ->(d : Device) { random(d, [5, 4], 1).gather(Tensor.from([4, 0, 2, 2], [4], d)) },
   "gather 2-D ids"       => ->(d : Device) { random(d, [6, 3], 1).transpose.contiguous.transpose.gather(Tensor.from([5, 1, 0, 5], [2, 2], d)) },
+  "write of a view"      => ->(d : Device) { random(d, [4, 6], 1).write(random(d, [3, 4], 2).transpose, 1, 2) },
   "scatter_add"          => ->(d : Device) {
     table = random(d, [5, 3], 1)
     Tensomite.grad((table.gather(Tensor.from([1, 3, 1, 4, 1], [5], d)) * random(d, [5, 3], 2)).sum, [table]).first

@@ -346,6 +346,9 @@ module Tensomite
         return
       end
       start = Time.instant
+      # A write keeps the rest of its target, so the host copy must be current
+      # before the host kernel writes into it.
+      target.bytes if node.op == Op::Write
       target.writing = true
       begin
         super
@@ -439,6 +442,7 @@ module Tensomite
       case node.op
       when Op::Sum, Op::Max                           then launch_reduce(kernels, node, output)
       when Op::Cat                                    then launch_cat(kernels, node, output)
+      when Op::Write                                  then launch_write(kernels, node, output)
       when Op::Gather, Op::ScatterAdd                 then launch_rows(kernels, node, output)
       when Op::Unview                                 then return launch_unview(kernels, node, output)
       when Op::MatMul                                 then launch_matmul(kernels, node, output)
@@ -501,6 +505,13 @@ module Tensomite
         run(kernels["copy_into_f32"], src.size, pointer(src), output.pointer, view_args(src.view), view_args(region), src.size.to_u32)
         start = stop
       end
+    end
+
+    # Write: one thread per element written, into the target's own buffer.
+    private def launch_write(kernels : Kernels, node : Node, output : CUDABuffer) : Nil
+      value = node.srcs.last
+      region = node.source_view || raise Error.new("write needs a region")
+      run(kernels["copy_into_f32"], value.size, pointer(value), output.pointer, view_args(value.view), view_args(region), value.size.to_u32)
     end
 
     # Gather, one thread per output element, and ScatterAdd, one thread per column.

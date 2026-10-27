@@ -106,6 +106,7 @@ module Tensomite
       in Op::Max          then reduce(T, node, dst, nil) { |acc, x| x > acc ? x : acc }
       in Op::Copy         then copy(T, node, dst)
       in Op::Cat          then cat(T, node, dst)
+      in Op::Write        then copy_into(T, node.srcs.last, node.source_view || raise(Error.new("write needs a region")), dst)
       in Op::Gather       then gather(T, node, dst)
       in Op::MatMul       then matmul(T, node, dst)
       in Op::GreaterEqual then binary(T, node, dst) { |x, y| x >= y ? T.new(1) : T.zero }
@@ -310,19 +311,22 @@ module Tensomite
       out_view = View.contiguous(node.shape)
       start = 0
       node.srcs.each do |src|
-        xs = elements(T, src)
         stop = start + src.shape[axis]
-        region = out_view.slice(axis, start, stop)
-        if src.size > 0
-          run = View.run_length(src.size, {region, src.view})
-          sr, ss = region.run_stride, src.view.run_stride
-          (src.size // run).times do |run_index|
-            base = run_index * run
-            pr, ps = region.offset_of(base), src.view.offset_of(base)
-            run.times { |j| dst[pr + j * sr] = xs[ps + j * ss] }
-          end
-        end
+        copy_into(T, src, out_view.slice(axis, start, stop), dst)
         start = stop
+      end
+    end
+
+    # Copies *src* into the positions *region* gives in *dst*, leaving the rest.
+    private def copy_into(type : T.class, src : Tensor, region : View, dst : Slice(T)) : Nil forall T
+      return if src.size == 0
+      xs = elements(T, src)
+      run = View.run_length(src.size, {region, src.view})
+      sr, ss = region.run_stride, src.view.run_stride
+      (src.size // run).times do |run_index|
+        base = run_index * run
+        pr, ps = region.offset_of(base), src.view.offset_of(base)
+        run.times { |j| dst[pr + j * sr] = xs[ps + j * ss] }
       end
     end
 
