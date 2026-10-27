@@ -116,8 +116,10 @@ module Tensomite
       # then a thread per output adding them in chunk order. Bit-identical to
       # `Split`, with many more blocks when there are few rows.
       TwoPass
-      # `Tiled` for products of at least `TILED_ROWS` rows, `TwoPass` otherwise,
-      # as in decoding one token. Bit-identical to all three. The default.
+      # `Tiled` for products of at least `TILED_ROWS` rows. Below that, as in
+      # decoding one token, `Split` when b's columns are contiguous in memory and
+      # `TwoPass` when they are not, as in a transposed b. Bit-identical to all
+      # three. The default.
       Auto
     end
 
@@ -547,7 +549,7 @@ module Tensomite
           rows, cols = matmul_tile.block
           grid = {(n + cols - 1) // cols, (m + rows - 1) // rows, node.size // (m * n)}
           context.launch(kernels[matmul_tile.kernel], grid, {cols // TILE_PATCH, rows // TILE_PATCH}, *args)
-        elsif matmul_mode.split?
+        elsif matmul_mode.split? || b.view.strides.last == 1
           context.launch(kernels["matmul_split_f32"], {(n + COLS - 1) // COLS, node.size // n, 1}, {COLS, SLICES}, *args)
         else
           launch_two_pass(kernels, node, output, m, k, n)

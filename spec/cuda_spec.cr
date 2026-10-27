@@ -181,6 +181,7 @@ require "./spec_helper"
         (shapes + [{[1, 768], [300, 768], true}, {[2, 3, 1, 129], [2, 3, 129, 200], false}, {[1, 0], [0, 5], false}]).each do |(a_shape, b_shape, b_transposed)|
           split = tiled_product.call(CUDA::MatMulMode::Split, CUDA::MatMulTile::T64x64, a_shape, b_shape, b_transposed)
           tiled_product.call(CUDA::MatMulMode::TwoPass, CUDA::MatMulTile::T64x64, a_shape, b_shape, b_transposed).should eq split
+          tiled_product.call(CUDA::MatMulMode::Auto, CUDA::MatMulTile::T64x64, a_shape, b_shape, b_transposed).should eq split
         end
       end
 

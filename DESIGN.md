@@ -1082,7 +1082,7 @@ copying                   |0.03
 - **`Split` has too few blocks for one row.** It launches one per 32 output columns, so the 768-column products get 24 blocks, and every block walks all of `k`.
 - **The head reads across its weights.** Its `b` is the token embedding transposed, so `k` is contiguous in memory and neighbouring columns are 768 floats apart. `Split`'s neighbouring threads read neighbouring columns, so no two reads share a transaction.
 
-**Two passes for few rows (Decision AX).** `TwoPass` cuts each product into blocks of 128 columns by one chunk of 64 along `k` (and 16 rows). Each block copies its chunk of `b` into shared memory along whichever axis is contiguous, then each thread sums its column's chunk in index order, as `Split` does, and stores the sum in scratch memory. A second kernel adds each output's chunk sums in chunk order from zero. The sums and their order are `Split`'s, so the bits are too; `Auto` now sends products of fewer than 16 rows here instead. The head becomes 393 × 12 blocks instead of 1,571 blocks each walking 768. The scratch is one buffer kept by the device, grown as needed (2.4 MB for the head): kernels run one after another, so each launch may reuse it. `spec/cuda_spec.cr` checks `TwoPass` against `Split` bit for bit, and a change to the order of the second pass fails it.
+**Two passes for few rows (Decision AX).** `TwoPass` cuts each product into blocks of 128 columns by one chunk of 64 along `k` (and 16 rows). Each block copies its chunk of `b` into shared memory along whichever axis is contiguous, then each thread sums its column's chunk in index order, as `Split` does, and stores the sum in scratch memory. A second kernel adds each output's chunk sums in chunk order from zero. The sums and their order are `Split`'s, so the bits are too. The head becomes 393 × 12 blocks instead of 1,571 blocks each walking 768. The scratch is one buffer kept by the device, grown as needed (2.4 MB for the head): kernels run one after another, so each launch may reuse it. `spec/cuda_spec.cr` checks `TwoPass` against `Split` bit for bit, and a change to the order of the second pass fails it.
 
 Measured on the GB10 (`bench/gpt2.cr`, then `bench/profile_gpt2_cuda.cr`):
 
@@ -1097,6 +1097,8 @@ attention out, `[1,768]·[768,768]`|126          |99             |0.286
 - **Decode rose from 170.7 to 198.1 tokens/s,** 5.0 ms a token from 6.4, below the 210 estimated. `TwoPass` alone decodes at 181 and `Split` alone at 159.
 - **The head gained, the rest did not.** Two passes more than doubled the head's bandwidth, because its reads now coalesce. The products whose weights are contiguous along `n` already coalesced under `Split`, so they gained nothing from coalescing. qkv and attention out got slower: I think from the extra launch and the 32 KB of shared memory per block, which limits how many blocks share a multiprocessor (not yet measured).
 - **Launches rose from 316 to 389,** one more per matmul.
+
+**`Auto` chooses by layout (Decision AY).** Below 16 rows it now uses `TwoPass` only when `b`'s columns are not contiguous, as in the head, and `Split` otherwise.
 
 Metal keeps `Split` at decode: its decode was not profiled for this, and the fix there would be the same.
 
