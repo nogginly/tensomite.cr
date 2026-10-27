@@ -1,13 +1,17 @@
 # Measures GPT-2 tokens per second on the CPU oracle, on BLAS and, on an Apple
-# Silicon Mac with a GPU, on Metal.
+# Silicon Mac with a GPU, on Metal, or, built with `-Dcuda`, on CUDA.
 #
 #     crystal run --release bench/gpt2.cr -- path/to/model.safetensors [heads]
+#     crystal run --release -Dcuda bench/gpt2.cr -- path/to/model.safetensors [heads]
 #
 # Speed depends only on the model's shapes, so any weights of GPT-2 small's shapes
 # give the same numbers as the real ones.
 require "../src/tensomite/blas"
 {% if flag?(:darwin) && flag?(:aarch64) %}
   require "../src/tensomite/metal"
+{% end %}
+{% if flag?(:cuda) %}
+  require "../src/tensomite/cuda"
 {% end %}
 
 include Tensomite
@@ -26,6 +30,13 @@ runs = [{"CPU", CPU.default.as(Device), -> { }}, {"BLAS", BLAS.default.as(Device
   if Metal.available?
     Metal::MatMulMode.values.each do |mode|
       runs << {"Metal, #{mode.to_s.downcase} matmul", Metal.default.as(Device), -> { Metal.default.matmul_mode = mode }}
+    end
+  end
+{% end %}
+{% if flag?(:cuda) %}
+  if CUDA.available?
+    CUDA::MatMulMode.values.each do |mode|
+      runs << {"CUDA, #{mode.to_s.downcase} matmul", CUDA.default.as(Device), -> { CUDA.default.matmul_mode = mode }}
     end
   end
 {% end %}

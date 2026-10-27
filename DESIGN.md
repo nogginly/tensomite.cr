@@ -445,8 +445,8 @@ flowchart LR
   ```
 
   So a graph of host ops downloads each source once, not once per reader, and uploads each output once. Device memory comes from a pool, as on Metal. A buffer's finalizer hands its memory to a retired list, which the device moves into the pool at its next allocation or sync, on its own thread. If the list is busy, the finalizer frees the memory at once instead, making the context current on its thread first, so it never waits.
-- **Kernels** (`cuda/kernels.cu`) are ports of the Metal ones: elementwise arithmetic and comparisons, `exp`, `log`, `tanh`, `sqrt`, copies and `Cat`, `Sum` and `Max` in chunks of 16 at fixed offsets, `Gather`, `ScatterAdd` and `Unview`. Views reach them as a struct of 19 integers, passed by value. They are compiled once, on the first op, for the GPU's architecture, and queued in order on the default stream; a plain copy to or from the host waits for the kernels before it, so no explicit stream is needed yet. `Gather` and `ScatterAdd` report an id out of range in a small error buffer, which `sync` reads and clears, raising `ExecutionError`. `MatMul`, the row ops and macro kernels still run on the host (M8 part 4).
-- **Testing without a GPU.** `scripts/cuda_stub/libcuda.c` stands in for the driver: one "GPU" whose memory is host memory. It cannot run PTX, but with `TENSOMITE_CUDA_KERNELS` it loads `kernels.cu` compiled as host C++ behind `emulate.h`, which defines CUDA's built-ins and runs each block's threads in a loop, or as OS threads meeting at a barrier for kernels that call `__syncthreads`. NVRTC, from PyPI, still compiles the real source. So CI compiles every kernel, runs each on the host, and compares it with the CPU in `gpu_spec`, as `scripts/emulate_metal` does for MSL. What it cannot catch is a difference in CUDA's own semantics, such as its maths library; the GB10 runs the same specs on the real GPU.
+- **Kernels** (`cuda/kernels.cu`) are ports of the Metal ones: elementwise arithmetic and comparisons, `exp`, `log`, `tanh`, `sqrt`, copies and `Cat`, `Sum` and `Max` in chunks of 16 at fixed offsets, `Gather`, `ScatterAdd` and `Unview`. Views reach them as a struct of 19 integers, passed by value. They are compiled once, on the first op, for the GPU's architecture, and queued in order on the default stream; a plain copy to or from the host waits for the kernels before it, so no explicit stream is needed yet. `Gather` and `ScatterAdd` report an id out of range in a small error buffer, which `sync` reads and clears, raising `ExecutionError`. - **Matmul, row ops and macro kernels** are ports too. `MatMul` has Metal's modes (`CUDA::MatMulMode`): serial, with the host's bits; split, in chunks of `k` at fixed offsets; and tiled, in the three tile sizes of `CUDA::MatMulTile`, with split's bits, so `Auto` picks tiled at 16 rows or more and split below, and a tiled prefill gives a split decode's bits. Softmax, log-softmax and layernorm fold rows in chunks as the reductions do, so a row padded with `-inf` keeps its bits. `Kernel#cuda` emits a macro kernel as CUDA C++, one statement per operation, as `#msl` emits MSL; each is compiled on its first launch and kept. With these, GPT-2's forward pass runs no host ops on CUDA.
+- **Testing without a GPU.** `scripts/cuda_stub/libcuda.c` stands in for the driver: one "GPU" whose memory is host memory. It cannot run PTX, but with `TENSOMITE_CUDA_KERNELS` it loads `prelude.cu`, `kernels.cu` and every macro kernel's CUDA C++ (written out by `scripts/cuda_stub/macro_kernels.cr`), compiled as host C++ behind `emulate.h`. That header defines CUDA's built-ins and runs a block's threads in a loop, or, for a kernel with shared memory, as one OS thread per GPU thread, all meeting at a barrier inside the kernel and between blocks. NVRTC, from PyPI, still compiles the real source. So CI compiles every kernel, runs each on the host, and compares it with the CPU in `gpu_spec`, as `scripts/emulate_metal` does for MSL. What it cannot catch is a difference in CUDA's own semantics, such as its maths library; the GB10 runs the same specs on the real GPU.
 
 ## Realisation
 
@@ -1050,6 +1050,21 @@ Metal, `Auto` (default)|**3,684**                     |**186.1**
 - **Metal now leads on both counts:** 1.12 times `BLAS` at decode and 1.52 times at a 64-token prefill. At 128 tokens, where the tiled matmul has more rows to share, `bench/profile_gpt2.cr --prefill 128` gives 5,296 tokens/s.
 - **A decoded token takes 5.07 ms** of wall time, 4.77 ms of it GPU work, in 316 dispatches and 5 command buffers.
 - **`Tiled` alone decodes slowly** (66 tokens/s), because one row fills a sixty-fourth of a block; `Auto` sends such products to `Split`. The spread between `Split`, `Atomic` and `Auto` at decode, 186 to 199 tokens/s, is mostly run-to-run noise: they run the same kernels there.
+
+**CUDA on the DGX Spark** (GB10, M8 part 4; `bench/gpt2.cr` with `-Dcuda`, prefill timed warm as the median of five):
+
+Device                |Prefill of 64 tokens, tokens/s|Decode, tokens/s|ms per decoded token
+----------------------|------------------------------|----------------|--------------------
+CPU oracle            |8.2                           |7.21            |139                 
+`BLAS` (OpenBLAS)     |836                           |67.2            |15                  
+CUDA, `Serial`        |600                           |108.8           |9                   
+CUDA, `Split`         |447                           |154.3           |6                   
+CUDA, `Tiled`         |4,616                         |95.9            |10                  
+CUDA, `Auto` (default)|**4,587**                     |**170.7**       |**6**               
+
+- **CUDA leads on both counts:** 5.5 times `BLAS` at a 64-token prefill and 2.5 times at decode, with every op of the forward pass on the GPU.
+- **`Auto` takes the best of both,** as on Metal: tiled products prefill nearly ten times faster than split ones, and split products decode 1.6 times faster than tiled ones.
+- **Decode has room to grow.** A decoded token takes 5.9 ms. Reading GPT-2 small's 0.5 GB of `F32` weights once at the GB10's memory bandwidth would take about 2 ms, I think, so most of the time is elsewhere: about 316 launches a token, the logits copied back to the host, and a KV cache that `Cat` copies whole every token.
 
 **Training step in the Linux container through M7** (the 0.8M-param model, 30 steps, identical losses):
 

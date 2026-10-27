@@ -77,22 +77,66 @@ module Tensomite
   # `#upload` and `#download`, even on a GPU that shares memory with the CPU,
   # so one code path serves both (Decision AS).
   #
-  # Ops with a CUDA kernel (`cuda/kernels.cu`) run on the GPU, queued in order
-  # on the default stream; copies to and from the host wait for the kernels
-  # before them. Every other op runs the host kernel: its sources are downloaded
-  # to host copies, and its output is computed there and uploaded. Arithmetic,
-  # comparisons and reductions of up to one chunk give the host's bits; `exp`,
-  # `log` and `tanh` may differ in the last bits, and so may longer sums, which
-  # add in fixed chunks (Decisions K and X), as on Metal.
+  # Ops with a CUDA kernel (`cuda/kernels.cu`, and `Tensomite.kernel` macros)
+  # run on the GPU, queued in order on the default stream; copies to and from
+  # the host wait for the kernels before them. Every other op runs the host
+  # kernel: its sources are downloaded to host copies, and its output is
+  # computed there and uploaded. Arithmetic, comparisons and reductions of up to
+  # one chunk give the host's bits; `exp`, `log` and `tanh` may differ in the
+  # last bits, and so may longer sums and `MatMul`, which add in fixed chunks
+  # (Decisions K, S and X), as on Metal.
   #
   # Work is issued from the thread that created the device, on which its context
   # is current.
   class CUDA < HostDevice
-    private SOURCE         = {{ read_file("#{__DIR__}/cuda/kernels.cu") }}
+    private PRELUDE        = {{ read_file("#{__DIR__}/cuda/prelude.cu") }}
+    private SOURCE         = PRELUDE + {{ read_file("#{__DIR__}/cuda/kernels.cu") }}
     private MAX_DIMS       =   8
     private REDUCE_THREADS = 256
     private REDUCE_CHUNK   =  16
     private BLOCK          = 256
+    private COLS           =  32
+    private SLICES         =   8
+    private TILE_PATCH     =   4
+
+    # How `MatMul` divides its work; the kernels are Metal's (see `Metal::MatMulMode`).
+    enum MatMulMode
+      # One thread per output, adding over `k` in index order: bit-identical to the host.
+      Serial
+      # Several threads per output, each summing fixed chunks of `k`, combined in
+      # chunk order: deterministic and shape-invariant.
+      Split
+      # Blocks of outputs per thread block, with tiles of both operands in shared
+      # memory (`#matmul_tile`): bit-identical to `Split`.
+      Tiled
+      # `Tiled` for products of at least `TILED_ROWS` rows, `Split` otherwise, as
+      # in decoding one token. Bit-identical to both. The default.
+      Auto
+    end
+
+    # The outputs a block of the tiled matmul computes, rows by columns.
+    enum MatMulTile
+      T32x32
+      T64x64
+      T32x64
+
+      # Returns the block's rows and columns.
+      def block : {Int32, Int32}
+        case self
+        in .t32x32? then {32, 32}
+        in .t64x64? then {64, 64}
+        in .t32x64? then {32, 64}
+        end
+      end
+
+      protected def kernel : String
+        rows, cols = block
+        "matmul_tiled_#{rows}x#{cols}_f32"
+      end
+    end
+
+    # The fewest rows for which `MatMulMode::Auto` uses the tiled matmul.
+    TILED_ROWS = 16
 
     private BINARY = {
       Op::Add => "add_f32", Op::Sub => "sub_f32", Op::Mul => "mul_f32", Op::Div => "div_f32",
@@ -143,6 +187,15 @@ module Tensomite
     # Returns how many ops have run on the GPU and on the host since creation.
     getter gpu_ops = 0
     getter host_ops = 0
+
+    # How `MatMul` divides its work; see `MatMulMode`.
+    property matmul_mode = MatMulMode::Auto
+
+    # The block size of the tiled matmul; see `MatMulTile`.
+    property matmul_tile = MatMulTile::T64x64
+
+    # Kernels defined with `Tensomite.kernel`, each compiled on first use, by name.
+    @macro_kernels = {} of String => Kernels
 
     @retired = [] of {LibCUDA::DevicePtr, Int32}
     @retired_lock = Atomic(Bool).new(false)
@@ -275,11 +328,14 @@ module Tensomite
     private def launch(kernels : Kernels, node : Node, output : CUDABuffer) : Bool
       return false unless node.dtype.f32? && node.srcs.all? { |src| src.ndim <= MAX_DIMS }
       case node.op
-      when Op::Sum, Op::Max           then launch_reduce(kernels, node, output)
-      when Op::Cat                    then launch_cat(kernels, node, output)
-      when Op::Gather, Op::ScatterAdd then launch_rows(kernels, node, output)
-      when Op::Unview                 then return launch_unview(kernels, node, output)
-      else                                 return launch_elementwise(kernels, node, output)
+      when Op::Sum, Op::Max                           then launch_reduce(kernels, node, output)
+      when Op::Cat                                    then launch_cat(kernels, node, output)
+      when Op::Gather, Op::ScatterAdd                 then launch_rows(kernels, node, output)
+      when Op::Unview                                 then return launch_unview(kernels, node, output)
+      when Op::MatMul                                 then launch_matmul(kernels, node, output)
+      when Op::Softmax, Op::LogSoftmax, Op::LayerNorm then launch_row_op(kernels, node, output)
+      when Op::Kernel                                 then launch_kernel(node, output)
+      else                                                 return launch_elementwise(kernels, node, output)
       end
       true
     end
@@ -361,6 +417,73 @@ module Tensomite
       src = node.srcs.first
       run(kernels["unview_f32"], node.size, pointer(src), output.pointer, view_args(src.view), view_args(view), inverse, node.size.to_u32)
       true
+    end
+
+    # MatMul, divided as `#matmul_mode` says.
+    #
+    # `Split` launches one block per output row and block of `COLS` columns, with
+    # `SLICES` threads per column, each summing chunks of `k`. `Tiled` launches
+    # one block per `#matmul_tile` outputs of each batch matrix, with a thread per
+    # `TILE_PATCH` x `TILE_PATCH` patch.
+    private def launch_matmul(kernels : Kernels, node : Node, output : CUDABuffer) : Nil
+      a, b = node.srcs
+      m, k, n = a.shape[-2], a.shape[-1], b.shape[-1]
+      return if node.size == 0
+      args = {pointer(a), pointer(b), output.pointer, view_args(a.view), view_args(b.view), m.to_u32, k.to_u32, n.to_u32}
+      case matmul_mode
+      in .serial?
+        run(kernels["matmul_f32"], node.size, *args, node.size.to_u32)
+      in .split?, .tiled?, .auto?
+        if matmul_mode.tiled? || (matmul_mode.auto? && m >= TILED_ROWS)
+          rows, cols = matmul_tile.block
+          grid = {(n + cols - 1) // cols, (m + rows - 1) // rows, node.size // (m * n)}
+          context.launch(kernels[matmul_tile.kernel], grid, {cols // TILE_PATCH, rows // TILE_PATCH}, *args)
+        else
+          context.launch(kernels["matmul_split_f32"], {(n + COLS - 1) // COLS, node.size // n, 1}, {COLS, SLICES}, *args)
+        end
+      end
+    end
+
+    # Softmax, LogSoftmax and LayerNorm: one block per row along the last axis,
+    # with a thread per chunk of the row up to `REDUCE_THREADS`.
+    private def launch_row_op(kernels : Kernels, node : Node, output : CUDABuffer) : Nil
+      n = node.shape.last
+      rows = node.size // n
+      return if rows == 0
+      threads = Math.min((n + REDUCE_CHUNK - 1) // REDUCE_CHUNK, REDUCE_THREADS)
+      src = node.srcs.first
+      if node.op == Op::LayerNorm
+        weight, bias = node.srcs[1], node.srcs[2]
+        epsilon = node.epsilon || raise Error.new("layernorm needs an epsilon")
+        context.launch(kernels["layernorm_f32"], rows, threads, pointer(src), pointer(weight), pointer(bias), output.pointer,
+          view_args(src.view), view_args(weight.view), view_args(bias.view), n.to_u32, epsilon.to_f32)
+      else
+        name = node.op == Op::Softmax ? "softmax_f32" : "log_softmax_f32"
+        context.launch(kernels[name], rows, threads, pointer(src), output.pointer, view_args(src.view), n.to_u32)
+      end
+    end
+
+    # Kernel: one thread per element, running the kernel's generated CUDA C++,
+    # compiled the first time the kernel runs on this device. Up to four inputs,
+    # which is more than any kernel tensomite defines.
+    private def launch_kernel(node : Node, output : CUDABuffer) : Nil
+      kernel = node.kernel || raise Error.new("kernel node without a kernel")
+      compiled = @macro_kernels[kernel.cuda_name] ||= context.load(CUDA.compile(PRELUDE + kernel.cuda, CUDA.target_arch(gpu), "#{kernel.cuda_name}.cu"))
+      function = compiled[kernel.cuda_name]
+      s = node.srcs
+      n = node.size.to_u32
+      case s.size
+      when 1 then run(function, node.size, pointer(s[0]), output.pointer, view_args(s[0].view), n)
+      when 2 then run(function, node.size, pointer(s[0]), pointer(s[1]), output.pointer, view_args(s[0].view), view_args(s[1].view), n)
+      when 3
+        run(function, node.size, pointer(s[0]), pointer(s[1]), pointer(s[2]), output.pointer,
+          view_args(s[0].view), view_args(s[1].view), view_args(s[2].view), n)
+      when 4
+        run(function, node.size, pointer(s[0]), pointer(s[1]), pointer(s[2]), pointer(s[3]), output.pointer,
+          view_args(s[0].view), view_args(s[1].view), view_args(s[2].view), view_args(s[3].view), n)
+      else
+        raise DeviceError.new("CUDA kernels take at most 4 inputs, not #{s.size}")
+      end
     end
 
     # Returns the kernels' `Inverse` for *view*: the dimensions with a nonzero
@@ -602,9 +725,15 @@ module Tensomite
       # Queues *function* on *blocks* blocks of *threads* threads, with *args*:
       # device pointers (`UInt64`) and numbers, in the kernel's parameter order.
       def launch(function : Void*, blocks : Int32, threads : Int32, *args) : Nil
+        launch(function, {blocks, 1, 1}, {threads, 1}, *args)
+      end
+
+      # Queues *function* on a grid of *grid* blocks, each of *block* threads.
+      def launch(function : Void*, grid : {Int32, Int32, Int32}, block : {Int32, Int32}, *args) : Nil
+        return if grid.any?(&.zero?)
         params = CUDA.kernel_params(*args)
-        CUDA.check LibCUDA.cuLaunchKernel(function, blocks.to_u32, 1, 1, threads.to_u32, 1, 1, 0,
-          Pointer(Void).null, params.to_unsafe, Pointer(Void*).null), "cuLaunchKernel"
+        CUDA.check LibCUDA.cuLaunchKernel(function, grid[0].to_u32, grid[1].to_u32, grid[2].to_u32,
+          block[0].to_u32, block[1].to_u32, 1, 0, Pointer(Void).null, params.to_unsafe, Pointer(Void*).null), "cuLaunchKernel"
       end
 
       # Waits for every launched kernel, and raises any error one of them hit.

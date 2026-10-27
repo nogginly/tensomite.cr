@@ -123,6 +123,88 @@ require "./spec_helper"
     end
   end
 
+  describe "CUDA matmul and row ops" do
+    pending "no CUDA GPU that runs kernels on this machine" unless CUDA.available? && CUDA.default.kernels
+
+    if CUDA.available? && CUDA.default.kernels
+      cuda = CUDA.default
+      rng = Random.new(5)
+      xs = Array(Float32).new(3 * 200) { rng.rand(-1f32...1f32) }
+      ws = Array(Float32).new(200 * 70) { rng.rand(-1f32...1f32) }
+      product = ->(mode : CUDA::MatMulMode) do
+        cuda.matmul_mode = mode
+        Tensor.from(xs, [3, 200], cuda).matmul(Tensor.from(ws, [200, 70], cuda)).to_a(Float32)
+  ensure
+    cuda.matmul_mode = CUDA::MatMulMode::Auto
+      end
+      expected = Tensor.from(xs, [3, 200]).matmul(Tensor.from(ws, [200, 70])).to_a(Float32)
+
+      it "is bit-identical to the host when serial" do
+        product.call(CUDA::MatMulMode::Serial).should eq expected
+      end
+
+      it "keeps the bits of each output when k is padded with zeros" do
+        # Prefill and decode differ only by masked positions, which add zeros
+        # to k; chunks at fixed offsets make that change nothing.
+        padded = xs.each_slice(200).to_a.flat_map { |row| row + Array.new(77, 0f32) }
+        padded_ws = ws + Array.new(77 * 70, 0f32)
+        split = product.call(CUDA::MatMulMode::Split)
+        Tensor.from(padded, [3, 277], cuda).matmul(Tensor.from(padded_ws, [277, 70], cuda)).to_a(Float32).should eq split
+      end
+
+      # Returns a·b under *mode* and *tile*; a is [*batch, m, k], and b is
+      # [*batch, k, n], or [*batch, n, k] transposed when *b_transposed*.
+      tiled_product = ->(mode : CUDA::MatMulMode, tile : CUDA::MatMulTile, a_shape : Array(Int32), b_shape : Array(Int32), b_transposed : Bool) do
+        cuda.matmul_mode, cuda.matmul_tile = mode, tile
+        rng = Random.new(a_shape.sum + b_shape.sum)
+        a = Tensor.from(Array(Float32).new(a_shape.product) { rng.rand(-1f32...1f32) }, a_shape, cuda)
+        b = Tensor.from(Array(Float32).new(b_shape.product) { rng.rand(-1f32...1f32) }, b_shape, cuda)
+        a.matmul(b_transposed ? b.transpose : b).to_a(Float32)
+  ensure
+    cuda.matmul_mode, cuda.matmul_tile = CUDA::MatMulMode::Auto, CUDA::MatMulTile::T64x64
+      end
+      shapes = [
+        {[3, 200], [200, 70], false}, {[70, 129], [129, 65], false}, {[64, 64], [64, 64], false},
+        {[2, 37, 577], [2, 577, 33], false}, {[33, 100], [97, 100], true}, {[5, 1], [1, 3], false},
+      ]
+
+      it "gives split's bits when tiled, with every tile, batched and transposed" do
+        shapes.each do |(a_shape, b_shape, b_transposed)|
+          split = tiled_product.call(CUDA::MatMulMode::Split, CUDA::MatMulTile::T64x64, a_shape, b_shape, b_transposed)
+          CUDA::MatMulTile.values.each do |tile|
+            tiled_product.call(CUDA::MatMulMode::Tiled, tile, a_shape, b_shape, b_transposed).should eq split
+          end
+        end
+      end
+
+      it "gives a tiled prefill the bits of a decode" do
+        model = GPT2.load("#{__DIR__}/fixtures/tiny_gpt2/model.safetensors", heads: 4, device: cuda)
+        ids = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200]
+        cuda.matmul_mode = CUDA::MatMulMode::Tiled
+        prefill = model.forward(ids, model.new_cache).to_a(Float32)
+        cuda.matmul_mode = CUDA::MatMulMode::Split
+        decode = model.new_cache
+        ids.flat_map { |id| model.forward([id], decode).to_a(Float32) }.should eq prefill
+      ensure
+        cuda.matmul_mode = CUDA::MatMulMode::Auto
+      end
+
+      it "gives a softmax row the same bits when it is padded with -inf" do
+        row = Array(Float32).new(300) { |i| ((i * 37) % 101 - 50) / 10f32 }
+        padded = row + Array.new(200, -Float32::INFINITY)
+        short = Tensor.from(row, [1, 300], cuda).softmax.to_a(Float32)
+        Tensor.from(padded, [1, 500], cuda).softmax.to_a(Float32)[0, 300].should eq short
+      end
+
+      it "runs GPT-2's ops on the GPU, kernels and row ops included" do
+        model = GPT2.load("#{__DIR__}/fixtures/tiny_gpt2/model.safetensors", heads: 4, device: cuda)
+        host = cuda.host_ops
+        model.forward([1, 2, 3], model.new_cache)
+        (cuda.host_ops - host).should eq 0
+      end
+    end
+  end
+
   describe "CUDA kernels compiled from PTX" do
     pending "no CUDA GPU on this machine" unless REAL_GPU
 

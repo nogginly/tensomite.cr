@@ -1,8 +1,9 @@
 // Compiles CUDA kernels as host C++, for the stand-in libcuda: each kernel becomes
-// a function, and `tensomite_launch` runs a grid of blocks one after another.
-// Kernels that call __syncthreads run each block's threads as OS threads, meeting
-// at a std::barrier; the others run their threads in a loop. Shared memory is a
-// static array, which the threads of the one running block share.
+// a function, and `tensomite_launch` runs a grid of up to three dimensions of
+// blocks of up to two, one block after another. Kernels that call __syncthreads
+// run their threads as OS threads, meeting at a std::barrier; the others run
+// their threads in a loop. Shared memory is a static array, which the threads of
+// the one running block share.
 #include <algorithm>
 #include <barrier>
 #include <cmath>
@@ -60,27 +61,37 @@ extern "C" void* tensomite_kernel(const char* name) {
     return found == registry().end() ? nullptr : &found->second;
 }
 
-extern "C" void tensomite_launch(void* handle, unsigned int blocks, unsigned int threads, void** params) {
+extern "C" void tensomite_launch(void* handle, unsigned int grid_x, unsigned int grid_y, unsigned int grid_z,
+                                 unsigned int block_x, unsigned int block_y, void** params) {
     Kernel* kernel = static_cast<Kernel*>(handle);
-    blockDim = dim3{threads, 1, 1};
-    for (unsigned int b = 0; b < blocks; b++) {
-        if (kernel->sync) {
-            std::barrier<> barrier(threads);
-            block_barrier = &barrier;
-            std::vector<std::thread> workers;
-            for (unsigned int t = 0; t < threads; t++)
-                workers.emplace_back([=] {
-                    blockIdx = dim3{b, 0, 0};
-                    threadIdx = dim3{t, 0, 0};
-                    kernel->call(params);
-                });
-            for (auto& worker : workers) worker.join();
-        } else {
-            blockIdx = dim3{b, 0, 0};
+    blockDim = dim3{block_x, block_y, 1};
+    unsigned int threads = block_x * block_y;
+    unsigned int blocks = grid_x * grid_y * grid_z;
+    auto block_of = [=](unsigned int b) { return dim3{b % grid_x, b / grid_x % grid_y, b / (grid_x * grid_y)}; };
+    if (!kernel->sync) {
+        for (unsigned int b = 0; b < blocks; b++) {
+            blockIdx = block_of(b);
             for (unsigned int t = 0; t < threads; t++) {
-                threadIdx = dim3{t, 0, 0};
+                threadIdx = dim3{t % block_x, t / block_x, 0};
                 kernel->call(params);
             }
         }
+        return;
     }
+    // One OS thread per GPU thread for the whole grid: each runs its thread of
+    // every block in turn, and all meet at the barrier before the next block, so
+    // shared memory is not reused while a thread still reads it.
+    std::barrier<> barrier(threads);
+    block_barrier = &barrier;
+    std::vector<std::thread> workers;
+    for (unsigned int t = 0; t < threads; t++)
+        workers.emplace_back([=, &barrier] {
+            threadIdx = dim3{t % block_x, t / block_x, 0};
+            for (unsigned int b = 0; b < blocks; b++) {
+                blockIdx = block_of(b);
+                kernel->call(params);
+                barrier.arrive_and_wait();
+            }
+        });
+    for (auto& worker : workers) worker.join();
 }

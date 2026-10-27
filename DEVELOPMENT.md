@@ -236,7 +236,7 @@ crystal spec -Dcuda spec/cuda_spec.cr
 **Without a GPU,** `scripts/cuda_stub/setup.sh DIR` prepares `DIR`:
 - NVRTC from PyPI;
 - a stand-in `libcuda` (`libcuda.c`): one "GPU", named `tensomite host stub`, whose memory is host memory;
-- `libkernels.so`: `src/tensomite/cuda/kernels.cu` compiled as host C++ behind `emulate.h`, with a registry of its kernels that `register.py` writes.
+- `libkernels.so`: `src/tensomite/cuda/prelude.cu`, `kernels.cu` and the CUDA C++ of every `Tensomite.kernel` (printed by `macro_kernels.cr`, which needs `crystal`), compiled as host C++ behind `emulate.h`, with a registry of the kernels that `register.py` writes.
 
 ```sh
 dir=$(scripts/cuda_stub/setup.sh /tmp/tensomite-cuda | tail -1)
@@ -244,7 +244,9 @@ export LIBRARY_PATH=$dir LD_LIBRARY_PATH=$dir TENSOMITE_CUDA_KERNELS=$dir/libker
 crystal spec -Dcuda
 ```
 
-The `CUDA` device then compiles its kernels with NVRTC, as on a GPU, and the stub runs them on the host, so `gpu_spec` compares every kernel with the CPU. Without `TENSOMITE_CUDA_KERNELS`, the stub cannot load modules and the device runs every op on host kernels. Specs that load PTX of their own need a real GPU. CI runs `cuda_spec`, `gpu_spec`, `device_spec` and `gpt2_spec` this way on Linux. A new kernel needs nothing more: `register.py` finds it.
+The `CUDA` device then compiles its kernels with NVRTC, as on a GPU, and the stub runs them on the host, so `gpu_spec` compares every kernel with the CPU. Without `TENSOMITE_CUDA_KERNELS`, the stub cannot load modules and the device runs every op on host kernels. Specs that load PTX of their own need a real GPU. CI runs `cuda_spec`, `gpu_spec`, `device_spec` and `gpt2_spec` this way on Linux. A new kernel needs nothing more: `register.py` finds it, and marks one with `__shared__` memory to run its threads as OS threads, since it may wait at `__syncthreads`.
+
+`bench/gpt2.cr` and `bench/gpt2_digest.cr` add CUDA when built with `-Dcuda`: `crystal run --release -Dcuda bench/gpt2.cr -- models/gpt2/model.safetensors`.
 
 **Errors from kernels arrive late.** `cuLaunchKernel` only queues a kernel, so a fault inside it is reported by the next call that waits for the GPU, such as a download. To find which kernel failed, call `context.synchronize` after each launch.
 

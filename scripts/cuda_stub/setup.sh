@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Prepares DIR (default /tmp/tensomite-cuda) so that `-Dcuda` builds link and
 # run on a machine with no NVIDIA driver: NVRTC from PyPI, a stand-in libcuda
-# whose one "GPU" uses host memory (libcuda.c), and the CUDA device's kernels
-# compiled as host C++ for it to run (emulate.h). Then:
+# whose one "GPU" uses host memory (libcuda.c), and the CUDA device's kernels,
+# hand-written and `Tensomite.kernel` macros, compiled as host C++ for it to run
+# (emulate.h, macro_kernels.cr). Then:
 #
 #     export LIBRARY_PATH=DIR LD_LIBRARY_PATH=DIR TENSOMITE_CUDA_KERNELS=DIR/libkernels.so
 #     crystal spec -Dcuda
@@ -20,7 +21,9 @@ ln -sf "$lib/libnvrtc.so.13" "$dir/libnvrtc.so.13"
 for builtins in "$lib"/libnvrtc-builtins.so*; do ln -sf "$builtins" "$dir/"; done
 here="$(cd "$(dirname "$0")" && pwd)"
 cc -shared -fPIC -o "$dir/libcuda.so" "$here/libcuda.c" -ldl
-python3 "$here/register.py" "$here/../../src/tensomite/cuda/kernels.cu" > "$dir/registry.inc"
-cat "$here/emulate.h" "$here/../../src/tensomite/cuda/kernels.cu" "$dir/registry.inc" > "$dir/kernels.cpp"
+cuda="$here/../../src/tensomite/cuda"
+(cd "$here/../.." && crystal run scripts/cuda_stub/macro_kernels.cr) > "$dir/macro_kernels.cu"
+python3 "$here/register.py" "$cuda/kernels.cu" "$dir/macro_kernels.cu" > "$dir/registry.inc"
+cat "$here/emulate.h" "$cuda/prelude.cu" "$cuda/kernels.cu" "$dir/macro_kernels.cu" "$dir/registry.inc" > "$dir/kernels.cpp"
 c++ -std=c++20 -O2 -ffp-contract=off -shared -fPIC -pthread -o "$dir/libkernels.so" "$dir/kernels.cpp"
 echo "$dir"

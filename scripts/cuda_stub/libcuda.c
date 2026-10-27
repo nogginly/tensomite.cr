@@ -81,14 +81,14 @@ CUresult cuMemcpyDtoH_v2(void *destination, CUdeviceptr source, size_t bytes) {
 }
 
 static void *(*find_kernel)(const char *);
-static void (*launch_kernel)(void *, unsigned, unsigned, void **);
+static void (*launch_kernel)(void *, unsigned, unsigned, unsigned, unsigned, unsigned, void **);
 
 CUresult cuModuleLoadData(void **module, const void *image) {
   const char *path = getenv("TENSOMITE_CUDA_KERNELS");
   void *library = path ? dlopen(path, RTLD_NOW) : NULL;
   if (!library) return NOT_SUPPORTED;
   find_kernel = (void *(*)(const char *))dlsym(library, "tensomite_kernel");
-  launch_kernel = (void (*)(void *, unsigned, unsigned, void **))dlsym(library, "tensomite_launch");
+  launch_kernel = (void (*)(void *, unsigned, unsigned, unsigned, unsigned, unsigned, void **))dlsym(library, "tensomite_launch");
   if (!find_kernel || !launch_kernel) return NOT_SUPPORTED;
   *module = library;
   return SUCCESS;
@@ -101,10 +101,10 @@ CUresult cuModuleGetFunction(void **function, void *module, const char *name) {
   return *function ? SUCCESS : NOT_FOUND;
 }
 
-/* Runs a 1-D grid; the kernels launch no other shape yet. */
+/* Runs grids of up to three dimensions of blocks of up to two. */
 CUresult cuLaunchKernel(void *function, unsigned gx, unsigned gy, unsigned gz, unsigned bx, unsigned by,
                         unsigned bz, unsigned shared, void *stream, void **params, void **extra) {
-  if (gy != 1 || gz != 1 || by != 1 || bz != 1) return NOT_SUPPORTED;
-  launch_kernel(function, gx, bx, params);
+  if (bz != 1) return NOT_SUPPORTED;
+  launch_kernel(function, gx, gy, gz, bx, by, params);
   return SUCCESS;
 }

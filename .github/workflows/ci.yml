@@ -69,6 +69,7 @@ jobs:
             case "$f" in *cuda*) flags=-Dcuda ;; *) flags= ;; esac
             crystal build --no-codegen $flags "$f"
           done
+          for f in bench/gpt2.cr bench/gpt2_digest.cr; do crystal build --no-codegen -Dcuda "$f"; done
 
       # NVRTC needs no GPU, and the stand-in libcuda gives the CUDA device a GPU
       # in host memory that runs its kernels compiled as host C++: NVRTC compiles
