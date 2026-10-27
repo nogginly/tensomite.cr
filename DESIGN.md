@@ -1112,7 +1112,21 @@ CUDA, `TwoPass`       |3,718                         |203.2           |5
 CUDA, `Auto` (default)|**4,585**                     |**211.4**       |**5**               
 
 - **`Auto` decodes at 211 tokens/s,** from part 4's 171, and agrees with the profile's 212. It beats `TwoPass` alone by keeping `Split` where `b`'s columns are contiguous.
-- **What remains** is mostly outside the matmuls: about 1.2 ms of small ops (adds, layer norms, copies) and 0.7 ms of launching 329 kernels a token.
+- **What remains,** by op (Decision AZ; `bench/profile_gpt2_cuda.cr` now totals each op whatever its shape):
+
+Op       |Per token|GPU ms|Share
+---------|---------|------|-----
+`MatMul` |73       |3.160 |67%  
+`Cat`    |24       |0.520 |11%  
+`Add`    |85       |0.405 |9%   
+`Copy`   |48       |0.246 |5%   
+LayerNorm|25       |0.224 |5%   
+`Softmax`|12       |0.086 |2%   
+others   |25       |0.108 |2%   
+
+- **The matmuls are still two thirds.** The five weight products take 2.96 ms for 493 MB, about 167 GB/s; mlp out (136 GB/s) and attention out (126) are the slowest, with 24 blocks each under `Split`.
+- **`Cat` is the largest of the rest:** 24 a token, each copying a layer's whole key or value cache, about 22 µs apiece. The profile's by-shape table had hidden it, since its shape grows every token.
+- **The small kernels cost about 4.7 µs each** whatever they do: 49 `Add [1,768]` take 0.229 ms.
 
 Metal keeps `Split` at decode: its decode was not profiled for this, and the fix there would be the same.
 
