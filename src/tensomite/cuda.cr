@@ -197,6 +197,61 @@ module Tensomite
     # Kernels defined with `Tensomite.kernel`, each compiled on first use, by name.
     @macro_kernels = {} of String => Kernels
 
+    # Where a `CUDA` device's time goes, collected while `CUDA#profile` is set.
+    #
+    # ```
+    # cuda.profile = CUDA::Profile.new
+    # model.forward(ids, cache)
+    # cuda.profile.try(&.launch) # => seconds spent launching kernels
+    # ```
+    class Profile
+      # True when every op is timed on the GPU on its own, between two events,
+      # waiting for it to finish. That gives GPU time per op, but serialises the
+      # host and the GPU, so the wall time grows.
+      getter? per_kernel : Bool
+
+      # Count and GPU seconds per op; filled only when `#per_kernel?`.
+      getter kernels = Hash(String, {Int32, Float64}).new({0, 0.0})
+
+      # Count and wall seconds per op run on the host.
+      getter host_ops = Hash(String, {Int32, Float64}).new({0, 0.0})
+
+      # Seconds spent preparing and queuing kernels, allocating buffers, copying
+      # to and from the host, and waiting for the GPU at `sync`.
+      property launch = 0.0
+      property alloc = 0.0
+      property transfer = 0.0
+      property wait = 0.0
+
+      # Kernel launches, uploads and downloads.
+      property launches = 0
+      property uploads = 0
+      property downloads = 0
+
+      # True when `#kernels` keys each op by its shapes as well as its name: a
+      # matmul's two sources, `MatMul [64,768]·[768,2304]`, and any other op's
+      # output. Takes effect only with `#per_kernel?`.
+      getter? shapes : Bool
+
+      def initialize(@per_kernel = false, @shapes = false)
+      end
+
+      protected def add_kernel(name : String, seconds : Float64) : Nil
+        count, total = kernels[name]
+        kernels[name] = {count + 1, total + seconds}
+      end
+
+      protected def add_host_op(name : String, seconds : Float64) : Nil
+        count, total = host_ops[name]
+        host_ops[name] = {count + 1, total + seconds}
+      end
+    end
+
+    # The profile being collected, or `nil` (the default) for none.
+    property profile : Profile? = nil
+
+    @events : {Void*, Void*}? = nil
+
     @retired = [] of {LibCUDA::DevicePtr, Int32}
     @retired_lock = Atomic(Bool).new(false)
     @kernels : Kernels? = nil
@@ -226,8 +281,10 @@ module Tensomite
     # Returns a buffer of *bytesize* bytes of device memory, from the pool when
     # one is free.
     def alloc(bytesize : Int32) : Buffer
+      start = Time.instant
       recycle_retired
       pointer = buffer_pool.take(bytesize) || context.alloc(Math.max(bytesize, 4))
+      @profile.try { |profile| profile.alloc += (Time.instant - start).total_seconds }
       CUDABuffer.new(self, pointer, bytesize)
     end
 
@@ -239,17 +296,27 @@ module Tensomite
     def upload(buffer : Buffer, data : Bytes) : Nil
       target = cuda(buffer)
       @uploads += 1
+      start = Time.instant
       context.upload(target.pointer, data) unless data.empty?
+      @profile.try do |profile|
+        profile.uploads += 1
+        profile.transfer += (Time.instant - start).total_seconds
+      end
       target.device_written
     end
 
     def download(buffer : Buffer, data : Bytes) : Nil
       source = cuda(buffer)
       @downloads += 1
+      start = Time.instant
       if copy = source.current_copy
         copy[0, data.size].copy_to(data)
       elsif !data.empty?
         context.download(source.pointer, data)
+      end
+      @profile.try do |profile|
+        profile.downloads += 1
+        profile.transfer += (Time.instant - start).total_seconds
       end
     end
 
@@ -263,11 +330,12 @@ module Tensomite
     # host kernel on host copies of its sources and uploads its output.
     def execute(node : Node, output : Buffer) : Nil
       target = cuda(output)
-      if (kernels = self.kernels) && launch(kernels, node, target)
+      if (kernels = self.kernels) && launch_profiled(kernels, node, target)
         target.device_written
         @gpu_ops += 1
         return
       end
+      start = Time.instant
       target.writing = true
       begin
         super
@@ -276,14 +344,20 @@ module Tensomite
       end
       target.host_written
       @host_ops += 1
+      @profile.try(&.add_host_op("#{node.op} #{node.dtype}", (Time.instant - start).total_seconds))
     end
 
     # Waits for the GPU, reuses or frees memory given back meanwhile, and raises
     # `ExecutionError` if a kernel found an index out of range.
     def sync : Nil
-      context.synchronize
-      recycle_retired
-      check_errors
+      start = Time.instant
+      begin
+        context.synchronize
+        recycle_retired
+        check_errors
+      ensure
+        @profile.try { |profile| profile.wait += (Time.instant - start).total_seconds }
+      end
     end
 
     # :nodoc:
@@ -320,6 +394,31 @@ module Tensomite
 
     private def cuda(buffer : Buffer) : CUDABuffer
       own(buffer).as?(CUDABuffer) || raise DeviceError.new("buffer is not a CUDA buffer")
+    end
+
+    # Launches *node* as `#launch` does, recording the time it takes with a
+    # profile, and, with a per-kernel profile, timing it on the GPU between two
+    # events and waiting for it.
+    private def launch_profiled(kernels : Kernels, node : Node, output : CUDABuffer) : Bool
+      return launch(kernels, node, output) unless profile = @profile
+      launches = context.launches
+      events = @events ||= {context.event, context.event}
+      context.record(events[0]) if profile.per_kernel?
+      start = Time.instant
+      launched = launch(kernels, node, output)
+      profile.launch += (Time.instant - start).total_seconds
+      profile.launches += context.launches - launches
+      if launched && profile.per_kernel?
+        context.record(events[1])
+        profile.add_kernel(profile_label(node, profile), context.elapsed(events[0], events[1]))
+      end
+      launched
+    end
+
+    private def profile_label(node : Node, profile : Profile) : String
+      return node.op.to_s unless profile.shapes?
+      shapes = node.op.try(&.mat_mul?) ? node.srcs.map(&.shape) : [node.shape]
+      "#{node.op} #{shapes.map { |shape| "[#{shape.join(',')}]" }.join('·')}"
     end
 
     # Queues the kernel for *node* and returns true, or returns false when it has
@@ -728,9 +827,13 @@ module Tensomite
         launch(function, {blocks, 1, 1}, {threads, 1}, *args)
       end
 
+      # Returns the number of kernels launched since creation.
+      getter launches = 0_i64
+
       # Queues *function* on a grid of *grid* blocks, each of *block* threads.
       def launch(function : Void*, grid : {Int32, Int32, Int32}, block : {Int32, Int32}, *args) : Nil
         return if grid.any?(&.zero?)
+        @launches += 1
         params = CUDA.kernel_params(*args)
         CUDA.check LibCUDA.cuLaunchKernel(function, grid[0].to_u32, grid[1].to_u32, grid[2].to_u32,
           block[0].to_u32, block[1].to_u32, 1, 0, Pointer(Void).null, params.to_unsafe, Pointer(Void*).null), "cuLaunchKernel"
@@ -739,6 +842,24 @@ module Tensomite
       # Waits for every launched kernel, and raises any error one of them hit.
       def synchronize : Nil
         CUDA.check LibCUDA.cuCtxSynchronize, "cuCtxSynchronize"
+      end
+
+      # Returns a new event, for timing work on the GPU.
+      def event : Void*
+        CUDA.check LibCUDA.cuEventCreate(out event, 0), "cuEventCreate"
+        event
+      end
+
+      # Queues *event* after the work launched so far.
+      def record(event : Void*) : Nil
+        CUDA.check LibCUDA.cuEventRecord(event, Pointer(Void).null), "cuEventRecord"
+      end
+
+      # Waits for *stop*, and returns the GPU seconds between *start* and *stop*.
+      def elapsed(start : Void*, stop : Void*) : Float64
+        CUDA.check LibCUDA.cuEventSynchronize(stop), "cuEventSynchronize"
+        CUDA.check LibCUDA.cuEventElapsedTime(out milliseconds, start, stop), "cuEventElapsedTime"
+        milliseconds / 1000.0
       end
     end
 
