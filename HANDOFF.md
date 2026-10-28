@@ -4,7 +4,7 @@ What the next session, or the next person, needs in order to carry on without th
 
 **Keeping it current.** Rewrite it rather than appending to it: at the end of each PR, and whenever a session's context passes about 70%. Anything that belongs in one of the other three documents goes there instead.
 
-*Last rewritten: 27 Oct 2026, with a CUDA matmul benchmark open.*
+*Last rewritten: 27 Oct 2026, with views for strided reshapes and fused bias adds open.*
 
 ## Where things stand
 
@@ -15,8 +15,8 @@ What the next session, or the next person, needs in order to carry on without th
   - macro kernels match their oracles and their gradients pass finite differences;
   - Shakespeare reached 1.573 nats/char in 20 minutes in the Linux container.
 - **M7b's exit, met** (evidence under 7b in `PLAN.md`): the tutorial, Shakespeare and GPT-2 models on modules with the same bits as the hand-written ones, on every device; the `Builder` chosen as the DSL (Decisions AN and AR).
-- **Open PR:** `bench/matmul_cuda.cr` and the record of narrower split-K blocks being slower (`m8-cuda-split-widths`, Decisions BD and BE); the kernels themselves were removed. Merged: parts 1 to 4, the profiler (Decision AW), the two-pass decode matmul (Decisions AX, AY), the profile by op (AZ, BA) and the preallocated KV cache (BB, BC), with which `Auto` decodes at 246 tokens/s on the GB10, from 171 at part 4.
-- **Now: M8, a CUDA backend** (Decisions AS–AV in `PLAN.md`; Vulkan moved to M12). Development is on the maintainer's DGX Spark, the exit on a cloud T4. Nothing in the container runs CUDA kernels: the maintainer runs them on the Spark, as with Metal on the Mac. The container and CI run the `CUDA` device and its kernels on `scripts/cuda_stub`, which compiles `kernels.cu` as host C++. Next: perhaps fuse bias adds into matmuls, then part 5, the Shakespeare trainer on CUDA and the exit runs on the Spark and a T4.
+- **Open PRs:** `reshape` as a view whenever strides allow (`m8-strided-reshape`), and bias adds inside `MatMul` (`m8-matmul-bias`), both Decision BF and both with the same bits; together they remove 48 copies and 48 adds from a decoded GPT-2 token. Next: part 5. Merged: parts 1 to 4, the profiler (Decision AW), the two-pass decode matmul (AX, AY), the profile by op (AZ, BA), the preallocated KV cache (BB, BC) and the CUDA matmul benchmark with narrower blocks ruled out (BD, BE); `Auto` decodes at 246 tokens/s on the GB10, from 171 at part 4.
+- **Now: M8, a CUDA backend** (Decisions AS–AV in `PLAN.md`; Vulkan moved to M12). Development is on the maintainer's DGX Spark, the exit on a cloud T4. Nothing in the container runs CUDA kernels: the maintainer runs them on the Spark, as with Metal on the Mac. The container and CI run the `CUDA` device and its kernels on `scripts/cuda_stub`, which compiles `kernels.cu` as host C++. Next: part 5, the Shakespeare trainer on CUDA and the exit runs on the Spark and a T4.
 - **A long-term goal:** inspecting running models (activations, attention, gradients) by the names of their parts; see "Inspectable" in `PLAN.md` and "Towards inspection" in `DESIGN.md`. Scopes are its first piece, and Decision AA must keep inspected nodes alive.
 - **Deferred:** Decision D, CPU threads (not needed for M7's exits). Decision AA, releasing buffers as soon as their last reader has run.
 
@@ -30,7 +30,7 @@ Stacked PRs         |When asked. The later PR's base is the earlier branch; GitH
 Merging             |The maintainer merges, by squash or by merge commit. After a squash, merge `main` into a stacked branch and resolve conflicts with the branch's side; never rewrite history or force-push (the session blocks it anyway).                                            
 Milestones          |Each ends with its exit criterion passing, with the evidence (numbers, logs) in the PR description.                                                                                                                                                                  
 Documents           |Updated in the same PR as the code (see "Workflow" in `DEVELOPMENT.md`), `GUIDE.md` included whenever the public API changes. Tables and diagrams follow "Documents" in `DEVELOPMENT.md`; check them with `scripts/format_tables.py` and `scripts/check_diagrams.sh`.
-Decisions           |Labelled with letters and recorded in `PLAN.md`. The next is **BF**; T to AG shape M7, AH to AR shape M7b, and AS to BE shape M8. P (how to get GPT-2 small's fixtures) was settled by allowing Hugging Face; Q made this document committed.                        
+Decisions           |Labelled with letters and recorded in `PLAN.md`. The next is **BG**; T to AG shape M7, AH to AR shape M7b, and AS to BF shape M8. P (how to get GPT-2 small's fixtures) was settled by allowing Hugging Face; Q made this document committed.                        
 Understanding checks|Short questions labelled Q-A, Q-B and so on, after explaining something new. The next is **Q-AQ**; Q-T to Q-AP are recent.                                                                                                                                           
 Claims              |Measured before stated. Several assumptions were wrong when checked: decode time was dominated by the KV cache, not host kernels; GPT-2's file was unaligned. Say "I think" when something is unverified.                                                            
 

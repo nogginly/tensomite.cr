@@ -49,11 +49,15 @@ module Tensomite
     # 1. Describes each operand's batch matrix to BLAS as a pointer, a transpose
     #    flag and a leading dimension, copying it only when its strides allow neither.
     # 2. Writes `[m, n]` results contiguously into *dst*, batch after batch.
+    # 3. Adds the bias, if the product has one.
     private def sgemm(node : Node, dst : Slice(Float32)) : Nil
-      a, b = node.srcs
+      a, b = node.srcs[0], node.srcs[1]
       m, k, n = a.shape[-2], a.shape[-1], b.shape[-1]
       return if dst.empty?
-      return dst.fill(0f32) if k == 0
+      if k == 0
+        dst.fill(0f32)
+        return add_bias(Float32, node, dst)
+      end
       xs, ys = elements(Float32, a), elements(Float32, b)
       (dst.size // (m * n)).times do |batch|
         pa, trans_a, lda = operand(a.view, xs, batch, m, k)
@@ -61,6 +65,7 @@ module Tensomite
         LibBLAS.cblas_sgemm(ROW_MAJOR, trans_a, trans_b, m, n, k,
           1f32, pa, lda, pb, ldb, 0f32, dst.to_unsafe + batch * m * n, n)
       end
+      add_bias(Float32, node, dst)
     end
 
     # Returns the pointer, transpose flag and leading dimension of matrix *batch*

@@ -40,6 +40,7 @@ describe "Tensomite.grad" do
     check_gradients([[2, 2], [1, 2]]) { |(a, b)| Tensor.cat([a, b, a], 0) }
     check_gradients([[4, 3]]) { |(a)| a.gather(Tensor.from([2, 0, 2], [3], a.device)) }
     check_gradients([[2, 3], [3, 4]]) { |(a, b)| a.matmul(b) }
+    check_gradients([[2, 3], [3, 4], [4]]) { |(a, b, c)| a.matmul(b, c) }
     check_gradients([[2, 2, 3], [3, 2]]) { |(a, b)| a.matmul(b) }
   end
 

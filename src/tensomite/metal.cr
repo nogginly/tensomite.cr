@@ -369,11 +369,12 @@ module Tensomite
     # `Tiled` launches one threadgroup per block of `#matmul_tile` outputs of each
     # batch matrix, with a thread per `TILE_PATCH` x `TILE_PATCH` patch.
     private def encode_matmul(node : Node, output : MetalBuffer) : Nil
-      a, b = node.srcs
+      a, b, bias = node.srcs[0], node.srcs[1], node.srcs[2]?
       m, k, n = a.shape[-2], a.shape[-1], b.shape[-1]
-      dims = Slice[m.to_u32, k.to_u32, n.to_u32].to_unsafe_bytes
-      buffers = [mtl(a), mtl(b), output.mtl]
-      constants = [view_args(a.view), view_args(b.view), dims]
+      dims = Slice[m.to_u32, k.to_u32, n.to_u32, bias ? 1_u32 : 0_u32].to_unsafe_bytes
+      # Without a bias, the output stands in for it, unread.
+      buffers = [mtl(a), mtl(b), output.mtl, bias ? mtl(bias) : output.mtl]
+      constants = [view_args(a.view), view_args(b.view), view_args((bias || a).view), dims]
       return if node.size == 0
       case matmul_mode
       in .serial?
@@ -388,8 +389,13 @@ module Tensomite
         end
       in .atomic?
         raise DeviceError.new("atomic matmul needs Metal 3") unless @pipelines.has_key?("matmul_atomic_f32")
-        dispatch("fill_zero_f32", node.size, [output.mtl], [u32(node.size)])
-        dispatch_groups("matmul_atomic_f32", {(n + COLS - 1) // COLS, node.size // n}, {COLS, SLICES}, buffers, constants)
+        # The atomic adds start from the bias, or from zero.
+        if bias
+          dispatch("copy_into_f32", node.size, [mtl(bias), output.mtl], [view_args(bias.view), view_args(View.contiguous(node.shape)), u32(node.size)])
+        else
+          dispatch("fill_zero_f32", node.size, [output.mtl], [u32(node.size)])
+        end
+        dispatch_groups("matmul_atomic_f32", {(n + COLS - 1) // COLS, node.size // n}, {COLS, SLICES}, buffers.first(3), constants.first(2) + [dims])
       end
     end
 
@@ -628,7 +634,7 @@ module Tensomite
     # buffers hold, and their GPU time is recorded under it.
     private def profile_label(node : Node, profile : Profile) : String
       return node.op.to_s unless profile.shapes?
-      shapes = node.op.try(&.mat_mul?) ? node.srcs.map(&.shape) : [node.shape]
+      shapes = node.op.try(&.mat_mul?) ? node.srcs.first(2).map(&.shape) : [node.shape]
       "#{node.op} #{shapes.map { |shape| "[#{shape.join(',')}]" }.join('·')}"
     end
 

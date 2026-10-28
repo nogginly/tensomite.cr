@@ -190,6 +190,22 @@ require "./spec_helper"
         end
       end
 
+      it "adds a bias with the bits of a separate add, in every mode" do
+        rng = Random.new(9)
+        bias = Tensor.from(Array(Float32).new(70) { rng.rand(-1f32...1f32) }, [70], cuda)
+        [{[3, 200], [200, 70], false}, {[20, 129], [129, 70], false}, {[1, 200], [70, 200], true}].each do |(a_shape, b_shape, b_transposed)|
+          a = Tensor.from(Array(Float32).new(a_shape.product) { rng.rand(-1f32...1f32) }, a_shape, cuda)
+          b = Tensor.from(Array(Float32).new(b_shape.product) { rng.rand(-1f32...1f32) }, b_shape, cuda)
+          b = b.transpose if b_transposed
+          CUDA::MatMulMode.values.each do |mode|
+            cuda.matmul_mode = mode
+            a.matmul(b, bias).to_a(Float32).should eq (a.matmul(b) + bias).to_a(Float32)
+          end
+        end
+      ensure
+        cuda.matmul_mode = CUDA::MatMulMode::Auto
+      end
+
       it "gives a tiled prefill the bits of a decode" do
         model = GPT2.load("#{__DIR__}/fixtures/tiny_gpt2/model.safetensors", heads: 4, device: cuda)
         ids = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200]

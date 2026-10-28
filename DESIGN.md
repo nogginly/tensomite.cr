@@ -203,7 +203,7 @@ Kind      |Primitive ops (`Op`)                  |`Tensor` API
 Binary    |`Add`, `Sub`, `Mul`, `Div`, `Maximum` |`+`, `-`, `*`, `/`, `maximum`, with tensors or scalars                
 Unary     |`Exp`, `Log`, `Tanh`, `Sqrt`          |`exp`, `log`, `tanh`, `sqrt`, unary `-`                               
 Reduction |`Sum`, `Max`                          |`sum`, `max`, with optional `axis` and `keepdims`                     
-Structural|`Copy`, `Cat`, `Gather`, `MatMul`     |`contiguous`, `Tensor.cat`, `gather`, `matmul`                        
+Structural|`Copy`, `Cat`, `Gather`, `MatMul`     |`contiguous`, `Tensor.cat`, `gather`, `matmul` (with an optional bias)
 Adjoint   |`GreaterEqual`, `Unview`, `ScatterAdd`|`greater_equal`; the other two only through `Tensomite.grad`          
 Fused     |`Kernel`                              |any `Tensomite.kernel`, such as `gelu`                                
 Row       |`Softmax`, `LogSoftmax`, `LayerNorm`  |`softmax`, `log_softmax` and `layernorm` along the last axis          
@@ -1151,6 +1151,7 @@ mlp in, `[1,768]·[768,3072]`      |209       |165       |79       |191
 mlp out, `[1,3072]·[3072,768]`    |202       |202       |151      |165       
 
   Block count was not the limit: mlp out reads at 202 GB/s with 24 blocks. I think the width of each read is: a warp of 32 columns reads 128 adjacent bytes of a row of weights at each step, while one of 8 columns reads four 32-byte pieces of rows far apart. The narrower kernels were removed, and `bench/matmul_cuda.cr` stays to compare split with two passes. In the model the same products read 10–15% slower than alone, worth about 0.15 ms a token.
+- **Bias adds inside the matmul (Decision BF).** `matmul(b, bias)` gives `MatMul` a third source, the bias expanded to the output's shape, and every matmul kernel adds it to each output after the output's sum is complete: `with_bias(total, ...)` on CUDA and Metal, a pass over the output on the host and after `cblas_sgemm`. The sum is the same and the addition is the same single rounding, so the bits are those of a separate `Add`; specs compare the two on every device and in every matmul mode. Metal's `Atomic` mode starts its atomic adds from the bias instead of from zero, which, like the rest of that mode, is not bit-exact. `Linear` uses it, so GPT-2 loses 48 `Add`s a token, four per block. The gradient of the bias is the output's gradient, summed over the rows by the expand's `Unview`, as before.
 - **Prefill pays for the cache once (Decision BC).** A new cache allocates its whole capacity, 75 MB for GPT-2 small, and the prompt's keys and values are copied into it: about 1.3 ms and 0.4 ms on the GB10, a cost before the first token rather than per token. `bench/gpt2.cr` makes a new cache for every prefill it times, so its prefill rate fell 10%, to 4,134 tokens/s.
 
 Metal keeps `Split` at decode: its decode was not profiled for this, and the fix there would be the same.
