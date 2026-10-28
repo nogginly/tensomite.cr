@@ -247,9 +247,8 @@ extern "C" __global__ void matmul_f32(const float* a, const float* b, float* dst
 // Split-K matrix products, for when one thread per output leaves the GPU idle, as
 // in a matrix-vector product.
 //
-// A block owns C adjacent output columns of one output row, with S threads per
-// column: COLS and SLICES for matmul_split_f32, and narrower blocks with more
-// slices for products with few columns, so that more blocks share the GPU. k is cut into chunks of CHUNK elements at fixed offsets, so
+// A block owns COLS adjacent output columns of one output row, with SLICES
+// threads per column. k is cut into chunks of CHUNK elements at fixed offsets, so
 // a chunk boundary never depends on k, m or n. Each thread sums whole chunks in
 // index order, and adjacent threads read adjacent columns of b.
 #define COLS 32
@@ -268,17 +267,15 @@ __device__ float chunk_sum(const float* a, const float* b, int pa, int pb, int s
     return acc;
 }
 
-// Deterministic: in each pass the S threads of a column compute S consecutive
-// chunks, and the first thread adds them to the column's total in chunk order.
-// The total is therefore ((0 + c0) + c1) + ..., whatever C and S are; extra
-// chunks past k add zeros, which change nothing, since a total that starts at
-// +0 is never -0.
-template <unsigned int C, unsigned int S>
-__device__ void matmul_split(const float* a, const float* b, float* dst, const View& va, const View& vb,
-                             unsigned int m, unsigned int k, unsigned int n) {
-    __shared__ float partial[S][C];
+// Deterministic: in each pass the SLICES threads of a column compute SLICES
+// consecutive chunks, and the first thread adds them to the column's total in
+// chunk order. The total is therefore ((c0 + c1) + c2) + ..., whatever the
+// block size; extra chunks past k add exact zeros.
+extern "C" __global__ void matmul_split_f32(const float* a, const float* b, float* dst, View va, View vb,
+                                            unsigned int m, unsigned int k, unsigned int n) {
+    __shared__ float partial[SLICES][COLS];
     unsigned int lane = threadIdx.x, slice = threadIdx.y;
-    unsigned int col = blockIdx.x * C + lane;
+    unsigned int col = blockIdx.x * COLS + lane;
     unsigned int out_row = blockIdx.y;
     unsigned int batch = out_row / m, row = out_row % m;
     bool live = col < n;
@@ -288,27 +285,17 @@ __device__ void matmul_split(const float* a, const float* b, float* dst, const V
     int sb = vb.strides[vb.ndim - 2];
     unsigned int chunks = (k + CHUNK - 1) / CHUNK;
     float total = 0.0f;
-    for (unsigned int first = 0; first < chunks; first += S) {
+    for (unsigned int first = 0; first < chunks; first += SLICES) {
         unsigned int c = first + slice;
         partial[slice][lane] = live && c < chunks ? chunk_sum(a, b, pa, pb, sa, sb, k, c) : 0.0f;
         __syncthreads();
         if (slice == 0) {
-            for (unsigned int t = 0; t < S; t++) total = total + partial[t][lane];
+            for (unsigned int t = 0; t < SLICES; t++) total = total + partial[t][lane];
         }
         __syncthreads();
     }
     if (slice == 0 && live) dst[out_row * n + col] = total;
 }
-
-#define SPLIT(name, C, S)                                                               \
-    extern "C" __global__ void name(const float* a, const float* b, float* dst, View va, View vb, \
-                                    unsigned int m, unsigned int k, unsigned int n) {    \
-        matmul_split<C, S>(a, b, dst, va, vb, m, k, n);                                 \
-    }
-
-SPLIT(matmul_split_f32, COLS, SLICES)
-SPLIT(matmul_split_16x16_f32, 16, 16)
-SPLIT(matmul_split_8x32_f32, 8, 32)
 
 // Two-pass matrix products, for products of few rows, as in decoding one token,
 // where split-K has too few blocks and reads a transposed b across its rows.

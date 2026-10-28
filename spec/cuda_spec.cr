@@ -182,18 +182,6 @@ require "./spec_helper"
         end
       end
 
-      it "gives the same bits with every split block width" do
-        (shapes + [{[1, 3072], [3072, 768], false}, {[1, 768], [300, 768], true}]).each do |(a_shape, b_shape, b_transposed)|
-          widest = tiled_product.call(CUDA::MatMulMode::Split, CUDA::MatMulTile::T64x64, a_shape, b_shape, b_transposed)
-          CUDA::MatMulSplit.values.each do |split|
-            cuda.matmul_split = split
-            tiled_product.call(CUDA::MatMulMode::Split, CUDA::MatMulTile::T64x64, a_shape, b_shape, b_transposed).should eq widest
-          end
-        ensure
-          cuda.matmul_split = nil
-        end
-      end
-
       it "gives split's bits in two passes, with few rows or many, batched and transposed" do
         (shapes + [{[1, 768], [300, 768], true}, {[2, 3, 1, 129], [2, 3, 129, 200], false}, {[1, 0], [0, 5], false}]).each do |(a_shape, b_shape, b_transposed)|
           split = tiled_product.call(CUDA::MatMulMode::Split, CUDA::MatMulTile::T64x64, a_shape, b_shape, b_transposed)

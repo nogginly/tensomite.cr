@@ -1,6 +1,5 @@
 # Times the products of decoding one GPT-2 small token on CUDA, on the GPU alone,
-# with each split block width (`CUDA::MatMulSplit`), the default choice, and two
-# passes.
+# split and in two passes.
 #
 #     crystal run --release -Dcuda bench/matmul_cuda.cr
 #
@@ -28,9 +27,7 @@ end
 
 abort "no CUDA GPU" unless CUDA.available?
 cuda = CUDA.default
-configs = CUDA::MatMulSplit.values.map { |split| {split.to_s.downcase, CUDA::MatMulMode::Split, split.as(CUDA::MatMulSplit?)} }
-configs << {"default", CUDA::MatMulMode::Split, nil.as(CUDA::MatMulSplit?)}
-configs << {"two pass", CUDA::MatMulMode::TwoPass, nil.as(CUDA::MatMulSplit?)}
+configs = [{"split", CUDA::MatMulMode::Split}, {"two pass", CUDA::MatMulMode::TwoPass}]
 
 puts "#{cuda.name}, #{cuda.gpu.multiprocessors} multiprocessors; µs per product, and GB/s of weights read"
 puts
@@ -39,8 +36,8 @@ puts "-------|" + configs.map { |config| "-" * config[0].size }.join("|")
 SHAPES.each do |(name, k, n)|
   x = matrix(cuda, [1, k], 1)
   weights = Array.new(LAYERS) { |i| matrix(cuda, [k, n], i + 2) }
-  cells = configs.map do |(_, mode, split)|
-    cuda.matmul_mode, cuda.matmul_split = mode, split
+  cells = configs.map do |(_, mode)|
+    cuda.matmul_mode = mode
     weights.each { |weight| x.matmul(weight).realize }
     profile = CUDA::Profile.new(per_kernel: true)
     cuda.profile = profile
@@ -51,4 +48,4 @@ SHAPES.each do |(name, k, n)|
   end
   puts "#{name} [1,#{k}]·[#{k},#{n}]|#{cells.join('|')}"
 end
-cuda.matmul_mode, cuda.matmul_split = CUDA::MatMulMode::Auto, nil
+cuda.matmul_mode = CUDA::MatMulMode::Auto

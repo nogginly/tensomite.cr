@@ -95,6 +95,8 @@ module Tensomite
     private REDUCE_THREADS = 256
     private REDUCE_CHUNK   =  16
     private BLOCK          = 256
+    private COLS           =  32
+    private SLICES         =   8
     private TILE_PATCH     =   4
     private DECODE_COLS    = 128
     private DECODE_ROWS    =  16
@@ -141,33 +143,6 @@ module Tensomite
         "matmul_tiled_#{rows}x#{cols}_f32"
       end
     end
-
-    # The columns a block of the split matmul computes, with as many threads per
-    # column as make 256 a block. Narrower blocks make more of them, for products
-    # with few columns. All give the same bits.
-    enum MatMulSplit
-      C32
-      C16
-      C8
-
-      # Returns the block's columns and threads per column.
-      def block : {Int32, Int32}
-        case self
-        in .c32? then {32, 8}
-        in .c16? then {16, 16}
-        in .c8?  then {8, 32}
-        end
-      end
-
-      protected def kernel : String
-        cols, slices = block
-        cols == 32 ? "matmul_split_f32" : "matmul_split_#{cols}x#{slices}_f32"
-      end
-    end
-
-    # The fewest blocks per multiprocessor the split matmul aims for when
-    # `#matmul_split` is `nil`.
-    SPLIT_BLOCKS_PER_MULTIPROCESSOR = 4
 
     # The fewest rows for which `MatMulMode::Auto` uses the tiled matmul.
     TILED_ROWS = 16
@@ -224,11 +199,6 @@ module Tensomite
 
     # How `MatMul` divides its work; see `MatMulMode`.
     property matmul_mode = MatMulMode::Auto
-
-    # The block width of the split matmul (see `MatMulSplit`), or `nil`, the
-    # default, for the widest that makes at least `SPLIT_BLOCKS_PER_MULTIPROCESSOR`
-    # blocks per multiprocessor, else `C8`.
-    property matmul_split : MatMulSplit? = nil
 
     # The block size of the tiled matmul; see `MatMulTile`.
     property matmul_tile = MatMulTile::T64x64
@@ -571,8 +541,8 @@ module Tensomite
 
     # MatMul, divided as `#matmul_mode` says.
     #
-    # `Split` launches one block per output row and block of columns (see
-    # `#matmul_split`), with 256 threads a block, each summing chunks of `k`. `Tiled` launches
+    # `Split` launches one block per output row and block of `COLS` columns, with
+    # `SLICES` threads per column, each summing chunks of `k`. `Tiled` launches
     # one block per `#matmul_tile` outputs of each batch matrix, with a thread per
     # `TILE_PATCH` x `TILE_PATCH` patch. `TwoPass` launches one block per
     # `DECODE_COLS` columns, chunk of `k` and `DECODE_ROWS` rows of each batch
@@ -591,25 +561,13 @@ module Tensomite
           grid = {(n + cols - 1) // cols, (m + rows - 1) // rows, node.size // (m * n)}
           context.launch(kernels[matmul_tile.kernel], grid, {cols // TILE_PATCH, rows // TILE_PATCH}, *args)
         elsif matmul_mode.split? || b.view.strides.last == 1
-          split = split_for(n, node.size // n)
-          cols, slices = split.block
-          context.launch(kernels[split.kernel], {(n + cols - 1) // cols, node.size // n, 1}, {cols, slices}, *args)
+          context.launch(kernels["matmul_split_f32"], {(n + COLS - 1) // COLS, node.size // n, 1}, {COLS, SLICES}, *args)
         else
           launch_two_pass(kernels, node, output, m, k, n)
         end
       in .two_pass?
         launch_two_pass(kernels, node, output, m, k, n)
       end
-    end
-
-    # Returns `#matmul_split`, or when it is `nil`, the widest block that gives
-    # *rows* rows of *n* columns enough blocks.
-    private def split_for(n : Int32, rows : Int32) : MatMulSplit
-      if chosen = matmul_split
-        return chosen
-      end
-      wanted = SPLIT_BLOCKS_PER_MULTIPROCESSOR * gpu.multiprocessors
-      {MatMulSplit::C32, MatMulSplit::C16}.find { |split| (n + split.block[0] - 1) // split.block[0] * rows >= wanted } || MatMulSplit::C8
     end
 
     private def launch_two_pass(kernels : Kernels, node : Node, output : CUDABuffer, m : Int32, k : Int32, n : Int32) : Nil
