@@ -125,13 +125,54 @@ module Tensomite
       View.new(new_shape, strides, offset + start * strides[axis])
     end
 
-    # Returns a view of the same elements with a new shape, or `nil` when the view
-    # is not contiguous and the data must be copied first.
+    # Returns a view of the same elements with a new shape, or `nil` when no
+    # strides can give it and the data must be copied first.
+    #
+    # A reshape only splits and merges dimensions, so a view exists whenever each
+    # group of old dimensions that new dimensions merge is itself laid out with
+    # row-major strides: a slice of rows can be split, but a transpose cannot be
+    # flattened.
+    #
+    # ```
+    # View.contiguous([2, 6]).slice(1, 0, 4).reshape([2, 2, 2]) # strides [6, 2, 1]
+    # View.contiguous([2, 3]).transpose.reshape([6])            # => nil
+    # ```
     def reshape(target : Array(Int32)) : View?
       unless target.product(1) == size
         raise ShapeError.new("cannot reshape #{shape} (#{size} elements) to #{target}")
       end
-      View.contiguous(target) if contiguous?
+      return View.contiguous(target) if contiguous?
+      return View.new(target, View.row_major_strides(target), offset) if size <= 1
+      strided_reshape(target)
+    end
+
+    # Returns the view of *target* for a view that is not contiguous, or `nil`.
+    #
+    # 1. Walks the old dimensions from the last, ignoring those of size 1, and
+    #    closes a chunk wherever the next dimension does not continue it in
+    #    memory: its stride is not the chunk's elements times the chunk's stride.
+    # 2. Fills the new dimensions from the last with strides within that chunk,
+    #    until they hold as many elements; if they overshoot, there is no view.
+    private def strided_reshape(target : Array(Int32)) : View?
+      new_strides = Array(Int32).new(target.size, 0)
+      d = target.size - 1
+      chunk_stride = strides.last
+      old_count = new_count = 1
+      (ndim - 1).downto(0) do |i|
+        old_count *= shape[i]
+        next unless i == 0 || (shape[i - 1] != 1 && strides[i - 1] != old_count * chunk_stride)
+        while d >= 0 && (new_count < old_count || target[d] == 1)
+          new_strides[d] = new_count * chunk_stride
+          new_count *= target[d]
+          d -= 1
+        end
+        return unless new_count == old_count
+        if i > 0
+          chunk_stride = strides[i - 1]
+          old_count = new_count = 1
+        end
+      end
+      View.new(target, new_strides, offset) if d < 0
     end
 
     # Returns the storage position of the element at row-major index *flat*.
