@@ -1129,6 +1129,19 @@ others   |25       |0.108 |2%
 - **`Cat` is the largest of the rest:** 24 a token, each copying a layer's whole key or value cache, about 22 µs apiece. The profile's by-shape table had hidden it, since its shape grows every token.
 - **The small kernels cost about 4.7 µs each** whatever they do: 49 `Add [1,768]` take 0.229 ms.
 
+**The KV cache written in place (Decision BB),** on the GB10, `bench/gpt2.cr` on `main` and then on the change, one after the other:
+
+Device                |Decode before, tokens/s|Decode after, tokens/s
+----------------------|-----------------------|----------------------
+`BLAS`                |71.2                   |94.6                  
+CUDA, `Split`         |176.1                  |197.6                 
+CUDA, `TwoPass`       |203.1                  |229.4                 
+CUDA, `Auto` (default)|203.6                  |**246.0**             
+
+- **`Auto` decodes 21% faster,** 4.04 ms a token in the profile from 4.83, in 305 launches from 329: a `Write` is one launch where a `Cat` of two sources was two.
+- **The saving is twice what `Cat` cost.** The 24 writes take 0.118 ms where the copies took 0.520, which accounts for 0.4 ms. The matmuls account for most of the rest, 2.89 ms from 3.16: mlp out reads at 182 GB/s from 136, mlp in at 200 from 174. I think the copies, about 13 MB of traffic a token, were evicting the weights' neighbours from the GPU's cache and churning the buffer pool (allocating fell from 0.41 to 0.32 ms), but this is not measured.
+- **`BLAS` decodes 33% faster,** since on the host the copy was a larger share of a token.
+
 Metal keeps `Split` at decode: its decode was not profiled for this, and the fix there would be the same.
 
 **Training step in the Linux container through M7** (the 0.8M-param model, 30 steps, identical losses):
