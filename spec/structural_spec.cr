@@ -41,6 +41,23 @@ DEVICES.each do |device|
       end
     end
 
+    describe "write" do
+      it "writes into its target in place, keeping the rest" do
+        target = tensor(device, [3, 2], f32(1, 2, 3, 4, 5, 6))
+        written = target.write(tensor(device, [1, 2], f32(9, 8)), 0, 1).realize
+        written.to_a(Float32).should eq f32(1, 2, 9, 8, 5, 6)
+        written.node.buffer!.should be target.node.buffer!
+        written.write(tensor(device, [2, 3], f32(7, 7, 7, 0, 0, 0)).transpose.slice(1, 0, 1), 1, 1).to_a(Float32).should eq f32(1, 7, 9, 7, 5, 7)
+      end
+
+      it "rejects mismatched shapes, ranges past the end and views of part of a buffer" do
+        target = tensor(device, [3, 2], f32(1, 2, 3, 4, 5, 6))
+        expect_raises(ShapeError) { target.write(tensor(device, [1, 3], f32(1, 2, 3)), 0, 0) }
+        expect_raises(ShapeError) { target.write(tensor(device, [2, 2], f32(1, 2, 3, 4)), 0, 2) }
+        expect_raises(ShapeError) { target.slice(0, 1, 3).write(tensor(device, [1, 2], f32(1, 2)), 0, 0) }
+      end
+    end
+
     describe "gather" do
       it "selects table rows by id" do
         ids = tensor(device, [3], [2, 0, 2])

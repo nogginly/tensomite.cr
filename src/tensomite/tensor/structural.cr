@@ -19,6 +19,31 @@ module Tensomite
       Tensor.lazy(Node.new(Op::Cat, tensors, shape, first.dtype, first.device, axis))
     end
 
+    # Returns this tensor with *value* written in place at positions *start*
+    # onwards along *axis*, as a tensor sharing its buffer. *value* matches this
+    # tensor's shape except along *axis*.
+    #
+    # The only op that changes a buffer, for caches that grow without copying,
+    # such as `CausalSelfAttention::Cache`. This tensor must cover its whole
+    # buffer, and any tensor read from it before the write must be realised
+    # first, or it may see the new values.
+    #
+    # ```
+    # cache = Tensor.zeros([4, 2])
+    # cache = cache.write(Tensor.from([1f32, 2f32], [1, 2]), 0, 1) # row 1 is now [1, 2]
+    # ```
+    def write(value : Tensor, axis : Int32, start : Int32) : Tensor
+      check_compatible("write", {value})
+      axis = view.normalize_axis(axis)
+      stop = start + value.shape[axis]
+      unless value.ndim == ndim && (0...ndim).all? { |i| i == axis || value.shape[i] == shape[i] } && 0 <= start && stop <= shape[axis]
+        raise ShapeError.new("cannot write #{value.shape} into #{shape} at #{start} along axis #{axis}")
+      end
+      raise ShapeError.new("write needs a tensor that covers its buffer") unless view.contiguous? && view.offset == 0 && size == node.size
+      region = View.contiguous(shape).slice(axis, start, stop)
+      Tensor.lazy(Node.new(Op::Write, [self, value], shape, dtype, device, source_view: region))
+    end
+
     # Returns the rows of this 2-D table selected by *ids*, an `I32` tensor of any shape.
     # The result has shape `ids.shape + [width]`.
     #

@@ -98,6 +98,11 @@ require "./spec_helper"
         end
       end
 
+      it "keeps the rest of a target written on the host" do
+        target = Tensor.from([1, 2, 3, 4], [2, 2], cuda)
+        target.write(Tensor.from([9, 8], [1, 2], cuda), 0, 1).to_a(Int32).should eq [1, 2, 9, 8]
+      end
+
       it "rejects buffers belonging to another device" do
         expect_raises(DeviceError) { cuda.download(Tensor.from(f32(1), [1]).node.buffer!, Bytes.new(4)) }
       end

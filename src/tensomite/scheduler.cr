@@ -5,14 +5,15 @@ module Tensomite
     #
     # 1. Walks sources depth first, with an explicit stack so deep graphs cannot
     #    exhaust the call stack, to list unrealised nodes in topological order.
-    # 2. For each node, allocates its output buffer and has its device execute it.
+    # 2. For each node, allocates its output buffer, or for `Write` takes its
+    #    target's, and has its device execute it.
     # 3. Waits for the root's device to finish.
     def self.realize(root : Node) : Nil
       return if root.realized?
       order = [] of Node
       visit(root, Set(Node).new, order)
       order.each do |node|
-        buffer = node.device.alloc(node.bytesize)
+        buffer = node.op == Op::Write ? node.srcs.first.node.buffer! : node.device.alloc(node.bytesize)
         node.device.execute(node, buffer)
         node.realized(buffer)
       end

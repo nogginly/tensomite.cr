@@ -50,8 +50,9 @@ module Tensomite
       # Returns the number of positions held.
       getter length = 0
 
-      def initialize(count : Int32)
-        @layers = Array.new(count) { CausalSelfAttention::Cache.new }
+      # A cache of *count* layers, each holding up to *capacity* positions.
+      def initialize(count : Int32, capacity : Int32? = nil)
+        @layers = Array.new(count) { CausalSelfAttention::Cache.new(capacity) }
       end
 
       protected def advance(count : Int32) : Nil
@@ -95,9 +96,10 @@ module Tensomite
       @ln_f = build.layernorm(config.width)
     end
 
-    # Returns an empty cache for this model.
+    # Returns an empty cache for this model, holding up to its context of
+    # positions in place.
     def new_cache : Cache
-      Cache.new(config.layers)
+      Cache.new(config.layers, config.context)
     end
 
     # Runs *ids* at the positions following those in *cache*, appends their keys and

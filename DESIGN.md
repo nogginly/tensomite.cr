@@ -637,6 +637,7 @@ flowchart TB
     H1 --> B1["@bias : Parameter? [64]"]
 ```
 
+- **One op writes in place (Decision BB).** `Tensor#write(value, axis, start)` makes a `Write` node whose buffer is its target's: the scheduler hands the node the target's buffer instead of allocating one, and the device copies *value* into the region, leaving the rest. It breaks immutability on purpose, for caches that grow without copying, under two rules. The target must cover its whole buffer, so that the region is simple to describe. Anything read from the target before the write must already be realised, because the scheduler orders a write after its sources but not after other readers of the same buffer. The KV cache meets the second rule because each forward pass is realised before the next writes, and it only ever reads positions written earlier, which no later write touches. A write has no gradient.
 - **Parameters are slots (Decision AI).** A `Parameter` holds a tensor, a name and a weight-decay flag. Tensors stay immutable; an optimizer replaces the tensor in each slot. Setting a value names the tensor after the parameter, so diagrams show `hidden1.weight`.
 - **Parts are found at compile time (Decision AJ).** `Module#each_child` is a macro loop over the subclass's instance variables, as `JSON::Serializable` loops over fields. Variables typed `Parameter`, `Module`, `Array` of either, or nilable versions, are parts, named after the variable, with `.i` for array members. Crystal lists declared variables (`@blocks : Array(Block)`) before inferred ones, which fixes the order of `params`; arrays need such a declaration, because Crystal cannot infer a type from `Array.new(n) { ... }`.
 - **Names and tied weights.** `named_params` walks the tree depth first and names each parameter by its path. A parameter reached twice, as tied embeddings are, is listed once, under its first path.
@@ -804,7 +805,7 @@ flowchart TD
     LNF --> Logits["matmul with the token embedding (tied) → logits"]
 ```
 
-- **The KV cache** holds each layer's keys and values as `[heads, positions, head width]`. New positions are appended with `Tensor.cat`, which copies the cache. That costs O(n²) over a whole generation, which is fine at GPT-2's 1,024 positions.
+- **The KV cache** holds each layer's keys and values in buffers of `[batch, heads, context, head width]`, made on the first token. Each token writes its keys and values into them in place (`Tensor#write`), and attention reads a slice of the positions filled so far. Decision BB; before it, each token joined its positions to a copy of the cache with `Tensor.cat`.
 - **The causal mask** is `Tensor.causal_mask(new, past + new)`, so the same code serves prefill (many new positions) and decode (one).
 - **Weights stay in GPT-2's `[in, out]` layout,** so each linear layer is a plain `x.matmul(w) + b`. The output layer reuses the token embedding through a transposed view, with no copy.
 - **`generate(prompt, count, sampler)`** prefills the prompt, then decodes one token at a time, yielding each.
@@ -1128,6 +1129,20 @@ others   |25       |0.108 |2%
 - **`Cat` is the largest of the rest:** 24 a token, each copying a layer's whole key or value cache, about 22 µs apiece. The profile's by-shape table had hidden it, since its shape grows every token.
 - **The small kernels cost about 4.7 µs each** whatever they do: 49 `Add [1,768]` take 0.229 ms.
 
+**The KV cache written in place (Decision BB),** on the GB10, `bench/gpt2.cr` on `main` and then on the change, one after the other:
+
+Device                |Decode before, tokens/s|Decode after, tokens/s
+----------------------|-----------------------|----------------------
+`BLAS`                |71.2                   |94.6                  
+CUDA, `Split`         |176.1                  |197.6                 
+CUDA, `TwoPass`       |203.1                  |229.4                 
+CUDA, `Auto` (default)|203.6                  |**246.0**             
+
+- **`Auto` decodes 21% faster,** 4.04 ms a token in the profile from 4.83, in 305 launches from 329: a `Write` is one launch where a `Cat` of two sources was two.
+- **The saving is twice what `Cat` cost.** The 24 writes take 0.118 ms where the copies took 0.520, which accounts for 0.4 ms. The matmuls account for most of the rest, 2.89 ms from 3.16: mlp out reads at 182 GB/s from 136, mlp in at 200 from 174. I think the copies, about 13 MB of traffic a token, were evicting the weights' neighbours from the GPU's cache and churning the buffer pool (allocating fell from 0.41 to 0.32 ms), but this is not measured.
+- **`BLAS` decodes 33% faster,** since on the host the copy was a larger share of a token.
+- **Prefill pays for the cache once (Decision BC).** A new cache allocates its whole capacity, 75 MB for GPT-2 small, and the prompt's keys and values are copied into it: about 1.3 ms and 0.4 ms on the GB10, a cost before the first token rather than per token. `bench/gpt2.cr` makes a new cache for every prefill it times, so its prefill rate fell 10%, to 4,134 tokens/s.
+
 Metal keeps `Split` at decode: its decode was not profiled for this, and the fix there would be the same.
 
 **Training step in the Linux container through M7** (the 0.8M-param model, 30 steps, identical losses):
@@ -1180,7 +1195,6 @@ Allocation, with `GC_UNMAP_THRESHOLD` unset|3.6 s              |0.9 s, with `GC_
 - **Only `F32` and `I32`.** No type promotion: operands must have the same dtype.
 - **BLAS covers `F32` matmul only.** See "Performance baselines" for how far the oracle is behind it.
 - **Model weights load as `F32` only.** `F16` and quantised weights arrive with M9.
-- **The KV cache grows by copying** (`Tensor.cat`), which is quadratic over a long generation and is half of decode time on `BLAS`.
 - **One device per op.** Moving data needs an explicit `to`, which goes through host memory.
 - **Only what is written as a kernel or a fused row op is fused.** `gelu`, `softmax`, `log_softmax` and `layernorm` are one op each; the attention's scale and mask, residual adds and biases are still separate primitives, until the models move onto kernels (M7 part 6).
 - **Each scalar operand is a new leaf,** uploaded to the device once per use.

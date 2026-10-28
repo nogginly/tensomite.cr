@@ -67,15 +67,55 @@ module Tensomite
     # The keys and values of the positions run so far, each `[batch, heads,
     # positions, head width]`, so that later positions can attend to them
     # without recomputing them.
+    #
+    # With a *capacity*, the cache holds buffers of that many positions, made
+    # on the first append, and each append writes its positions into them in
+    # place (`Tensor#write`). Without one, each append joins the new positions
+    # to a copy of the old (`Tensor.cat`).
     class Cache
-      getter keys : Tensor?
-      getter values : Tensor?
+      getter capacity : Int32?
+
+      # Returns the number of positions held.
+      getter length = 0
+
+      @keys : Tensor? = nil
+      @values : Tensor? = nil
+
+      def initialize(@capacity : Int32? = nil)
+      end
+
+      # Returns the keys held, or `nil` before the first append.
+      def keys : Tensor?
+        @keys.try(&.slice(2, 0, length))
+      end
+
+      # Returns the values held, or `nil` before the first append.
+      def values : Tensor?
+        @values.try(&.slice(2, 0, length))
+      end
 
       # :nodoc:
       def append(keys : Tensor, values : Tensor) : {Tensor, Tensor}
-        @keys = @keys.try { |past| Tensor.cat([past, keys], 2) } || keys
-        @values = @values.try { |past| Tensor.cat([past, values], 2) } || values
-        {@keys.as(Tensor), @values.as(Tensor)}
+        if capacity = @capacity
+          stop = length + keys.shape[2]
+          raise ShapeError.new("the cache holds #{capacity} positions, not #{stop}") if stop > capacity
+          @keys = (@keys || Cache.empty(keys, capacity)).write(keys, 2, length)
+          @values = (@values || Cache.empty(values, capacity)).write(values, 2, length)
+        else
+          @keys = @keys.try { |past| Tensor.cat([past, keys], 2) } || keys
+          @values = @values.try { |past| Tensor.cat([past, values], 2) } || values
+        end
+        @length += keys.shape[2]
+        {self.keys.as(Tensor), self.values.as(Tensor)}
+      end
+
+      # Returns a realised tensor shaped as *like*, but with *capacity* positions,
+      # whose contents are undefined until written.
+      protected def self.empty(like : Tensor, capacity : Int32) : Tensor
+        shape = like.shape.dup
+        shape[2] = capacity
+        buffer = like.device.alloc(like.dtype.bytes_for(shape.product(1)))
+        Tensor.new(Node.new(buffer, shape, like.dtype, like.device), View.contiguous(shape))
       end
     end
 
