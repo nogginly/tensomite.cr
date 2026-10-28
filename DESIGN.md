@@ -1141,6 +1141,16 @@ CUDA, `Auto` (default)|203.6                  |**246.0**
 - **`Auto` decodes 21% faster,** 4.04 ms a token in the profile from 4.83, in 305 launches from 329: a `Write` is one launch where a `Cat` of two sources was two.
 - **The saving is twice what `Cat` cost.** The 24 writes take 0.118 ms where the copies took 0.520, which accounts for 0.4 ms. The matmuls account for most of the rest, 2.89 ms from 3.16: mlp out reads at 182 GB/s from 136, mlp in at 200 from 174. I think the copies, about 13 MB of traffic a token, were evicting the weights' neighbours from the GPU's cache and churning the buffer pool (allocating fell from 0.41 to 0.32 ms), but this is not measured.
 - **`BLAS` decodes 33% faster,** since on the host the copy was a larger share of a token.
+- **Narrower split blocks did not help (Decisions BD, BE).** With the cache in place, the four decode products whose weights are contiguous read at 136–200 GB/s in the model, and `Split` gives a 768-column product only 24 blocks, about one for every two of the GB10's multiprocessors. Blocks of 16 and 8 columns, with 16 and 32 threads per column, made two and four times as many, with the same bits, and were slower on every product (`bench/matmul_cuda.cr`, GB/s of weights read on the GPU alone):
+
+Product                           |32 columns|16 columns|8 columns|Two passes
+----------------------------------|----------|----------|---------|----------
+qkv, `[1,768]·[768,2304]`         |196       |168       |71       |150       
+attention out, `[1,768]·[768,768]`|160       |161       |136      |141       
+mlp in, `[1,768]·[768,3072]`      |209       |165       |79       |191       
+mlp out, `[1,3072]·[3072,768]`    |202       |202       |151      |165       
+
+  Block count was not the limit: mlp out reads at 202 GB/s with 24 blocks. I think the width of each read is: a warp of 32 columns reads 128 adjacent bytes of a row of weights at each step, while one of 8 columns reads four 32-byte pieces of rows far apart. The narrower kernels were removed, and `bench/matmul_cuda.cr` stays to compare split with two passes. In the model the same products read 10–15% slower than alone, worth about 0.15 ms a token.
 - **Prefill pays for the cache once (Decision BC).** A new cache allocates its whole capacity, 75 MB for GPT-2 small, and the prompt's keys and values are copied into it: about 1.3 ms and 0.4 ms on the GB10, a cost before the first token rather than per token. `bench/gpt2.cr` makes a new cache for every prefill it times, so its prefill rate fell 10%, to 4,134 tokens/s.
 
 Metal keeps `Split` at decode: its decode was not profiled for this, and the fix there would be the same.
