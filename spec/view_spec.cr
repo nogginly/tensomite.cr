@@ -65,4 +65,32 @@ describe View do
     View.contiguous([2, 3]).transpose.reshape([6]).should be_nil
     expect_raises(ShapeError) { View.contiguous([2, 3]).reshape([4]) }
   end
+
+  it "reshapes strided views without a copy where strides allow" do
+    rows = View.contiguous([2, 6]).slice(1, 2, 6)
+    split = rows.reshape([2, 2, 2]).should_not be_nil
+    split.strides.should eq [6, 2, 1]
+    split.offset.should eq 2
+    rows.reshape([8]).should be_nil
+    heads = View.contiguous([1, 1, 4, 3]).permute([0, 2, 1, 3])
+    heads.reshape([1, 12]).try(&.strides).should eq [12, 1]
+    View.contiguous([1, 3]).expand([2, 3]).reshape([2, 1, 3]).try(&.strides).should eq [0, 3, 1]
+  end
+
+  it "reads the same positions after a reshape as before" do
+    rng = Random.new(7)
+    200.times do
+      shape = Array.new(rng.rand(1..4)) { rng.rand(1..4) }
+      view = View.contiguous(shape).permute((0...shape.size).to_a.shuffle(rng))
+      axis = rng.rand(view.ndim)
+      start = rng.rand(view.shape[axis])
+      view = view.slice(axis, start, rng.rand(start + 1..view.shape[axis]))
+      target = view.shape.reject(1).flat_map { |dim| dim == 4 && rng.next_bool ? [2, 2] : [dim] }
+      target.insert(rng.rand(target.size + 1), 1) if rng.next_bool
+      if reshaped = view.reshape(target)
+        reshaped.shape.should eq target
+        view.size.times { |i| reshaped.offset_of(i).should eq view.offset_of(i) }
+      end
+    end
+  end
 end

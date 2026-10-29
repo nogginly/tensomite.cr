@@ -140,7 +140,7 @@ a.matmul(w).to_a(Float32)   # => [4.0, 5.0, 10.0, 11.0]
 Tensor.zeros([4, 2, 3]).matmul(Tensor.zeros([3, 5])).shape   # => [4, 2, 5]
 ```
 
-A second argument adds a bias that broadcasts to the result, in the same op, with the same bits as a separate `+`. `Linear` uses it:
+A second argument adds a bias, with the same bits as a separate `+`. A `[n]` vector, as `Linear` has, is added inside the product, saving an op; any other bias that broadcasts is added after it:
 
 ```crystal
 a.matmul(w, Tensor.from([0.5f32, -1f32], [2])).to_a(Float32)   # => [4.5, 4.0, 10.5, 10.0]

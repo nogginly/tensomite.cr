@@ -117,7 +117,7 @@ classDiagram
 
 A `Tensor` is a small struct holding a `Node` and a `View`. The node is where the data comes from. The view says how to read it.
 
-- **Views share nodes.** `transpose`, `permute`, `expand`, `slice` and contiguous `reshape` return a new `Tensor` over the *same* node with a different view. They never copy, and they work on unrealised nodes too.
+- **Views share nodes.** `transpose`, `permute`, `expand`, `slice` and most `reshape`s return a new `Tensor` over the *same* node with a different view. They never copy, and they work on unrealised nodes too.
 - **A node always produces a contiguous, row-major array** of its `shape`. All of the non-trivial layout lives in the views that read it.
 - **A leaf node** (from `Tensor.from`, `Tensor.scalar` or `Tensor.causal_mask`) has no op and is created realised.
 - **Any other node** holds its op and source tensors until it is realised. After that it holds only its buffer, and its sources are dropped so the graph behind it can be collected.
@@ -159,7 +159,7 @@ Operation          |Effect on the view (from shape `[2, 3]`, strides `[3, 1]`)
 `transpose`        |shape `[3, 2]`, strides `[1, 3]`                          
 `expand([4, 2, 3])`|shape `[4, 2, 3]`, strides `[0, 3, 1]`                    
 `slice(1, 1, 3)`   |shape `[2, 2]`, strides `[3, 1]`, offset `1`              
-`reshape([3, 2])`  |shape `[3, 2]`, strides `[2, 1]` (contiguous views only)  
+`reshape([3, 2])`  |shape `[3, 2]`, strides `[2, 1]`                          
 
 A stride of 0 re-reads the same element along that dimension. This is how broadcasting works without copying. A slice moves the offset to its first element and shortens one dimension.
 
@@ -190,7 +190,7 @@ flowchart LR
     style N stroke:#2b8a3e,stroke-width:3px
 ```
 
-`reshape` of a non-contiguous view inserts a `Copy` node first, then reshapes the contiguous result.
+`reshape` is a view whenever strides can express it, as PyTorch's `view` is: it splits and merges dimensions, so each group of old dimensions that new ones merge must be laid out row-major, ignoring dimensions of size 1. Splitting a slice of rows works (`[2, 6]` sliced to `[2, 4]` reshapes to `[2, 2, 2]` with strides `[6, 2, 1]`); flattening a transpose does not, and then `reshape` inserts a `Copy` node first and reshapes the contiguous result. Attention's queries, keys and values are such slices of one projection, and its heads are rejoined by a permute and a reshape that is a view when there is one position. Before views covered them, these were 48 copies in a decoded GPT-2 token, and 36 in a prefill (Decision BF).
 
 ## Ops
 
@@ -1151,7 +1151,7 @@ mlp in, `[1,768]·[768,3072]`      |209       |165       |79       |191
 mlp out, `[1,3072]·[3072,768]`    |202       |202       |151      |165       
 
   Block count was not the limit: mlp out reads at 202 GB/s with 24 blocks. I think the width of each read is: a warp of 32 columns reads 128 adjacent bytes of a row of weights at each step, while one of 8 columns reads four 32-byte pieces of rows far apart. The narrower kernels were removed, and `bench/matmul_cuda.cr` stays to compare split with two passes. In the model the same products read 10–15% slower than alone, worth about 0.15 ms a token.
-- **Bias adds inside the matmul (Decision BF).** `matmul(b, bias)` gives `MatMul` a third source, the bias expanded to the output's shape, and every matmul kernel adds it to each output after the output's sum is complete: `with_bias(total, ...)` on CUDA and Metal, a pass over the output on the host and after `cblas_sgemm`. The sum is the same and the addition is the same single rounding, so the bits are those of a separate `Add`; specs compare the two on every device and in every matmul mode. Metal's `Atomic` mode starts its atomic adds from the bias instead of from zero, which, like the rest of that mode, is not bit-exact. `Linear` uses it, so GPT-2 loses 48 `Add`s a token, four per block. The gradient of the bias is the output's gradient, summed over the rows by the expand's `Unview`, as before.
+- **Bias adds inside the matmul (Decision BF).** `matmul(b, bias)` with a contiguous `[N]` bias, as a `Linear` layer has, gives `MatMul` a third source, and every matmul kernel adds `bias[col]` to each output after the output's sum is complete: `with_bias(total, ...)` on CUDA and Metal, a pass over each row of the output on the host and after `cblas_sgemm`. Any other bias is added by a separate `Add`. A first version took any bias that broadcasts, read through a general view; finding each output's bias then cost integer divisions, and on the GB10 a 64-token prefill fell from 4,134 to 2,935 tokens/s and `BLAS`'s from 826 to 608. The sum is the same and the addition is the same single rounding, so the bits are those of a separate `Add`; specs compare the two on every device and in every matmul mode. Metal's `Atomic` mode starts its atomic adds from the bias instead of from zero, which, like the rest of that mode, is not bit-exact. `Linear` uses it, so GPT-2 loses 48 `Add`s a token, four per block. The gradient of the bias is the output's gradient summed over the rows, by the `Unview` of the bias expanded to the output, as a separate `Add` gives.
 - **Prefill pays for the cache once (Decision BC).** A new cache allocates its whole capacity, 75 MB for GPT-2 small, and the prompt's keys and values are copied into it: about 1.3 ms and 0.4 ms on the GB10, a cost before the first token rather than per token. `bench/gpt2.cr` makes a new cache for every prefill it times, so its prefill rate fell 10%, to 4,134 tokens/s.
 
 Metal keeps `Split` at decode: its decode was not profiled for this, and the fix there would be the same.
