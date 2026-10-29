@@ -16,8 +16,7 @@ module Tensomite
     end
 
     def forward(x : Tensor) : Tensor
-      product = x.matmul(weight.value)
-      (b = bias) ? product + b.value : product
+      x.matmul(weight.value, bias.try(&.value))
     end
   end
 

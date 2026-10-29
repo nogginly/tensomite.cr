@@ -32,6 +32,12 @@ __device__ int run_stride(const View& v) {
     return v.ndim > 0 ? v.strides[v.ndim - 1] : 0;
 }
 
+// Returns an output in column *col* of a matrix product, *out*, plus its bias,
+// bias[col], when the product has one (bias is not null).
+__device__ float with_bias(float out, const float* bias, unsigned int col) {
+    return bias ? out + bias[col] : out;
+}
+
 __device__ unsigned int thread_index() {
     return blockIdx.x * blockDim.x + threadIdx.x;
 }

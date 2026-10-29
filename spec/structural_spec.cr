@@ -104,6 +104,17 @@ DEVICES.each do |device|
         r.to_a(Float32).should eq f32(22, 28, 49, 64, 41, 56, 14, 20)
       end
 
+      it "adds a bias with the bits of a separate add, batched and in I32" do
+        bias = tensor(device, [2], f32(0.1, -2.5))
+        a.matmul(w, bias).to_a(Float32).should eq (a.matmul(w) + bias).to_a(Float32)
+        batch = Tensor.cat([a.reshape([1, 2, 3]), b.reshape([1, 2, 3])], 0)
+        rows = tensor(device, [2, 1], f32(3, 0.25))
+        batch.matmul(w, rows).to_a(Float32).should eq (batch.matmul(w) + rows).to_a(Float32)
+        ints = tensor(device, [1, 2], [1, 2])
+        ints.matmul(tensor(device, [2, 1], [3, 4]), tensor(device, [1], [5])).to_a(Int32).should eq [16]
+        expect_raises(ShapeError) { a.matmul(w, tensor(device, [3], f32(1, 2, 3))) }
+      end
+
       it "multiplies I32 matrices" do
         tensor(device, [1, 2], [1, 2]).matmul(tensor(device, [2, 1], [3, 4])).to_a(Int32).should eq [11]
       end

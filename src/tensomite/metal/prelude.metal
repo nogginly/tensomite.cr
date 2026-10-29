@@ -28,6 +28,12 @@ static int offset_of(constant View& v, int flat) {
     return pos;
 }
 
+// Returns an output in column *col* of a matrix product, *out*, plus its bias,
+// bias[col], when *biased*.
+static float with_bias(float out, device const float* bias, uint col, uint biased) {
+    return biased ? out + bias[col] : out;
+}
+
 // Returns the step between the positions of consecutive elements along the last
 // dimension.
 static int run_stride(constant View& v) {

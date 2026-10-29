@@ -430,7 +430,7 @@ module Tensomite
 
     private def profile_label(node : Node, profile : Profile) : String
       return node.op.to_s unless profile.shapes?
-      shapes = node.op.try(&.mat_mul?) ? node.srcs.map(&.shape) : [node.shape]
+      shapes = node.op.try(&.mat_mul?) ? node.srcs.first(2).map(&.shape) : [node.shape]
       "#{node.op} #{shapes.map { |shape| "[#{shape.join(',')}]" }.join('·')}"
     end
 
@@ -548,10 +548,10 @@ module Tensomite
     # `DECODE_COLS` columns, chunk of `k` and `DECODE_ROWS` rows of each batch
     # matrix, then one thread per output.
     private def launch_matmul(kernels : Kernels, node : Node, output : CUDABuffer) : Nil
-      a, b = node.srcs
+      a, b = node.srcs[0], node.srcs[1]
       m, k, n = a.shape[-2], a.shape[-1], b.shape[-1]
       return if node.size == 0
-      args = {pointer(a), pointer(b), output.pointer, view_args(a.view), view_args(b.view), m.to_u32, k.to_u32, n.to_u32}
+      args = {pointer(a), pointer(b), output.pointer, view_args(a.view), view_args(b.view), bias_pointer(node), m.to_u32, k.to_u32, n.to_u32}
       case matmul_mode
       in .serial?
         run(kernels["matmul_f32"], node.size, *args, node.size.to_u32)
@@ -571,7 +571,7 @@ module Tensomite
     end
 
     private def launch_two_pass(kernels : Kernels, node : Node, output : CUDABuffer, m : Int32, k : Int32, n : Int32) : Nil
-      a, b = node.srcs
+      a, b = node.srcs[0], node.srcs[1]
       chunks = (k + CHUNK - 1) // CHUNK
       scratch = scratch(node.size * chunks * 4)
       if chunks > 0
@@ -579,7 +579,12 @@ module Tensomite
         context.launch(kernels["matmul_chunks_f32"], grid, {DECODE_COLS, 1}, pointer(a), pointer(b), scratch,
           view_args(a.view), view_args(b.view), m.to_u32, k.to_u32, n.to_u32)
       end
-      run(kernels["matmul_chunk_sums_f32"], node.size, scratch, output.pointer, m.to_u32, k.to_u32, n.to_u32, node.size.to_u32)
+      run(kernels["matmul_chunk_sums_f32"], node.size, scratch, output.pointer, bias_pointer(node), m.to_u32, k.to_u32, n.to_u32, node.size.to_u32)
+    end
+
+    # Returns a `MatMul`'s bias pointer, or a null pointer when it has none.
+    private def bias_pointer(node : Node) : LibCUDA::DevicePtr
+      (bias = node.srcs[2]?) ? pointer(bias) : LibCUDA::DevicePtr.new(0)
     end
 
     # Returns device memory of at least *bytesize* bytes for a kernel's partial

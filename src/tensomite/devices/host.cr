@@ -353,7 +353,7 @@ module Tensomite
     #    order of additions, and so every result bit, is the same as indexing
     #    each element through its view.
     private def matmul(type : T.class, node : Node, dst : Slice(T)) : Nil forall T
-      a, b = node.srcs
+      a, b = node.srcs[0], node.srcs[1]
       m, k = a.shape[-2], a.shape[-1]
       n = b.shape[-1]
       return if dst.empty?
@@ -371,6 +371,20 @@ module Tensomite
             dst[(batch * m + row) * n + col] = acc
           end
         end
+      end
+      add_bias(T, node, dst)
+    end
+
+    # Adds a `MatMul`'s bias, its third source if it has one, to each row of
+    # *dst*, as a separate `Add` would.
+    protected def add_bias(type : T.class, node : Node, dst : Slice(T)) : Nil forall T
+      return unless bias = node.srcs[2]?
+      n = bias.size
+      return if n == 0
+      cs = elements(T, bias)[0, n].to_unsafe
+      (dst.size // n).times do |row|
+        out = dst.to_unsafe + row * n
+        n.times { |j| out[j] = out[j] + cs[j] }
       end
     end
 

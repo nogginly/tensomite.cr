@@ -62,6 +62,7 @@ SPLIT = {
   "broadcast batch"       => ->(d : Device) { random(d, [4, 5], 1).matmul(random(d, [3, 5, 2], 2)) },
   "attention shapes"      => ->(d : Device) { random(d, [2, 3, 8], 1).matmul(random(d, [2, 5, 8], 2).transpose) },
   "long k"                => ->(d : Device) { random(d, [3, 300], 1).matmul(random(d, [300, 40], 2)) },
+  "matmul with a bias"    => ->(d : Device) { random(d, [3, 300], 1).matmul(random(d, [300, 40], 2), random(d, [40], 3)) },
 }
 
 # Ops whose GPU results may differ in the last bits: division and transcendental

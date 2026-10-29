@@ -29,7 +29,9 @@ module Tensomite
     Cat
     # Rows of source 0, a 2-D table, selected by the `I32` indices in source 1.
     Gather
-    # Matrix product of `[..., M, K]` and `[..., K, N]`; batch dimensions are already broadcast.
+    # Matrix product of `[..., M, K]` and `[..., K, N]`; batch dimensions are already
+    # broadcast. An optional third source, a contiguous `[N]` bias, is added to
+    # each output after its sum, as a separate `Add` would.
     MatMul
     # Elementwise 1 where `a >= b` and 0 elsewhere, in the sources' dtype.
     GreaterEqual

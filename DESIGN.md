@@ -203,7 +203,7 @@ Kind      |Primitive ops (`Op`)                  |`Tensor` API
 Binary    |`Add`, `Sub`, `Mul`, `Div`, `Maximum` |`+`, `-`, `*`, `/`, `maximum`, with tensors or scalars                
 Unary     |`Exp`, `Log`, `Tanh`, `Sqrt`          |`exp`, `log`, `tanh`, `sqrt`, unary `-`                               
 Reduction |`Sum`, `Max`                          |`sum`, `max`, with optional `axis` and `keepdims`                     
-Structural|`Copy`, `Cat`, `Gather`, `MatMul`     |`contiguous`, `Tensor.cat`, `gather`, `matmul`                        
+Structural|`Copy`, `Cat`, `Gather`, `MatMul`     |`contiguous`, `Tensor.cat`, `gather`, `matmul` (with an optional bias)
 Adjoint   |`GreaterEqual`, `Unview`, `ScatterAdd`|`greater_equal`; the other two only through `Tensomite.grad`          
 Fused     |`Kernel`                              |any `Tensomite.kernel`, such as `gelu`                                
 Row       |`Softmax`, `LogSoftmax`, `LayerNorm`  |`softmax`, `log_softmax` and `layernorm` along the last axis          
@@ -1151,6 +1151,18 @@ mlp in, `[1,768]·[768,3072]`      |209       |165       |79       |191
 mlp out, `[1,3072]·[3072,768]`    |202       |202       |151      |165       
 
   Block count was not the limit: mlp out reads at 202 GB/s with 24 blocks. I think the width of each read is: a warp of 32 columns reads 128 adjacent bytes of a row of weights at each step, while one of 8 columns reads four 32-byte pieces of rows far apart. The narrower kernels were removed, and `bench/matmul_cuda.cr` stays to compare split with two passes. In the model the same products read 10–15% slower than alone, worth about 0.15 ms a token.
+- **Bias adds inside the matmul (Decision BF).** `matmul(b, bias)` with a contiguous `[N]` bias, as a `Linear` layer has, gives `MatMul` a third source, and every matmul kernel adds `bias[col]` to each output after the output's sum is complete: `with_bias(total, ...)` on CUDA and Metal, a pass over each row of the output on the host and after `cblas_sgemm`. Any other bias is added by a separate `Add`. A first version took any bias that broadcasts, read through a general view; finding each output's bias then cost integer divisions, and on the GB10 a 64-token prefill fell from 4,134 to 2,935 tokens/s and `BLAS`'s from 826 to 608. The sum is the same and the addition is the same single rounding, so the bits are those of a separate `Add`; specs compare the two on every device and in every matmul mode. Metal's `Atomic` mode starts its atomic adds from the bias instead of from zero, which, like the rest of that mode, is not bit-exact. `Linear` uses it, so GPT-2 loses 48 `Add`s a token, four per block. The gradient of the bias is the output's gradient summed over the rows, by the `Unview` of the bias expanded to the output, as a separate `Add` gives.
+
+**After views and fused bias adds (Decision BF),** on the GB10 (`bench/gpt2.cr`, then `bench/profile_gpt2_cuda.cr`):
+
+Change                 |`Auto` prefill, tokens/s|`Auto` decode, tokens/s|Launches a token
+-----------------------|------------------------|-----------------------|----------------
+the KV cache in place  |4,134                   |246.0                  |305             
+`reshape` as a view    |4,250                   |254.8                  |257             
+bias adds in the matmul|**5,050**               |**267.9**              |**209**         
+
+- **A decoded token takes 3.67 ms,** 80% of its GPU time in matmuls, which read the weights at 182–222 GB/s except attention out (133).
+- **Prefill gains most from the fused adds,** 19%: a 64-row product's bias add was a pass over 64 × 3,072 outputs, now done as each output is stored.
 - **Prefill pays for the cache once (Decision BC).** A new cache allocates its whole capacity, 75 MB for GPT-2 small, and the prompt's keys and values are copied into it: about 1.3 ms and 0.4 ms on the GB10, a cost before the first token rather than per token. `bench/gpt2.cr` makes a new cache for every prefill it times, so its prefill rate fell 10%, to 4,134 tokens/s.
 
 Metal keeps `Split` at decode: its decode was not profiled for this, and the fix there would be the same.

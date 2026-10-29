@@ -65,6 +65,27 @@ require "./spec_helper"
         end
       end
 
+      it "adds a bias with the bits of a separate add, in every exact mode" do
+        rng = Random.new(9)
+        bias = Tensor.from(Array(Float32).new(70) { rng.rand(-1f32...1f32) }, [70], metal)
+        [{[3, 200], [200, 70], false}, {[20, 129], [129, 70], false}, {[1, 200], [70, 200], true}].each do |(a_shape, b_shape, b_transposed)|
+          a = Tensor.from(Array(Float32).new(a_shape.product) { rng.rand(-1f32...1f32) }, a_shape, metal)
+          b = Tensor.from(Array(Float32).new(b_shape.product) { rng.rand(-1f32...1f32) }, b_shape, metal)
+          b = b.transpose if b_transposed
+          Metal::MatMulMode.values.each do |mode|
+            metal.matmul_mode = mode
+            fused, separate = a.matmul(b, bias).to_a(Float32), (a.matmul(b) + bias).to_a(Float32)
+            if mode.atomic?
+              fused.zip(separate) { |x, y| x.should be_close(y, 1e-5 * Math.max(1f32, y.abs)) }
+            else
+              fused.should eq separate
+            end
+          end
+        end
+      ensure
+        metal.matmul_mode = Metal::MatMulMode::Auto
+      end
+
       describe "matmul modes" do
         rng = Random.new(5)
         xs = Array(Float32).new(3 * 200) { rng.rand(-1f32...1f32) }
