@@ -4,10 +4,18 @@
 #     scripts/fetch_shakespeare.sh
 #     crystal run --release examples/shakespeare.cr -- --steps 2000
 #
-# Run with `--help` for the model and training options.
+# Run with `--help` for the model and training options. `--device metal` trains
+# on Apple Silicon's GPU, and, built with `-Dcuda`, `--device cuda` on an NVIDIA
+# one.
 require "option_parser"
 require "../src/tensomite"
 require "../src/tensomite/blas"
+{% if flag?(:darwin) && flag?(:aarch64) %}
+  require "../src/tensomite/metal"
+{% end %}
+{% if flag?(:cuda) %}
+  require "../src/tensomite/cuda"
+{% end %}
 
 include Tensomite
 
@@ -73,6 +81,13 @@ steps, batch, layers, heads, width, context = 2000, 16, 4, 4, 128, 64
 lr, min_lr, warmup, eval_every, eval_batches, seed = 1e-3, 1e-4, 100, 250, 20, 1337
 device_name, data_path, sample_length = "blas", "data/shakespeare/input.txt", 300
 diagram_depth = nil.as(Int32?)
+devices = {"cpu" => -> { CPU.default.as(Device) }, "blas" => -> { BLAS.default.as(Device) }}
+{% if flag?(:darwin) && flag?(:aarch64) %}
+  devices["metal"] = -> { Metal.default.as(Device) }
+{% end %}
+{% if flag?(:cuda) %}
+  devices["cuda"] = -> { CUDA.default.as(Device) }
+{% end %}
 OptionParser.parse do |parser|
   parser.banner = "Usage: shakespeare [options]"
   parser.on("--steps N", "Training steps (#{steps})") { |value| steps = value.to_i }
@@ -88,12 +103,12 @@ OptionParser.parse do |parser|
   parser.on("--eval-batches N", "Batches per validation run (#{eval_batches})") { |value| eval_batches = value.to_i }
   parser.on("--sample N", "Characters to sample after training (#{sample_length})") { |value| sample_length = value.to_i }
   parser.on("--seed N", "Random seed (#{seed})") { |value| seed = value.to_i }
-  parser.on("--device NAME", "cpu or blas (#{device_name})") { |name| device_name = name }
+  parser.on("--device NAME", "#{devices.keys.join(", ")} (#{device_name})") { |name| device_name = name }
   parser.on("--data PATH", "Training text (#{data_path})") { |path| data_path = path }
   parser.on("--diagram DEPTH", "Print a Mermaid summary of the loss's graph at DEPTH, or every op at 0, and exit") { |value| diagram_depth = value.to_i }
   parser.on("-h", "--help", "Show this help") { puts parser; exit }
 end
-device = device_name == "cpu" ? CPU.default : BLAS.default
+device = devices[device_name]?.try(&.call) || abort "unknown device #{device_name}; this build has #{devices.keys.join(", ")}"
 
 text = File.read(data_path)
 chars = text.chars.uniq!.sort!

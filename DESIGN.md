@@ -1165,6 +1165,8 @@ bias adds in the matmul|**5,050**               |**267.9**              |**209**
 - **Prefill gains most from the fused adds,** 19%: a 64-row product's bias add was a pass over 64 × 3,072 outputs, now done as each output is stored.
 - **Prefill pays for the cache once (Decision BC).** A new cache allocates its whole capacity, 75 MB for GPT-2 small, and the prompt's keys and values are copied into it: about 1.3 ms and 0.4 ms on the GB10, a cost before the first token rather than per token. `bench/gpt2.cr` makes a new cache for every prefill it times, so its prefill rate fell 10%, to 4,134 tokens/s.
 
+**Training on CUDA.** `examples/shakespeare.cr --device cuda` trains with every op on the GPU: on the stub, three steps of a small model run no host ops in 885 launches, and eleven steps give the same losses as the CPU and `BLAS` to four decimals. `spec/gpu_spec.cr` trains a small attention model for five AdamW steps on every GPU and compares the losses with the CPU's within 1e-5; Metal runs it on the macOS runner.
+
 Metal keeps `Split` at decode: its decode was not profiled for this, and the fix there would be the same.
 
 **Training step in the Linux container through M7** (the 0.8M-param model, 30 steps, identical losses):
