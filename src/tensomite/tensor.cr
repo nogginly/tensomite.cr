@@ -105,7 +105,7 @@ module Tensomite
     end
 
     # Returns a tensor with a new shape and the same elements, copying only when
-    # the current view is not contiguous.
+    # no view can give it (see `View#reshape`).
     def reshape(shape : Array(Int32)) : Tensor
       if reshaped = view.reshape(shape)
         Tensor.new(node, reshaped)

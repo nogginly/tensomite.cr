@@ -117,7 +117,7 @@ classDiagram
 
 A `Tensor` is a small struct holding a `Node` and a `View`. The node is where the data comes from. The view says how to read it.
 
-- **Views share nodes.** `transpose`, `permute`, `expand`, `slice` and contiguous `reshape` return a new `Tensor` over the *same* node with a different view. They never copy, and they work on unrealised nodes too.
+- **Views share nodes.** `transpose`, `permute`, `expand`, `slice` and most `reshape`s return a new `Tensor` over the *same* node with a different view. They never copy, and they work on unrealised nodes too.
 - **A node always produces a contiguous, row-major array** of its `shape`. All of the non-trivial layout lives in the views that read it.
 - **A leaf node** (from `Tensor.from`, `Tensor.scalar` or `Tensor.causal_mask`) has no op and is created realised.
 - **Any other node** holds its op and source tensors until it is realised. After that it holds only its buffer, and its sources are dropped so the graph behind it can be collected.
@@ -159,7 +159,7 @@ Operation          |Effect on the view (from shape `[2, 3]`, strides `[3, 1]`)
 `transpose`        |shape `[3, 2]`, strides `[1, 3]`                          
 `expand([4, 2, 3])`|shape `[4, 2, 3]`, strides `[0, 3, 1]`                    
 `slice(1, 1, 3)`   |shape `[2, 2]`, strides `[3, 1]`, offset `1`              
-`reshape([3, 2])`  |shape `[3, 2]`, strides `[2, 1]` (contiguous views only)  
+`reshape([3, 2])`  |shape `[3, 2]`, strides `[2, 1]`                          
 
 A stride of 0 re-reads the same element along that dimension. This is how broadcasting works without copying. A slice moves the offset to its first element and shortens one dimension.
 
@@ -190,7 +190,7 @@ flowchart LR
     style N stroke:#2b8a3e,stroke-width:3px
 ```
 
-`reshape` of a non-contiguous view inserts a `Copy` node first, then reshapes the contiguous result.
+`reshape` is a view whenever strides can express it, as PyTorch's `view` is: it splits and merges dimensions, so each group of old dimensions that new ones merge must be laid out row-major, ignoring dimensions of size 1. Splitting a slice of rows works (`[2, 6]` sliced to `[2, 4]` reshapes to `[2, 2, 2]` with strides `[6, 2, 1]`); flattening a transpose does not, and then `reshape` inserts a `Copy` node first and reshapes the contiguous result. Attention's queries, keys and values are such slices of one projection, and its heads are rejoined by a permute and a reshape that is a view when there is one position. Before views covered them, these were 48 copies in a decoded GPT-2 token, and 36 in a prefill (Decision BF).
 
 ## Ops
 

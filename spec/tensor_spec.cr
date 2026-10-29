@@ -74,6 +74,7 @@ DEVICES.each do |device|
 
     it "reshapes contiguous tensors without copying and others with a copy" do
       a.reshape([3, 2]).node.should be a.node
+      a.slice(1, 1, 3).reshape([2, 2, 1]).node.should be a.node
       r = a.transpose.reshape([6])
       r.node.op.should eq Op::Copy
       r.to_a(Float32).should eq f32(1, 4, 2, 5, 3, 6)
