@@ -375,12 +375,17 @@ module Tensomite
       add_bias(T, node, dst)
     end
 
-    # Adds a `MatMul`'s bias, its third source if it has one, to each output of
+    # Adds a `MatMul`'s bias, its third source if it has one, to each row of
     # *dst*, as a separate `Add` would.
     protected def add_bias(type : T.class, node : Node, dst : Slice(T)) : Nil forall T
       return unless bias = node.srcs[2]?
-      cs = elements(T, bias)
-      dst.size.times { |i| dst[i] = dst[i] + cs[bias.view.offset_of(i)] }
+      n = bias.size
+      return if n == 0
+      cs = elements(T, bias)[0, n].to_unsafe
+      (dst.size // n).times do |row|
+        out = dst.to_unsafe + row * n
+        n.times { |j| out[j] = out[j] + cs[j] }
+      end
     end
 
     # Raises `IndexError`, described by the block, unless every element of a run of

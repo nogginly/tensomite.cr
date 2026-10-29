@@ -374,7 +374,7 @@ module Tensomite
       dims = Slice[m.to_u32, k.to_u32, n.to_u32, bias ? 1_u32 : 0_u32].to_unsafe_bytes
       # Without a bias, the output stands in for it, unread.
       buffers = [mtl(a), mtl(b), output.mtl, bias ? mtl(bias) : output.mtl]
-      constants = [view_args(a.view), view_args(b.view), view_args((bias || a).view), dims]
+      constants = [view_args(a.view), view_args(b.view), dims]
       return if node.size == 0
       case matmul_mode
       in .serial?
@@ -391,11 +391,11 @@ module Tensomite
         raise DeviceError.new("atomic matmul needs Metal 3") unless @pipelines.has_key?("matmul_atomic_f32")
         # The atomic adds start from the bias, or from zero.
         if bias
-          dispatch("copy_into_f32", node.size, [mtl(bias), output.mtl], [view_args(bias.view), view_args(View.contiguous(node.shape)), u32(node.size)])
+          dispatch("copy_into_f32", node.size, [mtl(bias), output.mtl], [view_args(bias.view.expand(node.shape)), view_args(View.contiguous(node.shape)), u32(node.size)])
         else
           dispatch("fill_zero_f32", node.size, [output.mtl], [u32(node.size)])
         end
-        dispatch_groups("matmul_atomic_f32", {(n + COLS - 1) // COLS, node.size // n}, {COLS, SLICES}, buffers.first(3), constants.first(2) + [dims])
+        dispatch_groups("matmul_atomic_f32", {(n + COLS - 1) // COLS, node.size // n}, {COLS, SLICES}, buffers.first(3), constants)
       end
     end
 

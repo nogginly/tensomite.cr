@@ -28,10 +28,10 @@ static int offset_of(constant View& v, int flat) {
     return pos;
 }
 
-// Returns output i of a matrix product, *out*, plus its bias, c read through vc,
-// a view of the output's shape, when *biased*.
-static float with_bias(float out, device const float* c, constant View& vc, uint i, uint biased) {
-    return biased ? out + c[offset_of(vc, int(i))] : out;
+// Returns an output in column *col* of a matrix product, *out*, plus its bias,
+// bias[col], when *biased*.
+static float with_bias(float out, device const float* bias, uint col, uint biased) {
+    return biased ? out + bias[col] : out;
 }
 
 // Returns the step between the positions of consecutive elements along the last

@@ -58,9 +58,9 @@ module Tensomite
     # Returns the matrix product over the last two dimensions, `[..., M, K]` by
     # `[..., K, N]` giving `[..., M, N]`. Leading batch dimensions broadcast.
     #
-    # With a *bias* that broadcasts to the result, such as a `[N]` vector, returns
-    # the product plus *bias*, with the same bits as `a.matmul(b) + bias`, in one
-    # op rather than two.
+    # With a *bias*, returns the product plus *bias*, with the same bits as
+    # `a.matmul(b) + bias`. A contiguous `[N]` bias, as a `Linear` layer has, is
+    # added inside the product, saving an op; any other is added after it.
     def matmul(other : Tensor, bias : Tensor? = nil) : Tensor
       check_compatible("matmul", bias ? {other, bias} : {other})
       unless ndim >= 2 && other.ndim >= 2 && shape[-1] == other.shape[-2]
@@ -70,7 +70,10 @@ module Tensomite
       a = expand(batch + shape[-2..])
       b = other.expand(batch + other.shape[-2..])
       result = batch + [shape[-2], other.shape[-1]]
-      srcs = bias ? [a, b, bias.expand(result)] : [a, b]
+      if bias && !(bias.shape == [other.shape[-1]] && bias.view.contiguous?)
+        return Tensor.lazy(Node.new(Op::MatMul, [a, b], result, dtype, device)) + bias.expand(result)
+      end
+      srcs = bias ? [a, b, bias] : [a, b]
       Tensor.lazy(Node.new(Op::MatMul, srcs, result, dtype, device))
     end
   end

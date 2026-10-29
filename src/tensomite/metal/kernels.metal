@@ -289,12 +289,11 @@ kernel void unview_f32(device const float* src [[buffer(0)]],
 kernel void matmul_f32(device const float* a [[buffer(0)]],
                        device const float* b [[buffer(1)]],
                        device float* dst [[buffer(2)]],
-                       device const float* c [[buffer(3)]],
+                       device const float* bias [[buffer(3)]],
                        constant View& va [[buffer(4)]],
                        constant View& vb [[buffer(5)]],
-                       constant View& vc [[buffer(6)]],
-                       constant uint* dims [[buffer(7)]],
-                       constant uint& total [[buffer(8)]],
+                       constant uint* dims [[buffer(6)]],
+                       constant uint& total [[buffer(7)]],
                        uint i [[thread_position_in_grid]]) {
     if (i >= total) return;
     uint m = dims[0], k = dims[1], n = dims[2];
@@ -310,7 +309,7 @@ kernel void matmul_f32(device const float* a [[buffer(0)]],
         float product = a[pa + int(s) * sa] * b[pb + int(s) * sb];
         acc = acc + product;
     }
-    dst[i] = with_bias(acc, c, vc, i, dims[3]);
+    dst[i] = with_bias(acc, bias, col, dims[3]);
 }
 
 // Split-K matrix products, for when one thread per output leaves the GPU idle, as
@@ -343,11 +342,10 @@ static float chunk_sum(device const float* a, device const float* b, int pa, int
 kernel void matmul_split_f32(device const float* a [[buffer(0)]],
                              device const float* b [[buffer(1)]],
                              device float* dst [[buffer(2)]],
-                             device const float* c [[buffer(3)]],
+                             device const float* bias [[buffer(3)]],
                              constant View& va [[buffer(4)]],
                              constant View& vb [[buffer(5)]],
-                             constant View& vc [[buffer(6)]],
-                             constant uint* dims [[buffer(7)]],
+                             constant uint* dims [[buffer(6)]],
                              uint2 group [[threadgroup_position_in_grid]],
                              uint2 tid [[thread_position_in_threadgroup]]) {
     threadgroup float partial[SLICES][COLS];
@@ -372,7 +370,7 @@ kernel void matmul_split_f32(device const float* a [[buffer(0)]],
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
-    if (slice == 0 && live) dst[out_row * n + col] = with_bias(total, c, vc, out_row * n + col, dims[3]);
+    if (slice == 0 && live) dst[out_row * n + col] = with_bias(total, bias, col, dims[3]);
 }
 
 // Tiled matrix products, for when there are enough rows to share operands.
@@ -393,11 +391,10 @@ template <uint BM, uint BN, uint BK, uint TM, uint TN>
 kernel void matmul_tiled(device const float* a [[buffer(0)]],
                          device const float* b [[buffer(1)]],
                          device float* dst [[buffer(2)]],
-                         device const float* c [[buffer(3)]],
+                         device const float* bias [[buffer(3)]],
                          constant View& va [[buffer(4)]],
                          constant View& vb [[buffer(5)]],
-                         constant View& vc [[buffer(6)]],
-                         constant uint* dims [[buffer(7)]],
+                         constant uint* dims [[buffer(6)]],
                          uint3 group [[threadgroup_position_in_grid]],
                          uint3 tid [[thread_position_in_threadgroup]]) {
     constexpr uint TX = BN / TN, TY = BM / TM, THREADS = TX * TY;
@@ -467,7 +464,7 @@ kernel void matmul_tiled(device const float* a [[buffer(0)]],
             if (row < m && col < n) {
                 uint out = (batch * m + row) * n + col;
                 float value = padded ? total[i][j] + 0.0f : total[i][j];
-                dst[out] = with_bias(value, c, vc, out, dims[3]);
+                dst[out] = with_bias(value, bias, col, dims[3]);
             }
         }
     }

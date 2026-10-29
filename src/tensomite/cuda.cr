@@ -551,7 +551,7 @@ module Tensomite
       a, b = node.srcs[0], node.srcs[1]
       m, k, n = a.shape[-2], a.shape[-1], b.shape[-1]
       return if node.size == 0
-      args = {pointer(a), pointer(b), output.pointer, view_args(a.view), view_args(b.view), *bias_args(node), m.to_u32, k.to_u32, n.to_u32}
+      args = {pointer(a), pointer(b), output.pointer, view_args(a.view), view_args(b.view), bias_pointer(node), m.to_u32, k.to_u32, n.to_u32}
       case matmul_mode
       in .serial?
         run(kernels["matmul_f32"], node.size, *args, node.size.to_u32)
@@ -579,16 +579,12 @@ module Tensomite
         context.launch(kernels["matmul_chunks_f32"], grid, {DECODE_COLS, 1}, pointer(a), pointer(b), scratch,
           view_args(a.view), view_args(b.view), m.to_u32, k.to_u32, n.to_u32)
       end
-      run(kernels["matmul_chunk_sums_f32"], node.size, scratch, output.pointer, *bias_args(node), m.to_u32, k.to_u32, n.to_u32, node.size.to_u32)
+      run(kernels["matmul_chunk_sums_f32"], node.size, scratch, output.pointer, bias_pointer(node), m.to_u32, k.to_u32, n.to_u32, node.size.to_u32)
     end
 
-    # Returns a `MatMul`'s bias pointer and view, or a null pointer when it has none.
-    private def bias_args(node : Node) : {LibCUDA::DevicePtr, ViewArgs}
-      if bias = node.srcs[2]?
-        {pointer(bias), view_args(bias.view)}
-      else
-        {LibCUDA::DevicePtr.new(0), ViewArgs.new(0)}
-      end
+    # Returns a `MatMul`'s bias pointer, or a null pointer when it has none.
+    private def bias_pointer(node : Node) : LibCUDA::DevicePtr
+      (bias = node.srcs[2]?) ? pointer(bias) : LibCUDA::DevicePtr.new(0)
     end
 
     # Returns device memory of at least *bytesize* bytes for a kernel's partial

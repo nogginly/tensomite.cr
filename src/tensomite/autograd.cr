@@ -131,7 +131,9 @@ module Tensomite
         [g.reshape([b.size, width]).scatter_add_rows(b.reshape([b.size]), rows), nil] of Tensor?
       in Op::MatMul
         grads = [g.matmul(srcs[1].transpose), a.transpose.matmul(g)] of Tensor?
-        srcs.size == 3 ? grads << g : grads
+        # The bias's gradient sums g over every row, as an `Add` of the bias
+        # expanded to the output would.
+        (bias = srcs[2]?) ? grads << bias.expand(g.shape).unview(g) : grads
       in Op::ScatterAdd then [g.gather(b), nil] of Tensor?
       in Op::Unview
         [through(g, node.source_view || raise Error.new("unview needs a source view"))] of Tensor?

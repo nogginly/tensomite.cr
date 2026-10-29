@@ -226,7 +226,7 @@ extern "C" __global__ void unview_f32(const float* src, float* dst, View vs, Vie
 // step by the views' last two strides. The product and the sum are separate
 // statements, and NVRTC runs with fused multiply-adds off, so each rounds.
 extern "C" __global__ void matmul_f32(const float* a, const float* b, float* dst, View va, View vb,
-                                      const float* c, View vc, unsigned int m, unsigned int k, unsigned int n,
+                                      const float* bias, unsigned int m, unsigned int k, unsigned int n,
                                       unsigned int total) {
     unsigned int i = thread_index();
     if (i >= total) return;
@@ -242,7 +242,7 @@ extern "C" __global__ void matmul_f32(const float* a, const float* b, float* dst
         float product = a[pa + int(s) * sa] * b[pb + int(s) * sb];
         acc = acc + product;
     }
-    dst[i] = with_bias(acc, c, vc, i);
+    dst[i] = with_bias(acc, bias, col);
 }
 
 // Split-K matrix products, for when one thread per output leaves the GPU idle, as
@@ -273,7 +273,7 @@ __device__ float chunk_sum(const float* a, const float* b, int pa, int pb, int s
 // chunk order. The total is therefore ((c0 + c1) + c2) + ..., whatever the
 // block size; extra chunks past k add exact zeros.
 extern "C" __global__ void matmul_split_f32(const float* a, const float* b, float* dst, View va, View vb,
-                                            const float* c, View vc, unsigned int m, unsigned int k,
+                                            const float* bias, unsigned int m, unsigned int k,
                                             unsigned int n) {
     __shared__ float partial[SLICES][COLS];
     unsigned int lane = threadIdx.x, slice = threadIdx.y;
@@ -296,7 +296,7 @@ extern "C" __global__ void matmul_split_f32(const float* a, const float* b, floa
         }
         __syncthreads();
     }
-    if (slice == 0 && live) dst[out_row * n + col] = with_bias(total, c, vc, out_row * n + col);
+    if (slice == 0 && live) dst[out_row * n + col] = with_bias(total, bias, col);
 }
 
 // Two-pass matrix products, for products of few rows, as in decoding one token,
@@ -352,7 +352,7 @@ extern "C" __global__ void matmul_chunks_f32(const float* a, const float* b, flo
     }
 }
 
-extern "C" __global__ void matmul_chunk_sums_f32(const float* scratch, float* dst, const float* c, View vc,
+extern "C" __global__ void matmul_chunk_sums_f32(const float* scratch, float* dst, const float* bias,
                                                  unsigned int m, unsigned int k, unsigned int n, unsigned int total) {
     unsigned int i = thread_index();
     if (i >= total) return;
@@ -361,7 +361,7 @@ extern "C" __global__ void matmul_chunk_sums_f32(const float* scratch, float* ds
     float sum = 0.0f;
     for (unsigned int c = 0; c < chunks; c++) sum = sum + scratch[((batch * chunks + c) * m + row) * n + col];
     float out = chunks % SLICES != 0 ? sum + 0.0f : sum;
-    dst[i] = with_bias(out, c, vc, i);
+    dst[i] = with_bias(out, bias, col);
 }
 
 // Tiled matrix products, for when there are enough rows to share operands.
@@ -380,7 +380,7 @@ extern "C" __global__ void matmul_chunk_sums_f32(const float* scratch, float* ds
 // of SLICES, which turns a total of -0 into +0 as split-K does.
 template <unsigned int BM, unsigned int BN, unsigned int BK, unsigned int TM, unsigned int TN>
 __device__ void matmul_tiled(const float* a, const float* b, float* dst, const View& va, const View& vb,
-                             const float* c, const View& vc, unsigned int m, unsigned int k, unsigned int n) {
+                             const float* bias, unsigned int m, unsigned int k, unsigned int n) {
     constexpr unsigned int TX = BN / TN, TY = BM / TM, THREADS = TX * TY;
     // a's tile is stored k-major and b's row-major, each row padded by one, so
     // that the reads of the inner loop and most stores avoid bank conflicts.
@@ -447,7 +447,7 @@ __device__ void matmul_tiled(const float* a, const float* b, float* dst, const V
             if (row < m && col < n) {
                 unsigned int out = (batch * m + row) * n + col;
                 float value = padded ? total[i][j] + 0.0f : total[i][j];
-                dst[out] = with_bias(value, c, vc, out);
+                dst[out] = with_bias(value, bias, col);
             }
         }
     }
@@ -455,9 +455,8 @@ __device__ void matmul_tiled(const float* a, const float* b, float* dst, const V
 
 #define TILED(name, BM, BN, BK)                                                         \
     extern "C" __global__ void name(const float* a, const float* b, float* dst, View va, View vb, \
-                                    const float* c, View vc, unsigned int m, unsigned int k,     \
-                                    unsigned int n) {                                            \
-        matmul_tiled<BM, BN, BK, 4, 4>(a, b, dst, va, vb, c, vc, m, k, n);                     \
+                                    const float* bias, unsigned int m, unsigned int k, unsigned int n) { \
+        matmul_tiled<BM, BN, BK, 4, 4>(a, b, dst, va, vb, bias, m, k, n);                  \
     }
 
 TILED(matmul_tiled_32x32_f32, 32, 32, 64)
