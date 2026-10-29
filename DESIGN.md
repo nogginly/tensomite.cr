@@ -1167,6 +1167,19 @@ bias adds in the matmul|**5,050**               |**267.9**              |**209**
 
 **Training on CUDA.** `examples/shakespeare.cr --device cuda` trains with every op on the GPU: on the stub, three steps of a small model run no host ops in 885 launches, and eleven steps give the same losses as the CPU and `BLAS` to four decimals. `spec/gpu_spec.cr` trains a small attention model for five AdamW steps on every GPU and compares the losses with the CPU's within 1e-5; Metal runs it on the macOS runner.
 
+Measured, ms per step (`examples/shakespeare.cr`; the default model is 4 layers of width 128 with 16 sequences of 64 characters, the larger one Decision R's 4 layers of width 192, 6 heads, 16 sequences of 128):
+
+Machine            |Device                  |Default model|Larger model
+-------------------|------------------------|-------------|------------
+DGX Spark (GB10)   |`blas` (OpenBLAS, Grace)|75           |410         
+DGX Spark (GB10)   |`cuda`                  |**41.8**     |**110**     
+MacBook Pro, M5 Pro|`blas` (Accelerate)     |**27**       |86          
+MacBook Pro, M5 Pro|`metal`                 |45           |**76**      
+
+- **Two 2,000-step CUDA runs of the default model gave the same losses, validation losses and sample, character for character,** ending at 1.8444 nats/char after 84 s.
+- **The GPU wins once the products are large enough to outweigh its fixed cost per kernel.** A training step is several hundred launches, many of them small. On the default model, Accelerate, which runs on the M5 Pro's matrix units, beats Metal; on the larger one, with products 1.5 times wider and twice as tall, Metal wins. OpenBLAS on the Grace cores is a weaker rival, and CUDA leads at both sizes, by 3.7 times on the larger model.
+- **CUDA trains the larger model slower than Metal** (110 against 76 ms) though the GB10 has the larger GPU; a training step on CUDA has not been profiled yet.
+
 Metal keeps `Split` at decode: its decode was not profiled for this, and the fix there would be the same.
 
 **Training step in the Linux container through M7** (the 0.8M-param model, 30 steps, identical losses):

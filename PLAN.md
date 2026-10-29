@@ -129,7 +129,7 @@ Met (25 Oct 2026, the Linux container and the M5 Pro):
    3. Elementwise and reduction kernels, ported from the MSL ones, matching the oracle. With them, the stub runs the kernels compiled as host C++, so CI compares each with the CPU.
    4. Matmul, split and tiled, in split-K's order, so prefill and decode stay bit-identical; fused row ops; kernel macros emitting CUDA C++. With them, GPT-2's forward pass runs no host ops on CUDA.
    - Profiling decode (Decision AW), then a two-pass matmul for decode (Decision AX).
-   5. GPT-2 and the Shakespeare trainer on CUDA; the exit runs on the Spark and a T4. The trainer takes `--device cuda` (and `metal`), and every op of a training step runs on the GPU; the T4 run waits for a T4.
+   5. GPT-2 and the Shakespeare trainer on CUDA; the exit runs on the Spark and a T4. The trainer takes `--device cuda` (and `metal`), and every op of a training step runs on the GPU, repeatably to the bit; on the GB10 it trains Decision R's larger model at 110 ms a step, against 410 on `BLAS`. The T4 run waits for a T4.
    - Exit: the full op suite matches the oracle on a discrete GPU (a T4), GPT-2 runs there and on the Spark, and prefill equals decode bit for bit on both.
 9. **Quantisation.** Add `F16`, block dtypes, a GGUF loader, and Q8_0/Q4_0 matmul kernels for CPU, Metal and CUDA.
    - `F16` and `BF16` are tensomite's own `UInt16`-backed structs with conversions to and from `Float32`, because Crystal has no half-precision float. GGUF block scales are `F16`, so M9 needs them at the latest.
