@@ -50,62 +50,11 @@ cuda = CUDA.default
 model = GPT2.load(path, heads, cuda)
 runs = prefill ? PREFILLS : DECODE
 unit = prefill ? "prefill of #{prefill} tokens" : "decoded token"
-ms = ->(seconds : Float64) { "%.3f" % (seconds * 1000 / runs) }
 run(model, cuda, CUDA::Profile.new, prefill)
 
 normal = CUDA::Profile.new
 wall = run(model, cuda, normal, prefill)
-host = normal.host_ops.values.sum(&.[1])
-other = wall - normal.launch - normal.alloc - normal.transfer - normal.wait - host
-puts "Per #{unit} (#{cuda.name}):"
-puts
-puts "part|ms"
-puts "----|--"
-puts "wall|#{ms.call(wall)}"
-puts "launching kernels|#{ms.call(normal.launch)}"
-puts "allocating buffers|#{ms.call(normal.alloc)}"
-puts "copying to and from the host|#{ms.call(normal.transfer)}"
-puts "waiting for the GPU|#{ms.call(normal.wait)}"
-puts "host ops|#{ms.call(host)}"
-puts "everything else|#{ms.call(other)}"
-puts
-puts "launches: #{normal.launches // runs}; uploads: #{normal.uploads // runs}; downloads: #{normal.downloads // runs}"
-puts "prefill tokens/s: #{(prefill * runs / wall).round(1)}" if prefill
-normal.host_ops.each { |name, (count, seconds)| puts "host op #{name}: #{count // runs} each, #{ms.call(seconds)} ms" }
-
 timed = CUDA::Profile.new(per_kernel: true, shapes: true)
 run(model, cuda, timed, prefill)
-gpu = timed.kernels.values.sum(&.[1])
-per_run = ->(count : Int32) { "%.1f" % (count / runs) }
-puts
-puts "GPU time per #{unit}, each op timed alone (total #{ms.call(gpu)} ms, #{(gpu / wall * 100).round}% of the first run's wall time), by op:"
-puts
-puts "op|count|GPU ms|share"
-puts "--|-----|------|-----"
-by_op = Hash(String, {Int32, Float64}).new({0, 0.0})
-timed.kernels.each do |name, (count, seconds)|
-  op = name.split(' ', 2).first
-  total = by_op[op]
-  by_op[op] = {total[0] + count, total[1] + seconds}
-end
-by_op.to_a.sort_by { |(_, (_, seconds))| -seconds }.each do |op, (count, seconds)|
-  puts "#{op}|#{per_run.call(count)}|#{ms.call(seconds)}|#{(seconds / gpu * 100).round}%"
-end
-puts
-puts "By op and shape, the 20 largest:"
-puts
-puts "op|count|GPU ms|share|GB/s or GFLOP/s"
-puts "--|-----|------|-----|---------------"
-timed.kernels.to_a.sort_by { |(_, (_, seconds))| -seconds }.first(20).each do |name, (count, seconds)|
-  rate = ""
-  if name.starts_with?("MatMul") && (dims = name.scan(/\d+/).map(&.[0].to_i)) && dims.size >= 4
-    # [..., M, K]·[..., K, N]: 2·M·K·N flops per batch matrix, and K·N weights read.
-    a, b = dims[0, dims.size // 2], dims[dims.size // 2..]
-    rate = if a[-2] == 1
-             "%.1f GB/s" % (4.0 * b[-2] * b[-1] * b[0...-2].product(1) * count / seconds / 1e9)
-           else
-             "%.1f GFLOP/s" % (2.0 * a.product(1) * b.last * count / seconds / 1e9)
-           end
-  end
-  puts "#{name}|#{per_run.call(count)}|#{ms.call(seconds)}|#{(seconds / gpu * 100).round}%|#{rate}"
-end
+CUDA::Profile.report(STDOUT, cuda.name, unit, runs, wall, normal, timed)
+puts "\nprefill tokens/s: #{(prefill * runs / wall).round(1)}" if prefill

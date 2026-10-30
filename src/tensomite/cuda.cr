@@ -936,3 +936,5 @@ module Tensomite
     end
   end
 end
+
+require "./cuda/report"
