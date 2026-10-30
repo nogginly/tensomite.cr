@@ -153,13 +153,18 @@ extern "C" __global__ void gather_f32(const float* table, const int* ids, float*
     dst[i] = table[offset_of(vt, id * width + i % width)];
 }
 
-// Thread j owns output column j: it zeroes the column, then adds source rows into
-// the rows their ids select, in index order, as the host does.
+// Zeroes dst, one thread per element.
+extern "C" __global__ void fill_zero_f32(float* dst, unsigned int n) {
+    unsigned int i = thread_index();
+    if (i < n) dst[i] = 0.0f;
+}
+
+// Thread j owns output column j, zeroed by fill_zero_f32: it adds source rows
+// into the rows their ids select, in index order, as the host does.
 extern "C" __global__ void scatter_add_f32(const float* src, const int* ids, float* dst, int* errors,
                                            View vs, View vi, unsigned int width, int rows, unsigned int n) {
     unsigned int j = thread_index();
     if (j >= width) return;
-    for (int r = 0; r < rows; r++) dst[r * width + j] = 0.0f;
     for (unsigned int i = 0; i < n; i++) {
         int id = ids[offset_of(vi, i)];
         if (id < 0 || id >= rows) {
