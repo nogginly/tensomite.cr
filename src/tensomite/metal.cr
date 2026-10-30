@@ -168,6 +168,12 @@ module Tensomite
       property dispatches = 0
       property command_buffers = 0
 
+      # Buffers allocated, those the pool could not serve, and buffers released
+      # because the pool was full.
+      property allocations = 0
+      property pool_misses = 0
+      property frees = 0
+
       # True when `#kernels` keys each op by its shapes as well as its name: a
       # matmul's two sources, `MatMul [64,768]·[768,2304]`, and any other op's
       # output. Takes effect only with `#per_kernel?`.
@@ -184,6 +190,25 @@ module Tensomite
       protected def add_host_op(name : String, seconds : Float64) : Nil
         count, total = host_ops[name]
         host_ops[name] = {count + 1, total + seconds}
+      end
+
+      # Prints, as Markdown tables, where *wall* seconds of *runs* runs of a
+      # workload went, per *unit*: first by *normal*, a profile taken as the
+      # workload ran, then the GPU time per op, by op and then by op and shape,
+      # from *timed*, a profile with `per_kernel` and `shapes` of another run.
+      # See `ProfileReport`.
+      def self.report(io : IO, device : String, unit : String, runs : Int32, wall : Float64,
+                      normal : Profile, timed : Profile, top : Int32 = 20) : Nil
+        parts = [
+          {"encoding dispatches", normal.encode},
+          {"allocating buffers", normal.alloc},
+          {"waiting for the GPU", normal.wait},
+        ]
+        counts = [
+          "dispatches: #{normal.dispatches // runs}; command buffers: #{(normal.command_buffers / runs).round(1)}",
+          "allocations: #{normal.allocations // runs}; not from the pool: #{normal.pool_misses // runs}; freed: #{normal.frees // runs}",
+        ]
+        io << ProfileReport.new(device, unit, runs, wall, parts, counts, normal.host_ops, timed.kernels, top)
       end
     end
 
@@ -224,16 +249,21 @@ module Tensomite
     end
 
     def alloc(bytesize : Int32) : Buffer
-      return new_buffer(bytesize) unless profile = @profile
       start = Time.instant
-      new_buffer(bytesize).tap { profile.alloc += (Time.instant - start).total_seconds }
+      recycle_retired if idle?
+      pooled = buffer_pool.take(bytesize)
+      buffer = pooled ? MetalBuffer.new(self, pooled, bytesize) : new_buffer(bytesize)
+      @profile.try do |profile|
+        profile.alloc += (Time.instant - start).total_seconds
+        profile.allocations += 1
+        profile.pool_misses += 1 unless pooled
+      end
+      buffer
     end
 
-    # Returns a buffer of *bytesize* bytes, from the pool when one is free.
+    # Returns a new buffer of *bytesize* bytes, not from the pool.
     private def new_buffer(bytesize : Int32) : MetalBuffer
-      recycle_retired if idle?
-      mtl = buffer_pool.take(bytesize) ||
-            ObjC.send(Pointer(Void), @device, "newBufferWithLength:options:", Math.max(bytesize, 4).to_u64, STORAGE_SHARED)
+      mtl = ObjC.send(Pointer(Void), @device, "newBufferWithLength:options:", Math.max(bytesize, 4).to_u64, STORAGE_SHARED)
       raise DeviceError.new("cannot allocate #{bytesize} bytes") if mtl.null?
       MetalBuffer.new(self, mtl, bytesize)
     end
@@ -244,7 +274,9 @@ module Tensomite
     # busy or full (see `RetiredList`) it is released instead; command buffers
     # keep the buffers they use alive, so releasing is always safe.
     protected def retire(mtl : Void*, bytesize : Int32) : Nil
-      ObjC.release(mtl) unless @retired.push(mtl, bytesize)
+      return if @retired.push(mtl, bytesize)
+      ObjC.release(mtl)
+      @profile.try { |profile| profile.frees += 1 }
     end
 
     private def idle? : Bool
@@ -662,7 +694,11 @@ module Tensomite
 
     # Moves the buffers retired while GPU work was pending into the pool.
     private def recycle_retired : Nil
-      @retired.drain { |mtl, bytesize| ObjC.release(mtl) unless buffer_pool.give(mtl, bytesize) }
+      @retired.drain do |mtl, bytesize|
+        next if buffer_pool.give(mtl, bytesize)
+        ObjC.release(mtl)
+        @profile.try { |profile| profile.frees += 1 }
+      end
     end
 
     private def metal(buffer : Buffer) : MetalBuffer

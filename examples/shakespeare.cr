@@ -77,6 +77,31 @@ class CharGPT < Tensomite::Module
   end
 end
 
+# The devices `--profile` can profile in this build.
+PROFILED = [] of String
+{% if flag?(:darwin) && flag?(:aarch64) %}
+  PROFILED << "metal"
+{% end %}
+{% if flag?(:cuda) %}
+  PROFILED << "cuda"
+{% end %}
+
+# Times *count* training steps, each run by the block, on *gpu*: after three
+# steps to warm up, once with *normal* collecting, then again with *timed*,
+# which times each op alone. Prints the report and exits.
+def profile_training(gpu, normal, timed, count : Int32, &) : NoReturn
+  3.times { yield }
+  gpu.profile = normal
+  start = Time.instant
+  count.times { yield }
+  wall = (Time.instant - start).total_seconds
+  gpu.profile = timed
+  count.times { yield }
+  gpu.profile = nil
+  normal.class.report(STDOUT, gpu.name, "training step", count, wall, normal, timed, top: 25)
+  exit
+end
+
 steps, batch, layers, heads, width, context = 2000, 16, 4, 4, 128, 64
 lr, min_lr, warmup, eval_every, eval_batches, seed = 1e-3, 1e-4, 100, 250, 20, 1337
 device_name, data_path, sample_length = "blas", "data/shakespeare/input.txt", 300
@@ -107,9 +132,9 @@ OptionParser.parse do |parser|
   parser.on("--device NAME", "#{devices.keys.join(", ")} (#{device_name})") { |name| device_name = name }
   parser.on("--data PATH", "Training text (#{data_path})") { |path| data_path = path }
   parser.on("--diagram DEPTH", "Print a Mermaid summary of the loss's graph at DEPTH, or every op at 0, and exit") { |value| diagram_depth = value.to_i }
-  {% if flag?(:cuda) %}
-    parser.on("--profile N", "With --device cuda: profile N training steps after three warm-up steps, and exit") { |value| profile_steps = value.to_i }
-  {% end %}
+  unless PROFILED.empty?
+    parser.on("--profile N", "With --device #{PROFILED.join(" or ")}: profile N training steps after three warm-up steps, and exit") { |value| profile_steps = value.to_i }
+  end
   parser.on("-h", "--help", "Show this help") { puts parser; exit }
 end
 device = devices[device_name]?.try(&.call) || abort "unknown device #{device_name}; this build has #{devices.keys.join(", ")}"
@@ -150,31 +175,26 @@ evaluate = -> do
   (1..eval_batches).sum { inputs, targets = sample_batch.call(val); model.call(inputs).cross_entropy(targets).to_a(Float32)[0] } / eval_batches
 end
 
-{% if flag?(:cuda) %}
-  if count = profile_steps
-    cuda = device.as?(CUDA) || abort "--profile needs --device cuda"
-    # Runs *count* steps of training, at the peak learning rate, with *profile*
-    # collecting, and returns their wall seconds.
-    run_steps = ->(count : Int32, profile : CUDA::Profile?) do
-      optimizer.lr = lr
-      cuda.profile = profile
-      start = Time.instant
-      count.times do
-        inputs, targets = sample_batch.call(train)
-        optimizer.step(model.call(inputs).cross_entropy(targets))
-        GC.collect
-      end
-      (Time.instant - start).total_seconds.tap { cuda.profile = nil }
-    end
-    run_steps.call(3, nil)
-    normal = CUDA::Profile.new
-    wall = run_steps.call(count, normal)
-    timed = CUDA::Profile.new(per_kernel: true, shapes: true)
-    run_steps.call(count, timed)
-    CUDA::Profile.report(STDOUT, cuda.name, "training step", count, wall, normal, timed, top: 25)
-    exit
+if count = profile_steps
+  # Runs one training step at the peak learning rate.
+  train_step = -> do
+    optimizer.lr = lr
+    inputs, targets = sample_batch.call(train)
+    optimizer.step(model.call(inputs).cross_entropy(targets))
+    GC.collect
   end
-{% end %}
+  {% if flag?(:cuda) %}
+    if cuda = device.as?(CUDA)
+      profile_training(cuda, CUDA::Profile.new, CUDA::Profile.new(per_kernel: true, shapes: true), count) { train_step.call }
+    end
+  {% end %}
+  {% if flag?(:darwin) && flag?(:aarch64) %}
+    if metal = device.as?(Metal)
+      profile_training(metal, Metal::Profile.new, Metal::Profile.new(per_kernel: true, shapes: true), count) { train_step.call }
+    end
+  {% end %}
+  abort "--profile needs --device #{PROFILED.join(" or ")}"
+end
 
 # Each report gives the time per step since the previous one, leaving out the
 # validation runs, so that a slow first step, while kernels compile, does not
