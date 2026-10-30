@@ -176,7 +176,12 @@ end
   end
 {% end %}
 
-started = Time.instant
+# Each report gives the time per step since the previous one, leaving out the
+# validation runs, so that a slow first step, while kernels compile, does not
+# hide the steady rate.
+started = since = Time.instant
+reported = -1
+validating = Time::Span.zero
 steps.times do |step|
   progress = step < warmup ? (step + 1) / warmup : (step - warmup) / Math.max(1, steps - warmup)
   rate = step < warmup ? lr * progress : min_lr + 0.5 * (lr - min_lr) * (1 + Math.cos(Math::PI * progress))
@@ -187,13 +192,17 @@ steps.times do |step|
   # device's pool before the next step allocates.
   GC.collect
   if step % 10 == 0 || step == steps - 1
-    elapsed = (Time.instant - started).total_seconds
-    puts "step #{step}: loss #{loss_value.round(4)}, lr #{rate.round(6)}, #{(elapsed / (step + 1) * 1000).round(1)} ms/step"
+    now = Time.instant
+    puts "step #{step}: loss #{loss_value.round(4)}, lr #{rate.round(6)}, #{((now - since - validating).total_milliseconds / (step - reported)).round(1)} ms/step"
+    since, reported, validating = now, step, Time::Span.zero
   end
   if (step + 1) % eval_every == 0 || step == steps - 1
+    start = Time.instant
     puts "step #{step}: validation loss #{evaluate.call.round(4)} nats/char"
+    validating += Time.instant - start
   end
 end
+puts "#{steps} steps in #{(Time.instant - started).total_seconds.round(1)} s, validation included"
 
 if sample_length > 0
   window = [index['\n']]
