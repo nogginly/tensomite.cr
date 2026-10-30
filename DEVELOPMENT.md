@@ -37,7 +37,7 @@ crystal build --release examples/shakespeare.cr -o shakespeare
 ./shakespeare --steps 2000
 ```
 
-`--help` lists the model and training options. The trainer calls `GC.collect` after each step, so that the step's buffers return to the device's pool (see "Buffer pool" in `DESIGN.md`) before the next step allocates. `GC_UNMAP_THRESHOLD=0` still saves a few per cent on Linux, by keeping the collector from returning freed pages to the system.
+`--help` lists the model and training options. `--device` picks `cpu`, `blas` (the default), `metal` on Apple Silicon, or `cuda` in a build with `-Dcuda` (`crystal build --release -Dcuda examples/shakespeare.cr -o shakespeare`). The trainer calls `GC.collect` after each step, so that the step's buffers return to the device's pool (see "Buffer pool" in `DESIGN.md`) before the next step allocates. `GC_UNMAP_THRESHOLD=0` still saves a few per cent on Linux, by keeping the collector from returning freed pages to the system.
 
 **High system time is OpenBLAS, not the collector.** OpenBLAS's worker threads busy-wait between calls, so `time` reports several times the wall time in `user` and `sys`. `OPENBLAS_NUM_THREADS=1` removes it, at little cost to the wall time of these small models.
 

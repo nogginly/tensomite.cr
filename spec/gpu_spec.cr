@@ -118,6 +118,25 @@ describe "GPU devices against the CPU" do
         end
       end
 
+      it "trains an attention model with AdamW as the CPU does" do
+        # Five steps of embedding, attention, GELU MLP and cross-entropy, so that
+        # every op of training a GPT, forward and backward, runs on the device.
+        losses = ->(device : Device) do
+          rng = Random.new(3)
+          embedding = Embedding.new(11, 8, rng: rng, device: device)
+          attention = CausalSelfAttention.new(8, 2, rng: rng, device: device)
+          mlp = Sequential.new(Linear.new(8, 16, rng: rng, device: device), Activation.gelu, Linear.new(16, 11, rng: rng, device: device))
+          optimizer = AdamW.new(embedding.params + attention.params + mlp.params, lr: 1e-2, weight_decay: 0.1)
+          ids = Tensor.from([3, 1, 4, 1, 5, 9, 2, 6], [8], device)
+          targets = Tensor.from([1, 4, 1, 5, 9, 2, 6, 5], [8], device)
+          mask = Tensor.causal_mask(8, 8, device)
+          Array.new(5) { optimizer.step(mlp.call(attention.call(embedding.call(ids), mask)).cross_entropy(targets)) }
+        end
+        expected = losses.call(CPU.default)
+        expected.last.should be < expected.first
+        losses.call(gpu).zip(expected) { |a, e| a.should be_close(e, 1e-5 * Math.max(1f32, e.abs)) }
+      end
+
       it "raises for an id out of range when realised" do
         table = Tensor.from(f32(1, 2, 3, 4), [2, 2], gpu)
         result = table.gather(Tensor.from([0, 2], [2], gpu))
