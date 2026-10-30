@@ -161,7 +161,7 @@ module Tensomite
     alias ViewArgs = StaticArray(Int32, 19)
 
     # The kernels' `Inverse` struct; see `#inverse_args`.
-    alias InverseArgs = StaticArray(Int32, 18)
+    alias InverseArgs = StaticArray(Int32, 42)
 
     # Raised when NVRTC rejects a kernel's source; the message holds its log.
     class CompileError < DeviceError; end
@@ -183,9 +183,10 @@ module Tensomite
     getter gpu : GPU
     getter context : Context
 
-    # Freed device memory kept for reuse; see `BufferPool`. Holds up to 1 GiB by
-    # default. (`#pool`, inherited, holds host copies.)
-    getter buffer_pool = BufferPool(LibCUDA::DevicePtr).new(1_i64 << 30)
+    # Freed device memory kept for reuse; see `BufferPool`. Holds up to a quarter
+    # of the GPU's memory, and at least 1 GiB. (`#pool`, inherited, holds host
+    # copies.)
+    getter buffer_pool : BufferPool(LibCUDA::DevicePtr)
 
     # Returns the number of uploads since creation.
     getter uploads = 0
@@ -237,6 +238,12 @@ module Tensomite
       property uploads = 0
       property downloads = 0
 
+      # Buffers allocated, those the pool could not serve, and device memory
+      # freed because the pool was full.
+      property allocations = 0
+      property pool_misses = 0
+      property frees = 0
+
       # True when `#kernels` keys each op by its shapes as well as its name: a
       # matmul's two sources, `MatMul [64,768]·[768,2304]`, and any other op's
       # output. Takes effect only with `#per_kernel?`.
@@ -261,9 +268,8 @@ module Tensomite
 
     @events : {Void*, Void*}? = nil
 
-    @retired = [] of {LibCUDA::DevicePtr, Int32}
+    @retired = RetiredList(LibCUDA::DevicePtr).new
     @scratch : CUDABuffer? = nil
-    @retired_lock = Atomic(Bool).new(false)
     @kernels : Kernels? = nil
     @kernels_loaded = false
     @errors : LibCUDA::DevicePtr? = nil
@@ -271,6 +277,7 @@ module Tensomite
 
     def initialize(@gpu : GPU)
       @context = Context.new(gpu)
+      @buffer_pool = BufferPool(LibCUDA::DevicePtr).new(Math.max(1_i64 << 30, (gpu.memory // 4).to_i64))
     end
 
     # Returns the hand-written kernels, compiled and loaded on first use, or
@@ -293,8 +300,13 @@ module Tensomite
     def alloc(bytesize : Int32) : Buffer
       start = Time.instant
       recycle_retired
-      pointer = buffer_pool.take(bytesize) || context.alloc(Math.max(bytesize, 4))
-      @profile.try { |profile| profile.alloc += (Time.instant - start).total_seconds }
+      pooled = buffer_pool.take(bytesize)
+      pointer = pooled || context.alloc(Math.max(bytesize, 4))
+      @profile.try do |profile|
+        profile.alloc += (Time.instant - start).total_seconds
+        profile.allocations += 1
+        profile.pool_misses += 1 unless pooled
+      end
       CUDABuffer.new(self, pointer, bytesize)
     end
 
@@ -379,30 +391,22 @@ module Tensomite
     end
 
     # Takes back the device memory of a collected buffer. Finalizers run on any
-    # thread and must never wait, so when the list is busy the memory is freed
-    # at once instead, which needs this context current on that thread.
+    # thread and must never wait, so when the list is busy or full (see
+    # `RetiredList`) the memory is freed at once instead, which needs this
+    # context current on that thread.
     protected def retire(pointer : LibCUDA::DevicePtr, bytesize : Int32) : Nil
-      unless @retired_lock.compare_and_set(false, true)[1]
-        context.free_from_any_thread(pointer)
-        return
-      end
-      begin
-        @retired << {pointer, bytesize}
-      ensure
-        @retired_lock.set(false)
-      end
+      return if @retired.push(pointer, bytesize)
+      context.free_from_any_thread(pointer)
+      @profile.try { |profile| profile.frees += 1 }
     end
 
     # Moves retired device memory into the pool, freeing what it cannot hold.
     private def recycle_retired : Nil
-      return if @retired.empty?
-      fresh = [] of {LibCUDA::DevicePtr, Int32}
-      until @retired_lock.compare_and_set(false, true)[1]
-        Thread.yield
+      @retired.drain do |pointer, bytesize|
+        next if buffer_pool.give(pointer, bytesize)
+        context.free(pointer)
+        @profile.try { |profile| profile.frees += 1 }
       end
-      retired, @retired = @retired, fresh
-      @retired_lock.set(false)
-      retired.each { |(pointer, bytesize)| context.free(pointer) unless buffer_pool.give(pointer, bytesize) }
     end
 
     private def cuda(buffer : Buffer) : CUDABuffer
@@ -641,8 +645,9 @@ module Tensomite
       end
     end
 
-    # Returns the kernels' `Inverse` for *view*: the dimensions with a nonzero
-    # stride and more than one index, largest stride first, then the rest.
+    # Returns the kernels' `Inverse` for *view*: the stride, size and row-major
+    # stride of each dimension with a nonzero stride and more than one index,
+    # largest stride first, then the size and row-major stride of the rest.
     #
     # Returns `nil` unless each of those strides exceeds the furthest the smaller
     # ones can reach together, which makes the decomposition of a position unique.
@@ -657,11 +662,19 @@ module Tensomite
         reach += stride * (view.shape[dim] - 1)
       end
       repeated = dims.reject { |dim| strided.includes?(dim) }
+      steps = View.row_major_strides(view.shape)
       args = InverseArgs.new(0)
       args[0] = strided.size
-      strided.each_with_index { |dim, k| args[1 + k] = dim }
-      args[1 + MAX_DIMS] = repeated.size
-      repeated.each_with_index { |dim, k| args[2 + MAX_DIMS + k] = dim }
+      strided.each_with_index do |dim, k|
+        args[1 + k] = view.strides[dim]
+        args[1 + MAX_DIMS + k] = view.shape[dim]
+        args[1 + 2 * MAX_DIMS + k] = steps[dim]
+      end
+      args[1 + 3 * MAX_DIMS] = repeated.size
+      repeated.each_with_index do |dim, k|
+        args[2 + 3 * MAX_DIMS + k] = view.shape[dim]
+        args[2 + 4 * MAX_DIMS + k] = steps[dim]
+      end
       args
     end
 

@@ -38,6 +38,10 @@ EXACT = {
     bias = random(d, [4], 1)
     Tensomite.grad(((random(d, [3, 4], 2) + bias) * random(d, [3, 4], 3)).sum, [bias]).first
   },
+  "unview of two expanded axes" => ->(d : Device) {
+    bias = random(d, [1, 4, 1], 1)
+    Tensomite.grad(((random(d, [3, 4, 5], 2) + bias) * random(d, [3, 4, 5], 3)).sum, [bias]).first
+  },
   "unview of slice and transpose" => ->(d : Device) {
     x = random(d, [4, 6], 1)
     Tensomite.grad((x.transpose.slice(0, 1, 5) * random(d, [4, 4], 2)).sum, [x]).first

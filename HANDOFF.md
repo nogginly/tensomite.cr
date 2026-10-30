@@ -4,7 +4,7 @@ What the next session, or the next person, needs in order to carry on without th
 
 **Keeping it current.** Rewrite it rather than appending to it: at the end of each PR, and whenever a session's context passes about 70%. Anything that belongs in one of the other three documents goes there instead.
 
-*Last rewritten: 27 Oct 2026, with a CUDA training profiler open.*
+*Last rewritten: 27 Oct 2026, with a CUDA training profiler and its first fixes open.*
 
 ## Where things stand
 
@@ -15,8 +15,8 @@ What the next session, or the next person, needs in order to carry on without th
   - macro kernels match their oracles and their gradients pass finite differences;
   - Shakespeare reached 1.573 nats/char in 20 minutes in the Linux container.
 - **M7b's exit, met** (evidence under 7b in `PLAN.md`): the tutorial, Shakespeare and GPT-2 models on modules with the same bits as the hand-written ones, on every device; the `Builder` chosen as the DSL (Decisions AN and AR).
-- **Open PR:** `--profile N` for the Shakespeare trainer on CUDA, with the report shared with `bench/profile_gpt2_cuda.cr` as `CUDA::Profile.report` (`m8-profile-training`, Decision BG). Merged: everything through the trainer on CUDA and Metal (M8 part 5's first half); `Auto` decodes GPT-2 at 268 tokens/s on the GB10, and the larger Shakespeare model trains at 110 ms a step there, against 76 on Metal on the M5 Pro.
-- **Now: M8, a CUDA backend** (Decisions AS–AV in `PLAN.md`; Vulkan moved to M12). Development is on the maintainer's DGX Spark, the exit on a cloud T4. Nothing in the container runs CUDA kernels: the maintainer runs them on the Spark, as with Metal on the Mac. The container and CI run the `CUDA` device and its kernels on `scripts/cuda_stub`, which compiles `kernels.cu` as host C++. Next: fix the largest cost the training profile shows, then the rest of part 5, the Shakespeare trainer on CUDA and the exit runs on the Spark and a T4.
+- **Open PRs:** `--profile N` for the trainer on CUDA, with `CUDA::Profile.report` (`m8-profile-training`), and, on top of it, the first fixes it found (`m8-train-unview`, Decision BG): a faster `Unview` kernel with the same bits, a `RetiredList` that never allocates, so CUDA and Metal buffers return to the pool instead of being freed, and CUDA kernels that no longer copy their view arguments to local memory. With all three, the larger Shakespeare model trains at about 20 ms a step on the GB10, from 109, and at 59 on Metal, from 76. Merged: everything through the trainer on CUDA and Metal; the larger Shakespeare model trained at 110 ms a step on the GB10, against 76 on Metal.
+- **Now: M8, a CUDA backend** (Decisions AS–AV in `PLAN.md`; Vulkan moved to M12). Development is on the maintainer's DGX Spark, the exit on a cloud T4. Nothing in the container runs CUDA kernels: the maintainer runs them on the Spark, as with Metal on the Mac. The container and CI run the `CUDA` device and its kernels on `scripts/cuda_stub`, which compiles `kernels.cu` as host C++. Next: re-profile training on the GB10, then `--profile` on Metal (Decision BH), then the rest of part 5, the Shakespeare trainer on CUDA and the exit runs on the Spark and a T4.
 - **A long-term goal:** inspecting running models (activations, attention, gradients) by the names of their parts; see "Inspectable" in `PLAN.md` and "Towards inspection" in `DESIGN.md`. Scopes are its first piece, and Decision AA must keep inspected nodes alive.
 - **Deferred:** Decision D, CPU threads (not needed for M7's exits). Decision AA, releasing buffers as soon as their last reader has run.
 
@@ -30,7 +30,7 @@ Stacked PRs         |When asked. The later PR's base is the earlier branch; GitH
 Merging             |The maintainer merges, by squash or by merge commit. After a squash, merge `main` into a stacked branch and resolve conflicts with the branch's side; never rewrite history or force-push (the session blocks it anyway).                                            
 Milestones          |Each ends with its exit criterion passing, with the evidence (numbers, logs) in the PR description.                                                                                                                                                                  
 Documents           |Updated in the same PR as the code (see "Workflow" in `DEVELOPMENT.md`), `GUIDE.md` included whenever the public API changes. Tables and diagrams follow "Documents" in `DEVELOPMENT.md`; check them with `scripts/format_tables.py` and `scripts/check_diagrams.sh`.
-Decisions           |Labelled with letters and recorded in `PLAN.md`. The next is **BH**; T to AG shape M7, AH to AR shape M7b, and AS to BG shape M8. P (how to get GPT-2 small's fixtures) was settled by allowing Hugging Face; Q made this document committed.                        
+Decisions           |Labelled with letters and recorded in `PLAN.md`. The next is **BI**; T to AG shape M7, AH to AR shape M7b, and AS to BH shape M8. P (how to get GPT-2 small's fixtures) was settled by allowing Hugging Face; Q made this document committed.                        
 Understanding checks|Short questions labelled Q-A, Q-B and so on, after explaining something new. The next is **Q-AQ**; Q-T to Q-AP are recent.                                                                                                                                           
 Claims              |Measured before stated. Several assumptions were wrong when checked: decode time was dominated by the KV cache, not host kernels; GPT-2's file was unaligned. Say "I think" when something is unverified.                                                            
 

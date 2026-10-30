@@ -73,3 +73,58 @@ module Tensomite
     end
   end
 end
+
+module Tensomite
+  # Memory given back by finalizers, waiting for its device to move it into a
+  # `BufferPool`.
+  #
+  # Finalizers run on any thread, and even in the middle of another finalizer:
+  # an allocation can collect garbage and run them, on the same thread. So
+  # `#push` never allocates and never waits. It stores into one of two fixed
+  # buffers, and returns false when the list is busy or full; the caller then
+  # frees the memory itself. `#drain` swaps the buffers and yields what the full
+  # one holds.
+  class RetiredList(T)
+    @filling : Slice({T, Int32})
+    @draining : Slice({T, Int32})
+
+    def initialize(capacity : Int32 = 16384)
+      @filling = Slice.new(Pointer({T, Int32}).malloc(capacity), capacity)
+      @draining = Slice.new(Pointer({T, Int32}).malloc(capacity), capacity)
+    end
+
+    @count = 0
+    @lock = Atomic(Bool).new(false)
+
+    # Keeps *memory* of *bytesize* bytes and returns true, or returns false when
+    # the list is busy or full.
+    def push(memory : T, bytesize : Int32) : Bool
+      return false unless @lock.compare_and_set(false, true)[1]
+      begin
+        return false if @count == @filling.size
+        @filling[@count] = {memory, bytesize}
+        @count += 1
+        true
+      ensure
+        @lock.set(false)
+      end
+    end
+
+    # Yields the memory pushed since the last drain, with its size. Called from
+    # the device's own thread only, and never from a finalizer.
+    def drain(& : T, Int32 ->) : Nil
+      return if @count == 0
+      until @lock.compare_and_set(false, true)[1]
+        Thread.yield
+      end
+      full, count = @filling, @count
+      @filling, @draining = @draining, @filling
+      @count = 0
+      @lock.set(false)
+      count.times do |i|
+        memory, bytesize = full[i]
+        yield memory, bytesize
+      end
+    end
+  end
+end

@@ -46,6 +46,15 @@ require "./spec_helper"
       params[2].as(Float32*).value.should eq 2.5f32
     end
 
+    it "compiles the device's kernels without per-thread local memory" do
+      # Indexing a kernel argument, such as a view, by a value known only at run
+      # time copies the argument to each thread's local memory first.
+      source = {"prelude.cu", "kernels.cu"}.join { |file| File.read("#{__DIR__}/../src/tensomite/cuda/#{file}") }
+      ptx = CUDA.compile(source, CUDA.supported_archs.min)
+      ptx.should contain ".entry unview_f32"
+      ptx.should_not contain ".local"
+    end
+
     it "reports compile errors with NVRTC's log" do
       expect_raises(CUDA::CompileError, /broken.cu.*error/m) { CUDA.compile("this is not CUDA", CUDA.supported_archs.min, "broken.cu") }
     end
@@ -113,6 +122,21 @@ require "./spec_helper"
         w = SafeTensors.open(path)["w", cuda]
         w.node.buffer!.should be_a CUDABuffer
         w.matmul(w).to_a(Float32).should eq f32(7, 10, 15, 22)
+      end
+
+      it "serves a repeated graph from the pool once it is warm" do
+        # Finalizers that ran inside another one's allocation used to free their
+        # memory instead of returning it to the pool.
+        x = Tensor.from(Array.new(1000, 1f32), [1000], cuda)
+        round = -> do
+          10.times { ((x * 2) + 1).realize }
+          GC.collect
+          cuda.sync
+        end
+        3.times { round.call }
+        misses = cuda.buffer_pool.misses
+        round.call
+        (cuda.buffer_pool.misses - misses).should be <= 2
       end
 
       it "reuses the device memory of collected buffers" do

@@ -27,6 +27,7 @@ module Tensomite
         io.puts "everything else|#{ms.call(other)}"
         io.puts
         io.puts "launches: #{normal.launches // runs}; uploads: #{normal.uploads // runs}; downloads: #{normal.downloads // runs}"
+        io.puts "allocations: #{normal.allocations // runs}; not from the pool: #{normal.pool_misses // runs}; freed: #{normal.frees // runs}"
         normal.host_ops.each { |name, (count, seconds)| io.puts "host op #{name}: #{per_run.call(count)} each, #{ms.call(seconds)} ms" }
 
         gpu = timed.kernels.values.sum(&.[1])

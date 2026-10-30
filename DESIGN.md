@@ -488,8 +488,10 @@ A graph built anew every step, as in training or decoding, would allocate a fres
 1. **Giving back.** When the collector finalizes a buffer, its finalizer hands the memory to the device's pool. A buffer is collected only once nothing can reach it, so reuse is always safe. Memory from a file mapping is never pooled.
 2. **Taking.** `alloc` takes memory of the exact size from the pool when there is some, and allocates otherwise. A pooled buffer's old contents remain, which is why `Device#alloc` promises nothing about contents and every kernel writes all of its output.
 3. **Threads and re-entrancy.** A finalizer can run in the middle of any allocation, including one made by the pool itself, and on any thread: in Crystal 1.22 the execution-context monitor thread runs them too, while the main thread is computing. So the pool is guarded by an atomic try-lock and never waits. While one caller holds it, `take` misses, and the caller allocates, and `give` declines, and the memory is freed. Before this lock, a race between the two threads corrupted the free lists, about once in 30 runs of `gpt2_spec`, and once in a 5,000-step training run.
-4. **On Metal**, finalizers only queue a buffer in a retired list, under the same kind of try-lock. The device's own thread moves the list into the pool when no GPU work is pending, at the next allocation or flush, because the GPU may still be reading a buffer. When the list is held, the finalizer releases the `MTLBuffer` instead, which is safe because command buffers retain what they use. The pool holds the `MTLBuffer`s themselves.
-5. **A limit** (1 GiB by default) bounds what a pool holds.
+4. **On Metal and CUDA**, finalizers only queue a buffer in a `RetiredList`. The device's own thread drains it into the pool at the next allocation or sync, or on Metal when no GPU work is pending, because the GPU may still be reading a buffer. A finalizer can run inside another finalizer's allocation on the same thread, so the list never allocates: it fills one of two fixed arrays, of 16,384 entries, and draining swaps them. When the list is busy or full, the finalizer frees the memory at once instead: Metal releases the `MTLBuffer`, which is safe because command buffers retain what they use, and CUDA frees it with `cuMemFree`, which waits for the GPU. The pool holds the `MTLBuffer`s and device pointers themselves.
+
+   Until Decision BG, the retired list was a growable array, replaced by an empty one at each drain. Appending to it allocated, the allocation ran the other waiting finalizers inside the first, and each of those found the list held and freed its memory. On CUDA almost every buffer was freed rather than pooled: in a training step on the stub, 416 of 429 allocations missed the pool, and on the GB10 allocating took 17 of the step's 109 ms.
+5. **A limit** bounds what a pool holds: 1 GiB by default, and on CUDA a quarter of the GPU's memory, if that is more.
 
 Reuse lags by one collection: memory comes back only when the collector runs. A training loop that collects once per step (`examples/shakespeare.cr`) gets most of its buffers back before the next step; on the Linux container, that took a step from 744 to 470 ms, with identical losses.
 
@@ -1178,7 +1180,24 @@ MacBook Pro, M5 Pro|`metal`                 |45           |**76**
 
 - **Two 2,000-step CUDA runs of the default model gave the same losses, validation losses and sample, character for character,** ending at 1.8444 nats/char after 84 s.
 - **The GPU wins once the products are large enough to outweigh its fixed cost per kernel.** A training step is several hundred launches, many of them small. On the default model, Accelerate, which runs on the M5 Pro's matrix units, beats Metal; on the larger one, with products 1.5 times wider and twice as tall, Metal wins. OpenBLAS on the Grace cores is a weaker rival, and CUDA leads at both sizes, by 3.7 times on the larger model.
-- **CUDA trains the larger model slower than Metal** (110 against 76 ms) though the GB10 has the larger GPU; a training step on CUDA has not been profiled yet.
+- **CUDA trains the larger model slower than Metal** (110 against 76 ms) though the GB10 has the larger GPU.
+
+**Profiling a CUDA training step (Decision BG).** `examples/shakespeare.cr --device cuda --profile 10` on the larger model, on the GB10: of 109 ms a step, 75 were spent waiting for the GPU and 17 allocating, in 906 launches and 363 uploads. By GPU time:
+
+Op      |Per step|GPU ms|Share
+--------|--------|------|-----
+`Unview`|36      |32.3  |34%  
+`Mul`   |298     |20.9  |22%  
+`Add`   |147     |10.8  |11%  
+`MatMul`|75      |10.7  |11%  
+`Sub`   |68      |6.8   |7%   
+`Div`   |164     |4.9   |5%   
+
+- **`Unview` worked out every source index from scratch.** For each element it read, it decoded a flat index with divisions and rebuilt the logical element in a loop over a per-thread array, all in a serial chain. Summing a layer norm's gradient over 2,048 rows, `Unview [192]`, took 0.74 ms; the gradient of a q, k or v slice, `Unview [2048,576]`, 1.4 ms. The kernel now takes the view's row-major strides from the host, builds the logical element with multiplications while it decomposes the position, and walks repeated dimensions by stepping it: one step for a single repeated dimension, an odometer for several. The order of the sum, and so the bits, is unchanged.
+- **Allocating missed the pool,** because of the retired list's re-entrancy (see "Buffer pool").
+- **With both fixes, a step took 83.4 ms, from 109,** on the GB10: allocating 0.09 ms, from 17.4, with none of 1,269 allocations missing the pool, and the host's other work 2.2 ms, from 12.7. On the M5 Pro, Metal, which had the same retired list, trained the larger model at 59 ms a step, from 76, with no kernel changed.
+- **Views copied into each thread's local memory.** `Unview [2048,576]`, which reads one element per thread, still took 1.4 ms, and `Mul [16,6,128,128]` 0.58 ms for 1.6 million elements. A kernel argument indexed by a value known only at run time, as `v.strides[d]` in a loop over dimensions, is first copied to each thread's local memory: 76 bytes per view, 104 more for `Inverse`, and for a million threads hundreds of megabytes of traffic. Compiled to PTX, 28 of the hand-written kernels used local memory. `offset_of`, `stride_of` and `Unview` now loop over all `MAX_DIMS` dimensions, skipping those a view lacks, so the loops unroll and index arguments only by constants; `Inverse` holds the sorted strides and sizes themselves rather than dimension numbers. No kernel uses local memory now, and `spec/cuda_spec.cr` checks the PTX for it. With it, the larger model trains at about 20 ms a step on the GB10, from 83.4, with the same losses step for step: 5.4 times as fast as before Decision BG, and three times Metal's 59.5 on the M5 Pro. Metal's view arguments live in constant memory that kernels can index freely, so it made no such copies.
+- **The first step after a change to the kernels took 1.1 s,** where it had taken 0.11. I think the driver compiles new PTX for the GPU on first use and caches the result on disk. The trainer used to report the average time per step since step 0, which that one step kept high for hundreds of steps; it now reports the time per step since the previous report, leaving out validation, and the total at the end.
 
 Metal keeps `Split` at decode: its decode was not profiled for this, and the fix there would be the same.
 
