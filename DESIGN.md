@@ -621,6 +621,7 @@ flowchart LR
 - **`SGD`**: `p - lr·v`, where `v` is `g` or, with momentum, `momentum·v + g`.
 - **`AdamW`**: Adam with decoupled weight decay and bias correction. `lr` can be changed between steps for a schedule. Given tensors, every param decays, so params that should not, such as norms and biases, go to a second `AdamW` with `weight_decay: 0`; given `Parameter`s, each one's `decay?` flag decides.
 - **Over parameters.** Created with a model's `Parameter`s (see "Modules"), an optimizer's `step(loss)` does the whole loop in the diagram's order: lazy gradients, then reading the loss, then the update, stored back into each parameter's slot. It is the same arithmetic as `step(params, grads)`, to the bit (`spec/module_spec.cr`).
+- **One wait per step.** Both forms build every update, and the state carried to the next step (through `Optimizer#keep`), lazily, then realise them together with `Tensor.realize`, and `step(loss)` the loss with them. Realising waits for the device, so detaching each tensor as it was made waited for the GPU three times per AdamW parameter, about a hundred times a step for the larger Shakespeare model (Metal committed 114 command buffers a step), each a pause in which the GPU had nothing to do. The arithmetic and its order are unchanged, so the bits are too.
 
 ### Cross-entropy
 

@@ -27,23 +27,44 @@ module Tensomite
       slots = @slots || raise Error.new("step(loss) needs an optimizer created with parameters")
       values = slots.map(&.value)
       grads = Tensomite.grad(loss, values)
-      value = loss.to_a(Float32).first
-      slots.zip(step(values, grads)) { |slot, updated| slot.value = updated }
-      value
+      slots.zip(apply(values, grads, [loss])) { |slot, updated| slot.value = updated }
+      loss.to_a(Float32).first
     end
 
     # Returns *params* moved against *grads*, one gradient per param, realised and
     # detached from the graphs that made them.
     def step(params : Array(Tensor), grads : Array(Tensor)) : Array(Tensor)
+      apply(params, grads)
+    end
+
+    # Computes every update, the optimizer's new state and *also* in one
+    # realisation, so that the device is waited for once per step.
+    private def apply(params : Array(Tensor), grads : Array(Tensor), also = [] of Tensor) : Array(Tensor)
       raise ShapeError.new("#{grads.size} gradients for #{params.size} params") unless grads.size == params.size
       params.zip(grads).each do |(param, grad)|
         raise ShapeError.new("gradient #{grad.shape} for param #{param.shape}") unless param.shape == grad.shape
       end
       @steps += 1
-      params.map_with_index { |param, i| update(i, param, grads[i]).detach }
+      updated = params.map_with_index { |param, i| update(i, param, grads[i]) }
+      Tensor.realize(updated + @kept.map { |(state, i)| state[i] } + also)
+      @kept.each { |(state, i)| state[i] = state[i].detach }
+      @kept.clear
+      updated.map(&.detach)
     end
 
-    # Returns the new value of param *index*, lazily.
+    # State computed this step, as {table, index}: realised with the updates,
+    # then detached.
+    @kept = [] of {Hash(Int32, Tensor), Int32}
+
+    # Stores *value*, lazy, as *state*'s entry for param *index*, and returns it.
+    # It is realised and detached with the step's updates.
+    protected def keep(state : Hash(Int32, Tensor), index : Int32, value : Tensor) : Tensor
+      @kept << {state, index}
+      state[index] = value
+    end
+
+    # Returns the new value of param *index*, lazily. State it carries to the
+    # next step goes through `#keep`.
     protected abstract def update(index : Int32, param : Tensor, grad : Tensor) : Tensor
 
     # Returns whether weight decay applies to param *index*: its `Parameter`'s
@@ -71,7 +92,8 @@ module Tensomite
 
     protected def update(index : Int32, param : Tensor, grad : Tensor) : Tensor
       if momentum != 0
-        grad = @velocity[index] = (prev = @velocity[index]?) ? (prev * momentum + grad).detach : grad.detach
+        prev = @velocity[index]?
+        grad = keep(@velocity, index, prev ? prev * momentum + grad : grad)
       end
       param - grad * lr
     end
@@ -111,8 +133,8 @@ module Tensomite
         m = prev * beta1 + m
         v = @v[index] * beta2 + v
       end
-      m = @m[index] = m.detach
-      v = @v[index] = v.detach
+      m = keep(@m, index, m)
+      v = keep(@v, index, v)
       m_hat = m / (1 - beta1 ** steps)
       v_hat = v / (1 - beta2 ** steps)
       decayed = weight_decay == 0 || !decays?(index) ? param : param * (1 - lr * weight_decay)

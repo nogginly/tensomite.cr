@@ -134,6 +134,17 @@ module Tensomite
       self
     end
 
+    # Computes *tensors* and everything they depend on, waiting for the device
+    # once rather than once per tensor; returns *tensors*.
+    #
+    # ```
+    # Tensor.realize([loss, *updated_params])
+    # ```
+    def self.realize(tensors : Array(Tensor)) : Array(Tensor)
+      Scheduler.realize(tensors.map(&.node))
+      tensors
+    end
+
     # Realises the tensor and returns its elements in row-major order.
     #
     # Raises `DTypeError` unless *type* matches `#dtype`.
