@@ -161,7 +161,7 @@ module Tensomite
     alias ViewArgs = StaticArray(Int32, 19)
 
     # The kernels' `Inverse` struct; see `#inverse_args`.
-    alias InverseArgs = StaticArray(Int32, 26)
+    alias InverseArgs = StaticArray(Int32, 42)
 
     # Raised when NVRTC rejects a kernel's source; the message holds its log.
     class CompileError < DeviceError; end
@@ -645,9 +645,9 @@ module Tensomite
       end
     end
 
-    # Returns the kernels' `Inverse` for *view*: the dimensions with a nonzero
-    # stride and more than one index, largest stride first, then the rest, and
-    # the row-major strides of its shape.
+    # Returns the kernels' `Inverse` for *view*: the stride, size and row-major
+    # stride of each dimension with a nonzero stride and more than one index,
+    # largest stride first, then the size and row-major stride of the rest.
     #
     # Returns `nil` unless each of those strides exceeds the furthest the smaller
     # ones can reach together, which makes the decomposition of a position unique.
@@ -662,12 +662,19 @@ module Tensomite
         reach += stride * (view.shape[dim] - 1)
       end
       repeated = dims.reject { |dim| strided.includes?(dim) }
+      steps = View.row_major_strides(view.shape)
       args = InverseArgs.new(0)
       args[0] = strided.size
-      strided.each_with_index { |dim, k| args[1 + k] = dim }
-      args[1 + MAX_DIMS] = repeated.size
-      repeated.each_with_index { |dim, k| args[2 + MAX_DIMS + k] = dim }
-      View.row_major_strides(view.shape).each_with_index { |stride, dim| args[2 + 2 * MAX_DIMS + dim] = stride }
+      strided.each_with_index do |dim, k|
+        args[1 + k] = view.strides[dim]
+        args[1 + MAX_DIMS + k] = view.shape[dim]
+        args[1 + 2 * MAX_DIMS + k] = steps[dim]
+      end
+      args[1 + 3 * MAX_DIMS] = repeated.size
+      repeated.each_with_index do |dim, k|
+        args[2 + 3 * MAX_DIMS + k] = view.shape[dim]
+        args[2 + 4 * MAX_DIMS + k] = steps[dim]
+      end
       args
     end
 

@@ -13,23 +13,41 @@ struct View {
     int dense;  // 1 when the strides are row-major: element i is at offset + i
 };
 
+// A view is a kernel argument, and indexing an argument by a value known only at
+// run time makes the compiler copy it to each thread's local memory first. So
+// these helpers loop over every possible dimension, which unrolls into indices
+// known when compiling, and skip the dimensions the view does not have.
+
 // Returns the storage position of logical element `flat` of `v`, peeling indices
 // off from the last dimension, or directly when the view is dense.
 __device__ int offset_of(const View& v, int flat) {
     if (v.dense) return v.offset + flat;
     int pos = v.offset;
-    for (int d = v.ndim - 1; d >= 0; d--) {
-        int dim = v.shape[d];
-        pos += (flat % dim) * v.strides[d];
-        flat /= dim;
+#pragma unroll
+    for (int d = MAX_DIMS - 1; d >= 0; d--) {
+        if (d < v.ndim) {
+            int dim = v.shape[d];
+            pos += (flat % dim) * v.strides[d];
+            flat /= dim;
+        }
     }
     return pos;
+}
+
+// Returns the stride of dimension `d` of `v`, or 0 when it has none.
+__device__ int stride_of(const View& v, int d) {
+    int stride = 0;
+#pragma unroll
+    for (int i = 0; i < MAX_DIMS; i++) {
+        if (i == d) stride = v.strides[i];
+    }
+    return stride;
 }
 
 // Returns the step between the positions of consecutive elements along the last
 // dimension.
 __device__ int run_stride(const View& v) {
-    return v.ndim > 0 ? v.strides[v.ndim - 1] : 0;
+    return stride_of(v, v.ndim - 1);
 }
 
 // Returns an output in column *col* of a matrix product, *out*, plus its bias,

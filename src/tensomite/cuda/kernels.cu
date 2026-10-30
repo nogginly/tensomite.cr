@@ -170,16 +170,18 @@ extern "C" __global__ void scatter_add_f32(const float* src, const int* ids, flo
     }
 }
 
-// How to invert a view: its dimensions with a nonzero stride and more than one
-// index, by decreasing stride, then the rest (stride 0 or one index), in order,
-// and the row-major strides of its shape, which turn indices into a logical
-// element.
+// How to invert a view: the strides, sizes and row-major strides of its
+// dimensions with a nonzero stride and more than one index, by decreasing
+// stride, then the sizes and row-major strides of the rest (stride 0 or one
+// index), in order. The row-major strides turn indices into a logical element.
 struct Inverse {
     int nstrided;
-    int strided[MAX_DIMS];
+    int stride[MAX_DIMS];
+    int size[MAX_DIMS];
+    int step[MAX_DIMS];
     int nrepeated;
-    int repeated[MAX_DIMS];
-    int row_major[MAX_DIMS];
+    int repeated_size[MAX_DIMS];
+    int repeated_step[MAX_DIMS];
 };
 
 // Output position p is the sum of the source elements that view vv reads from
@@ -191,41 +193,49 @@ struct Inverse {
 // 2. Walks the repeated dimensions in row-major order, last fastest, stepping
 //    the logical element by their row-major strides; each combination is one
 //    element that reads p.
+//
+// Loops run over every possible dimension, so that they unroll and index the
+// arguments only by constants (see offset_of).
 extern "C" __global__ void unview_f32(const float* src, float* dst, View vs, View vv, Inverse inv, unsigned int n) {
     unsigned int p = thread_index();
     if (p >= n) return;
     int rem = int(p) - vv.offset;
     bool hit = rem >= 0;
     int flat = 0;
-    for (int k = 0; k < inv.nstrided && hit; k++) {
-        int d = inv.strided[k];
-        int at = rem / vv.strides[d];
-        rem -= at * vv.strides[d];
-        hit = at < vv.shape[d];
-        flat += at * inv.row_major[d];
+#pragma unroll
+    for (int k = 0; k < MAX_DIMS; k++) {
+        if (k < inv.nstrided && hit) {
+            int at = rem / inv.stride[k];
+            rem -= at * inv.stride[k];
+            hit = at < inv.size[k];
+            flat += at * inv.step[k];
+        }
     }
     float acc = 0.0f;
     if (hit && rem == 0) {
         if (inv.nrepeated == 0) {
             acc = src[offset_of(vs, flat)];
         } else if (inv.nrepeated == 1) {
-            int d = inv.repeated[0], count = vv.shape[d], step = inv.row_major[d];
+            int count = inv.repeated_size[0], step = inv.repeated_step[0];
             for (int f = 0; f < count; f++) acc += src[offset_of(vs, flat + f * step)];
         } else {
             int at[MAX_DIMS];
             int total = 1;
-            for (int k = 0; k < inv.nrepeated; k++) {
+#pragma unroll
+            for (int k = 0; k < MAX_DIMS; k++) {
                 at[k] = 0;
-                total *= vv.shape[inv.repeated[k]];
+                if (k < inv.nrepeated) total *= inv.repeated_size[k];
             }
             for (int f = 0; f < total; f++) {
                 acc += src[offset_of(vs, flat)];
-                for (int k = inv.nrepeated - 1; k >= 0; k--) {
-                    int d = inv.repeated[k];
-                    flat += inv.row_major[d];
-                    if (++at[k] < vv.shape[d]) break;
-                    flat -= at[k] * inv.row_major[d];
-                    at[k] = 0;
+#pragma unroll
+                for (int k = MAX_DIMS - 1; k >= 0; k--) {
+                    if (k < inv.nrepeated) {
+                        flat += inv.repeated_step[k];
+                        if (++at[k] < inv.repeated_size[k]) break;
+                        flat -= at[k] * inv.repeated_step[k];
+                        at[k] = 0;
+                    }
                 }
             }
         }
@@ -247,10 +257,10 @@ extern "C" __global__ void matmul_f32(const float* a, const float* b, float* dst
     unsigned int col = i % n;
     unsigned int row = (i / n) % m;
     unsigned int batch = i / (m * n);
-    int pa = offset_of(va, batch * m * k) + int(row) * va.strides[va.ndim - 2];
-    int pb = offset_of(vb, batch * k * n) + int(col) * vb.strides[vb.ndim - 1];
-    int sa = va.strides[va.ndim - 1];
-    int sb = vb.strides[vb.ndim - 2];
+    int pa = offset_of(va, batch * m * k) + int(row) * stride_of(va, va.ndim - 2);
+    int pb = offset_of(vb, batch * k * n) + int(col) * stride_of(vb, vb.ndim - 1);
+    int sa = stride_of(va, va.ndim - 1);
+    int sb = stride_of(vb, vb.ndim - 2);
     float acc = 0.0f;
     for (unsigned int s = 0; s < k; s++) {
         float product = a[pa + int(s) * sa] * b[pb + int(s) * sb];
@@ -295,10 +305,10 @@ extern "C" __global__ void matmul_split_f32(const float* a, const float* b, floa
     unsigned int out_row = blockIdx.y;
     unsigned int batch = out_row / m, row = out_row % m;
     bool live = col < n;
-    int pa = offset_of(va, batch * m * k) + int(row) * va.strides[va.ndim - 2];
-    int pb = live ? offset_of(vb, batch * k * n) + int(col) * vb.strides[vb.ndim - 1] : 0;
-    int sa = va.strides[va.ndim - 1];
-    int sb = vb.strides[vb.ndim - 2];
+    int pa = offset_of(va, batch * m * k) + int(row) * stride_of(va, va.ndim - 2);
+    int pb = live ? offset_of(vb, batch * k * n) + int(col) * stride_of(vb, vb.ndim - 1) : 0;
+    int sa = stride_of(va, va.ndim - 1);
+    int sb = stride_of(vb, vb.ndim - 2);
     unsigned int chunks = (k + CHUNK - 1) / CHUNK;
     float total = 0.0f;
     for (unsigned int first = 0; first < chunks; first += SLICES) {
@@ -340,8 +350,8 @@ extern "C" __global__ void matmul_chunks_f32(const float* a, const float* b, flo
     unsigned int k0 = c * CHUNK, width = min(k - k0, unsigned(CHUNK));
     int pa = offset_of(va, batch * m * k);
     int pb = offset_of(vb, batch * k * n);
-    int ra = va.strides[va.ndim - 2], sa = va.strides[va.ndim - 1];
-    int sb = vb.strides[vb.ndim - 2], cb = vb.strides[vb.ndim - 1];
+    int ra = stride_of(va, va.ndim - 2), sa = stride_of(va, va.ndim - 1);
+    int sb = stride_of(vb, vb.ndim - 2), cb = stride_of(vb, vb.ndim - 1);
     for (unsigned int e = t; e < rows * CHUNK; e += DECODE_COLS) {
         unsigned int r = e / CHUNK, s = e % CHUNK;
         as[e] = s < width ? a[pa + int(row0 + r) * ra + int(k0 + s) * sa] : 0.0f;
@@ -404,8 +414,8 @@ __device__ void matmul_tiled(const float* a, const float* b, float* dst, const V
     unsigned int t = threadIdx.y * TX + threadIdx.x;
     int pa = offset_of(va, batch * m * k);
     int pb = offset_of(vb, batch * k * n);
-    int ra = va.strides[va.ndim - 2], sa = va.strides[va.ndim - 1];
-    int sb = vb.strides[vb.ndim - 2], cb = vb.strides[vb.ndim - 1];
+    int ra = stride_of(va, va.ndim - 2), sa = stride_of(va, va.ndim - 1);
+    int sb = stride_of(vb, vb.ndim - 2), cb = stride_of(vb, vb.ndim - 1);
     float total[TM][TN];
     float partial[TM][TN];
     for (unsigned int i = 0; i < TM; i++) {
