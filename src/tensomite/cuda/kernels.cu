@@ -171,49 +171,63 @@ extern "C" __global__ void scatter_add_f32(const float* src, const int* ids, flo
 }
 
 // How to invert a view: its dimensions with a nonzero stride and more than one
-// index, by decreasing stride, then the rest (stride 0 or one index), in order.
+// index, by decreasing stride, then the rest (stride 0 or one index), in order,
+// and the row-major strides of its shape, which turn indices into a logical
+// element.
 struct Inverse {
     int nstrided;
     int strided[MAX_DIMS];
     int nrepeated;
     int repeated[MAX_DIMS];
+    int row_major[MAX_DIMS];
 };
 
 // Output position p is the sum of the source elements that view vv reads from
 // p, in logical order, as the host's index-order accumulation adds them.
 //
-// 1. Decomposes p - offset over the strided dimensions, largest stride first.
-//    If nothing remains and every index is in range, the view reads p.
-// 2. Walks the repeated dimensions in row-major order; each combination is one
-//    logical element that reads p.
+// 1. Decomposes p - offset over the strided dimensions, largest stride first,
+//    into the logical element whose repeated indices are all zero. If nothing
+//    remains and every index is in range, the view reads p.
+// 2. Walks the repeated dimensions in row-major order, last fastest, stepping
+//    the logical element by their row-major strides; each combination is one
+//    element that reads p.
 extern "C" __global__ void unview_f32(const float* src, float* dst, View vs, View vv, Inverse inv, unsigned int n) {
     unsigned int p = thread_index();
     if (p >= n) return;
-    int idx[MAX_DIMS];
-    for (int d = 0; d < MAX_DIMS; d++) idx[d] = 0;
     int rem = int(p) - vv.offset;
     bool hit = rem >= 0;
+    int flat = 0;
     for (int k = 0; k < inv.nstrided && hit; k++) {
         int d = inv.strided[k];
         int at = rem / vv.strides[d];
         rem -= at * vv.strides[d];
         hit = at < vv.shape[d];
-        idx[d] = at;
+        flat += at * inv.row_major[d];
     }
     float acc = 0.0f;
     if (hit && rem == 0) {
-        int total = 1;
-        for (int k = 0; k < inv.nrepeated; k++) total *= vv.shape[inv.repeated[k]];
-        for (int f = 0; f < total; f++) {
-            int t = f;
-            for (int k = inv.nrepeated - 1; k >= 0; k--) {
-                int d = inv.repeated[k];
-                idx[d] = t % vv.shape[d];
-                t /= vv.shape[d];
+        if (inv.nrepeated == 0) {
+            acc = src[offset_of(vs, flat)];
+        } else if (inv.nrepeated == 1) {
+            int d = inv.repeated[0], count = vv.shape[d], step = inv.row_major[d];
+            for (int f = 0; f < count; f++) acc += src[offset_of(vs, flat + f * step)];
+        } else {
+            int at[MAX_DIMS];
+            int total = 1;
+            for (int k = 0; k < inv.nrepeated; k++) {
+                at[k] = 0;
+                total *= vv.shape[inv.repeated[k]];
             }
-            int flat = 0;
-            for (int d = 0; d < vv.ndim; d++) flat = flat * vv.shape[d] + idx[d];
-            acc += src[offset_of(vs, flat)];
+            for (int f = 0; f < total; f++) {
+                acc += src[offset_of(vs, flat)];
+                for (int k = inv.nrepeated - 1; k >= 0; k--) {
+                    int d = inv.repeated[k];
+                    flat += inv.row_major[d];
+                    if (++at[k] < vv.shape[d]) break;
+                    flat -= at[k] * inv.row_major[d];
+                    at[k] = 0;
+                }
+            }
         }
     }
     dst[p] = acc;

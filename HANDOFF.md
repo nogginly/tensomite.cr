@@ -4,7 +4,7 @@ What the next session, or the next person, needs in order to carry on without th
 
 **Keeping it current.** Rewrite it rather than appending to it: at the end of each PR, and whenever a session's context passes about 70%. Anything that belongs in one of the other three documents goes there instead.
 
-*Last rewritten: 27 Oct 2026, with a CUDA training profiler open.*
+*Last rewritten: 27 Oct 2026, with a CUDA training profiler and its first fixes open.*
 
 ## Where things stand
 
@@ -15,8 +15,8 @@ What the next session, or the next person, needs in order to carry on without th
   - macro kernels match their oracles and their gradients pass finite differences;
   - Shakespeare reached 1.573 nats/char in 20 minutes in the Linux container.
 - **M7b's exit, met** (evidence under 7b in `PLAN.md`): the tutorial, Shakespeare and GPT-2 models on modules with the same bits as the hand-written ones, on every device; the `Builder` chosen as the DSL (Decisions AN and AR).
-- **Open PR:** `--profile N` for the Shakespeare trainer on CUDA, with the report shared with `bench/profile_gpt2_cuda.cr` as `CUDA::Profile.report` (`m8-profile-training`, Decision BG). Merged: everything through the trainer on CUDA and Metal (M8 part 5's first half); `Auto` decodes GPT-2 at 268 tokens/s on the GB10, and the larger Shakespeare model trains at 110 ms a step there, against 76 on Metal on the M5 Pro.
-- **Now: M8, a CUDA backend** (Decisions AS–AV in `PLAN.md`; Vulkan moved to M12). Development is on the maintainer's DGX Spark, the exit on a cloud T4. Nothing in the container runs CUDA kernels: the maintainer runs them on the Spark, as with Metal on the Mac. The container and CI run the `CUDA` device and its kernels on `scripts/cuda_stub`, which compiles `kernels.cu` as host C++. Next: fix the largest cost the training profile shows, then the rest of part 5, the Shakespeare trainer on CUDA and the exit runs on the Spark and a T4.
+- **Open PRs:** `--profile N` for the trainer on CUDA, with `CUDA::Profile.report` (`m8-profile-training`), and, on top of it, the first fixes it found (`m8-train-unview`, Decision BG): a faster `Unview` kernel with the same bits, and a `RetiredList` that never allocates, so CUDA and Metal buffers return to the pool instead of being freed. Merged: everything through the trainer on CUDA and Metal; the larger Shakespeare model trained at 110 ms a step on the GB10, against 76 on Metal.
+- **Now: M8, a CUDA backend** (Decisions AS–AV in `PLAN.md`; Vulkan moved to M12). Development is on the maintainer's DGX Spark, the exit on a cloud T4. Nothing in the container runs CUDA kernels: the maintainer runs them on the Spark, as with Metal on the Mac. The container and CI run the `CUDA` device and its kernels on `scripts/cuda_stub`, which compiles `kernels.cu` as host C++. Next: re-profile training on the GB10, then broadcast elementwise ops, then the rest of part 5, the Shakespeare trainer on CUDA and the exit runs on the Spark and a T4.
 - **A long-term goal:** inspecting running models (activations, attention, gradients) by the names of their parts; see "Inspectable" in `PLAN.md` and "Towards inspection" in `DESIGN.md`. Scopes are its first piece, and Decision AA must keep inspected nodes alive.
 - **Deferred:** Decision D, CPU threads (not needed for M7's exits). Decision AA, releasing buffers as soon as their last reader has run.
 

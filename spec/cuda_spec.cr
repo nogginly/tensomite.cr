@@ -115,6 +115,21 @@ require "./spec_helper"
         w.matmul(w).to_a(Float32).should eq f32(7, 10, 15, 22)
       end
 
+      it "serves a repeated graph from the pool once it is warm" do
+        # Finalizers that ran inside another one's allocation used to free their
+        # memory instead of returning it to the pool.
+        x = Tensor.from(Array.new(1000, 1f32), [1000], cuda)
+        round = -> do
+          10.times { ((x * 2) + 1).realize }
+          GC.collect
+          cuda.sync
+        end
+        3.times { round.call }
+        misses = cuda.buffer_pool.misses
+        round.call
+        (cuda.buffer_pool.misses - misses).should be <= 2
+      end
+
       it "reuses the device memory of collected buffers" do
         hits = cuda.buffer_pool.hits
         10.times do

@@ -201,8 +201,7 @@ module Tensomite
     @encoded = 0
     # Buffers given back by finalizers, which may run on another thread; the
     # device's own thread moves them into the pool once no GPU work is pending.
-    @retired = [] of {Void*, Int32}
-    @retired_lock = Atomic(Bool).new(false)
+    @retired = RetiredList(Void*).new
 
     # Freed `MTLBuffer`s kept for reuse; see `BufferPool`. Holds up to 1 GiB by
     # default. (`#pool`, inherited, holds host memory, which `Metal` does not use.)
@@ -241,19 +240,11 @@ module Tensomite
 
     # Takes back the `MTLBuffer` of a collected buffer, from a finalizer on any
     # thread. It joins the pool later, from the device's own thread, when no GPU
-    # work is pending, since the GPU may still be reading it. When another thread
-    # holds the queue it is released instead; command buffers keep the buffers
-    # they use alive, so releasing is always safe.
+    # work is pending, since the GPU may still be reading it. When the list is
+    # busy or full (see `RetiredList`) it is released instead; command buffers
+    # keep the buffers they use alive, so releasing is always safe.
     protected def retire(mtl : Void*, bytesize : Int32) : Nil
-      unless @retired_lock.compare_and_set(false, true)[1]
-        ObjC.release(mtl)
-        return
-      end
-      begin
-        @retired << {mtl, bytesize}
-      ensure
-        @retired_lock.set(false)
-      end
+      ObjC.release(mtl) unless @retired.push(mtl, bytesize)
     end
 
     private def idle? : Bool
@@ -671,14 +662,7 @@ module Tensomite
 
     # Moves the buffers retired while GPU work was pending into the pool.
     private def recycle_retired : Nil
-      return if @retired.empty?
-      fresh = [] of {Void*, Int32}
-      until @retired_lock.compare_and_set(false, true)[1]
-        Thread.yield
-      end
-      retired, @retired = @retired, fresh
-      @retired_lock.set(false)
-      retired.each { |(mtl, bytesize)| ObjC.release(mtl) unless buffer_pool.give(mtl, bytesize) }
+      @retired.drain { |mtl, bytesize| ObjC.release(mtl) unless buffer_pool.give(mtl, bytesize) }
     end
 
     private def metal(buffer : Buffer) : MetalBuffer
