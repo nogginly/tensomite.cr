@@ -24,6 +24,7 @@ require "./tensomite/mapped_file"
 require "./tensomite/safetensors"
 require "./tensomite/bpe"
 require "./tensomite/sampler"
+require "./tensomite/profile_report"
 require "./tensomite/models/gpt2"
 
 module Tensomite

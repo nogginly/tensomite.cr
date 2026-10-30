@@ -209,6 +209,25 @@ require "./spec_helper"
         reused.should be_true
       end
 
+      it "serves a repeated graph from the pool once it is warm, and profiles it" do
+        x = Tensor.from(Array.new(1000, 1f32), [1000], metal)
+        round = -> do
+          10.times { ((x * 2) + 1).realize }
+          GC.collect
+          metal.sync
+        end
+        3.times { round.call }
+        profile = Metal::Profile.new
+        metal.profile = profile
+        round.call
+        metal.profile = nil
+        profile.allocations.should be >= 20
+        profile.pool_misses.should be <= 2
+        profile.frees.should eq 0
+        report = String.build { |io| Metal::Profile.report(io, metal.name, "round", 1, 1.0, profile, profile) }
+        report.should contain "allocations: #{profile.allocations}; not from the pool: #{profile.pool_misses}; freed: 0"
+      end
+
       it "shares memory with the host" do
         t = Tensor.from(f32(1, 2), [2], metal)
         metal.map(t.node.buffer!).should_not be_nil
