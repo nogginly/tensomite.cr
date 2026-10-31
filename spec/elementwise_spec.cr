@@ -20,6 +20,19 @@ DEVICES.each do |device|
       (-a).to_a(Float32).should eq f32(-1, -2, -3, -4, -5, -6)
     end
 
+    it "shares one constant per value, dtype and device" do
+      constant = ->(t : Tensor) { t.node.srcs[1].node }
+      constant.call(a * 0.5).should be constant.call(b * 0.5)
+      constant.call(a * 0.5).should_not be constant.call(a * 0.25)
+      constant.call(a * 0.0).should_not be constant.call(a * -0.0)
+      i = tensor(device, [2], [1, 2])
+      constant.call(i * 2).should be constant.call(i + 2)
+      constant.call(i * 2).should_not be constant.call(a * 2)
+      inside = Tensomite.scope("part") { constant.call(a * 0.5) }
+      inside.should_not be constant.call(a * 0.5)
+      inside.scope.try(&.name).should eq "part"
+    end
+
     it "divides a transposed view by a broadcast row" do
       # a.T = [[1, 4], [2, 5], [3, 6]], divided by [1, 2]
       (a.transpose / tensor(device, [2], f32(1, 2))).to_a(Float32).should eq f32(1, 2, 2, 2.5, 3, 3)
@@ -43,6 +56,8 @@ DEVICES.each do |device|
       expect_raises(DTypeError) { i.exp }
       expect_raises(DTypeError) { i / i }
       expect_raises(DTypeError) { i * 0.5 }
+      i * 2
+      expect_raises(DTypeError) { i * 2.5 }
     end
   end
 end

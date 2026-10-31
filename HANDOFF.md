@@ -4,7 +4,7 @@ What the next session, or the next person, needs in order to carry on without th
 
 **Keeping it current.** Rewrite it rather than appending to it: at the end of each PR, and whenever a session's context passes about 70%. Anything that belongs in one of the other three documents goes there instead.
 
-*Last rewritten: 31 Oct 2026, with tiled two-pass products open.*
+*Last rewritten: 31 Oct 2026, with shared scalar constants open.*
 
 ## Where things stand
 
@@ -15,8 +15,8 @@ What the next session, or the next person, needs in order to carry on without th
   - macro kernels match their oracles and their gradients pass finite differences;
   - Shakespeare reached 1.573 nats/char in 20 minutes in the Linux container.
 - **M7b's exit, met** (evidence under 7b in `PLAN.md`): the tutorial, Shakespeare and GPT-2 models on modules with the same bits as the hand-written ones, on every device; the `Builder` chosen as the DSL (Decisions AN and AR).
-- **Open PR:** `MatMulMode::TiledTwoPass` on CUDA and Metal, for products with few blocks of outputs and a long `k`, such as weight gradients, with `Split`'s bits (`m8-matmul-split-k`, Decision BJ's second part): a training step of the larger model takes 22.4 ms on the M5 Pro, from 25.9 (59.1 before Decision BI), and 17.2 on the GB10, from 20.5. Merged: Metal's `Unview` loading 32 elements ahead (Decision BJ), 25.9 ms a training step on the M5 Pro, from 59.1 before Decision BI; Decision BI, Metal's `Unview` and parallel `ScatterAdd` zeroing, and one wait per training step (`Tensor.realize(tensors)`); profiling for both GPUs with one report (Decision BH); the trainer on CUDA and the fixes its profile found (Decision BG).
-- **Now: M8, a CUDA backend** (Decisions AS–AV in `PLAN.md`; Vulkan moved to M12). Development is on the maintainer's DGX Spark, the exit on a cloud T4. Nothing in the container runs CUDA kernels: the maintainer runs them on the Spark, as with Metal on the Mac. The container and CI run the `CUDA` device and its kernels on `scripts/cuda_stub`, which compiles `kernels.cu` as host C++. Next: the rest of part 5, the exit runs on the Spark and a T4.
+- **Open PR:** scalar constants shared by device, dtype, value and scope, so a training step uploads each once (`m8-scalar-cache`, Decision BK): 19 uploads a step on the CUDA stub, from 205, with the same losses; not yet measured on a GPU. Merged: `MatMulMode::TiledTwoPass` for products with few blocks of outputs and a long `k` (Decision BJ), which took a training step of the larger model to 22.4 ms on the M5 Pro, from 59.1 before Decision BI, and 17.2 on the GB10, from 20.5; Metal's `Unview` loading 32 elements ahead; Decision BI, Metal's `Unview`, parallel `ScatterAdd` zeroing and one wait per step; profiling for both GPUs (Decision BH); the trainer on CUDA (Decision BG).
+- **Now: M8, a CUDA backend** (Decisions AS–AV in `PLAN.md`; Vulkan moved to M12). Development is on the maintainer's DGX Spark, the exit on a cloud T4. Nothing in the container runs CUDA kernels: the maintainer runs them on the Spark, as with Metal on the Mac. The container and CI run the `CUDA` device and its kernels on `scripts/cuda_stub`, which compiles `kernels.cu` as host C++. Next: cross-entropy's gradient without `ScatterAdd` (Decision BK's second part), then the rest of part 5, the exit runs on the Spark and a T4.
 - **A long-term goal:** inspecting running models (activations, attention, gradients) by the names of their parts; see "Inspectable" in `PLAN.md` and "Towards inspection" in `DESIGN.md`. Scopes are its first piece, and Decision AA must keep inspected nodes alive.
 - **Deferred:** Decision D, CPU threads (not needed for M7's exits). Decision AA, releasing buffers as soon as their last reader has run.
 
@@ -30,8 +30,8 @@ Stacked PRs         |When asked. The later PR's base is the earlier branch; GitH
 Merging             |The maintainer merges, by squash or by merge commit. After a squash, merge `main` into a stacked branch and resolve conflicts with the branch's side; never rewrite history or force-push (the session blocks it anyway).                                            
 Milestones          |Each ends with its exit criterion passing, with the evidence (numbers, logs) in the PR description.                                                                                                                                                                  
 Documents           |Updated in the same PR as the code (see "Workflow" in `DEVELOPMENT.md`), `GUIDE.md` included whenever the public API changes. Tables and diagrams follow "Documents" in `DEVELOPMENT.md`; check them with `scripts/format_tables.py` and `scripts/check_diagrams.sh`.
-Decisions           |Labelled with letters and recorded in `PLAN.md`. The next is **BK**; T to AG shape M7, AH to AR shape M7b, and AS to BJ shape M8. P (how to get GPT-2 small's fixtures) was settled by allowing Hugging Face; Q made this document committed.                        
-Understanding checks|Short questions labelled Q-A, Q-B and so on, after explaining something new. The next is **Q-AS**; Q-T to Q-AR are recent.                                                                                                                                           
+Decisions           |Labelled with letters and recorded in `PLAN.md`. The next is **BL**; T to AG shape M7, AH to AR shape M7b, and AS to BK shape M8. P (how to get GPT-2 small's fixtures) was settled by allowing Hugging Face; Q made this document committed.                        
+Understanding checks|Short questions labelled Q-A, Q-B and so on, after explaining something new. The next is **Q-AU**; Q-T to Q-AT are recent.                                                                                                                                           
 Claims              |Measured before stated. Several assumptions were wrong when checked: decode time was dominated by the KV cache, not host kernels; GPT-2's file was unaligned. Say "I think" when something is unverified.                                                            
 
 ## Follow-ups found on the way
