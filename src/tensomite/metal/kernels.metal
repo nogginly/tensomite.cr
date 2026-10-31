@@ -246,6 +246,8 @@ struct Inverse {
     int repeated_step[MAX_DIMS];
 };
 
+#define UNVIEW_AHEAD 8
+
 // Output position p is the sum of the source elements that view vv reads from
 // p, in logical order, as the host's index-order accumulation adds them.
 //
@@ -276,6 +278,18 @@ kernel void unview_f32(device const float* src [[buffer(0)]],
     if (hit && rem == 0) {
         if (inv.nrepeated == 0) {
             acc = src[offset_of(vs, flat)];
+        } else if (inv.nrepeated == 1 && vs.dense) {
+            // Loads UNVIEW_AHEAD elements before adding them, in order, so that
+            // the loads overlap.
+            int count = inv.repeated_size[0], step = inv.repeated_step[0];
+            device const float* at = src + vs.offset + flat;
+            int f = 0;
+            for (; f + UNVIEW_AHEAD <= count; f += UNVIEW_AHEAD) {
+                float x[UNVIEW_AHEAD];
+                for (int j = 0; j < UNVIEW_AHEAD; j++) x[j] = at[(f + j) * step];
+                for (int j = 0; j < UNVIEW_AHEAD; j++) acc += x[j];
+            }
+            for (; f < count; f++) acc += at[f * step];
         } else if (inv.nrepeated == 1) {
             int count = inv.repeated_size[0], step = inv.repeated_step[0];
             for (int f = 0; f < count; f++) acc += src[offset_of(vs, flat + f * step)];
