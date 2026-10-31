@@ -465,8 +465,7 @@ module Tensomite
       view = node.source_view || raise Error.new("unview needs a source view")
       return false unless view.ndim <= MAX_DIMS && (inverse = inverse_args(view))
       src = node.srcs.first
-      group = ENV["TENSOMITE_UNVIEW_GROUP"]?.try(&.to_i) || 256
-      dispatch("unview_f32", node.size, [mtl(src), output.mtl], [view_args(src.view), view_args(view), inverse, u32(node.size)], group)
+      dispatch("unview_f32", node.size, [mtl(src), output.mtl], [view_args(src.view), view_args(view), inverse, u32(node.size)])
       true
     end
 
@@ -505,8 +504,7 @@ module Tensomite
 
     # Compiles the hand-written kernels and builds a compute pipeline for each.
     private def compile : Nil
-      ahead = ENV["TENSOMITE_UNVIEW_AHEAD"]?.try { |value| "#define UNVIEW_AHEAD #{value.to_i}\n" } || ""
-      build(ahead + SOURCE, BINARY.values + UNARY.values + OTHER, OPTIONAL)
+      build(SOURCE, BINARY.values + UNARY.values + OTHER, OPTIONAL)
     end
 
     # Compiles *source*, with fast math off, and adds a pipeline to the cache for
@@ -564,12 +562,11 @@ module Tensomite
     end
 
     # Encodes one dispatch of kernel *name* over *threads* threads, binding
-    # *buffers* from index 0 and then *constants*, each copied into the command,
-    # in threadgroups of up to *group* threads.
-    private def dispatch(name : String, threads : Int32, buffers : Array(Void*), constants : Array(Bytes), group = 256) : Nil
+    # *buffers* from index 0 and then *constants*, each copied into the command.
+    private def dispatch(name : String, threads : Int32, buffers : Array(Void*), constants : Array(Bytes)) : Nil
       return if threads == 0
       pipeline = bind(name, buffers, constants)
-      width = Math.min(ObjC.send(UInt64, pipeline, "maxTotalThreadsPerThreadgroup"), group.to_u64)
+      width = Math.min(ObjC.send(UInt64, pipeline, "maxTotalThreadsPerThreadgroup"), 256_u64)
       grid = StaticArray[threads.to_u64, 1_u64, 1_u64]
       group = StaticArray[width, 1_u64, 1_u64]
       ObjC.send(Nil, open_encoder, "dispatchThreads:threadsPerThreadgroup:", grid.to_unsafe, group.to_unsafe)
