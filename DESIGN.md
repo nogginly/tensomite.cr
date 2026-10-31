@@ -621,6 +621,7 @@ flowchart LR
 - **`SGD`**: `p - lr·v`, where `v` is `g` or, with momentum, `momentum·v + g`.
 - **`AdamW`**: Adam with decoupled weight decay and bias correction. `lr` can be changed between steps for a schedule. Given tensors, every param decays, so params that should not, such as norms and biases, go to a second `AdamW` with `weight_decay: 0`; given `Parameter`s, each one's `decay?` flag decides.
 - **Over parameters.** Created with a model's `Parameter`s (see "Modules"), an optimizer's `step(loss)` does the whole loop in the diagram's order: lazy gradients, then reading the loss, then the update, stored back into each parameter's slot. It is the same arithmetic as `step(params, grads)`, to the bit (`spec/module_spec.cr`).
+- **One wait per step.** Both forms build every update, and the state carried to the next step (through `Optimizer#keep`), lazily, then realise them together with `Tensor.realize`, and `step(loss)` the loss with them. Realising waits for the device, so detaching each tensor as it was made waited for the GPU three times per AdamW parameter, about a hundred times a step for the larger Shakespeare model (Metal committed 114 command buffers a step), each a pause in which the GPU had nothing to do. The arithmetic and its order are unchanged, so the bits are too.
 
 ### Cross-entropy
 
@@ -1210,7 +1211,8 @@ Op          |Per step|GPU ms|Share
 
 - **`Unview [192]`, a layer norm's gradient summed over 2,048 rows, took 0.83 ms a call,** 14.9 ms a step: Metal still had the index arithmetic CUDA lost in Decision BG. Its kernel now takes the same `Inverse`, with row-major strides, and walks repeated dimensions by stepping. Metal's constant memory can be indexed freely, so its loops need not unroll. Compiled as C++ on the CPU, the new kernel gives the old one's bits on seven views, from `[2048,192]` expanded from `[192]` to a q slice of `[2048,576]`.
 - **`ScatterAdd [133120,1]`, the loss's gradient into the flattened logits, took 2.6 ms:** a thread per column zeroed its column before adding, and with one column a single thread zeroed 133,120 elements. On both GPUs a dispatch with a thread per element now zeroes the output first; the adds, and so the bits, are unchanged.
-- **17 ms of the wall time is not in any op.** A step commits 114 command buffers, where its 906 dispatches need about 14 at 64 apiece, and each extra one is a pause in which the GPU waits for the host. That is the next thing to look at.
+- **With both kernel changes a step took 49.9 ms, from 59.1,** with the same losses: `Unview [192]` 0.40 ms a call, from 0.83, still the largest op, and `ScatterAdd` 1.2 ms a step, from 3.1. Only 192 threads share that `Unview`, each adding 2,048 numbers in turn.
+- **17 ms of the wall time was not in any op.** A step committed 114 command buffers, where its 906 dispatches need about 14 at 64 apiece, and each extra one was a pause in which the GPU waited for the host. The optimizer caused them (see "Optimizers"); with one wait per step, and without the kernel changes, a step commits 15 and takes 40.0 ms, its wall time now below the 42.1 ms of its ops timed alone.
 
 Metal keeps `Split` at decode: its decode was not profiled for this, and the fix there would be the same.
 

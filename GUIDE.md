@@ -347,7 +347,7 @@ sim = SimDiscrete.default
 Tensor.from([1f32], [1]).to(sim).device.class             # => Tensomite::SimDiscrete
 ```
 
-Use each device's shared instance, such as `BLAS.default`, `Metal.default` or `CUDA.default`, rather than creating new ones. Building with CUDA needs the NVIDIA driver and NVRTC, NVIDIA's runtime compiler; see "Working on the CUDA device" in `DEVELOPMENT.md`. Results repeat exactly from run to run on every device. Different devices may differ in the last bits of a result, because they add numbers in different orders.
+Use each device's shared instance, such as `BLAS.default`, `Metal.default` or `CUDA.default`, rather than creating new ones. `realize` waits for the device to finish, which on a GPU leaves it idle while the host prepares the next piece of work; `Tensor.realize([a, b, c])` computes several tensors and waits once, as an optimizer's `step` does for the loss, its state and every update. Building with CUDA needs the NVIDIA driver and NVRTC, NVIDIA's runtime compiler; see "Working on the CUDA device" in `DEVELOPMENT.md`. Results repeat exactly from run to run on every device. Different devices may differ in the last bits of a result, because they add numbers in different orders.
 
 ## Fused kernels
 

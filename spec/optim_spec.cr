@@ -1,5 +1,14 @@
 require "./spec_helper"
 
+# A CPU that counts how often it is waited for.
+private class CountingCPU < CPU
+  getter syncs = 0
+
+  def sync : Nil
+    @syncs += 1
+  end
+end
+
 describe SGD do
   it "steps against the gradient" do
     p = [Tensor.from(f32(1, 2), [2])]
@@ -52,5 +61,19 @@ describe AdamW do
       p = optimizer.step(p, Tensomite.grad((diff * diff).sum, p))
     end
     expect_close(p.first.to_a(Float32), f32(3, -2), 1e-2)
+  end
+end
+
+describe Optimizer do
+  it "waits for the device once per step, with the loss, state and updates" do
+    device = CountingCPU.new
+    params = [Parameter.new(Tensor.from(f32(1, 2), [2], device)), Parameter.new(Tensor.from(f32(3), [1], device))]
+    optimizer = AdamW.new(params, lr: 0.1)
+    2.times do
+      before = device.syncs
+      loss = (params[0].value * params[0].value).sum + (params[1].value * 2).sum
+      optimizer.step(loss).should be > 0
+      (device.syncs - before).should eq 1
+    end
   end
 end
