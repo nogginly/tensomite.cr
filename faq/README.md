@@ -68,11 +68,19 @@ Question                        |In one line
 [Q-G](q-g-online-softmax.md)    |How can softmax work a tile at a time? Rescale the running sum by `exp(m − m')` when the maximum grows.               
 [Q-T](q-t-softmax-two-passes.md)|Why can softmax's `exp` pass vectorise and keep the bits? The `exp`s are independent; only the sum must stay in order.
 
+## CPU speed
+
+The running example: a 512 × 512 matmul, measured one change at a time.
+
+Question                                 |In one line                                                                                                                                            
+-----------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------
+[Q-N](q-n-where-blas-speed-comes-from.md)|Why does a naive matmul lose to BLAS by thousands of times? Several factors of 5 to 20, multiplied: bookkeeping, loop order, reuse, wider instructions.
+[Q-O](q-o-which-loop-vectorises.md)      |Why does `c[j] += …` vectorise when `acc += …` cannot? Independent outputs can run side by side; one running sum cannot without regrouping.            
+
 ## Themes to come
 
 Theme                    |Questions                              
 -------------------------|---------------------------------------
-CPU speed                |Q-N, Q-O                               
 Autograd                 |Q-Q, Q-W                               
 Modules                  |Q-Y, Q-AA, Q-AB, Q-AC                  
 GPU runtime and lifetimes|Q-U, Q-V, Q-AH, Q-AI, Q-AK             
