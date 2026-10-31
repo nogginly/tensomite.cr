@@ -202,8 +202,15 @@ kernel void gather_f32(device const float* table [[buffer(0)]],
     dst[i] = table[offset_of(vt, id * width + i % width)];
 }
 
-// Thread j owns output column j: it zeroes the column, then adds source rows into
-// the rows their ids select, in index order, as the host does.
+// Zeroes dst, one thread per element.
+kernel void fill_zero_f32(device float* dst [[buffer(0)]],
+                          constant uint& n [[buffer(1)]],
+                          uint i [[thread_position_in_grid]]) {
+    if (i < n) dst[i] = 0.0f;
+}
+
+// Thread j owns output column j, zeroed by fill_zero_f32: it adds source rows
+// into the rows their ids select, in index order, as the host does.
 kernel void scatter_add_f32(device const float* src [[buffer(0)]],
                             device const int* ids [[buffer(1)]],
                             device float* dst [[buffer(2)]],
@@ -215,7 +222,6 @@ kernel void scatter_add_f32(device const float* src [[buffer(0)]],
                             constant uint& n [[buffer(8)]],
                             uint j [[thread_position_in_grid]]) {
     if (j >= width) return;
-    for (int r = 0; r < rows; r++) dst[r * width + j] = 0.0f;
     for (uint i = 0; i < n; i++) {
         int id = ids[offset_of(vi, i)];
         if (id < 0 || id >= rows) {
@@ -226,22 +232,29 @@ kernel void scatter_add_f32(device const float* src [[buffer(0)]],
     }
 }
 
-// How to invert a view: its dimensions with a nonzero stride and more than one
-// index, by decreasing stride, then the rest (stride 0 or one index), in order.
+// How to invert a view: the strides, sizes and row-major strides of its
+// dimensions with a nonzero stride and more than one index, by decreasing
+// stride, then the sizes and row-major strides of the rest (stride 0 or one
+// index), in order. The row-major strides turn indices into a logical element.
 struct Inverse {
     int nstrided;
-    int strided[MAX_DIMS];
+    int stride[MAX_DIMS];
+    int size[MAX_DIMS];
+    int step[MAX_DIMS];
     int nrepeated;
-    int repeated[MAX_DIMS];
+    int repeated_size[MAX_DIMS];
+    int repeated_step[MAX_DIMS];
 };
 
 // Output position p is the sum of the source elements that view vv reads from
 // p, in logical order, as the host's index-order accumulation adds them.
 //
-// 1. Decomposes p - offset over the strided dimensions, largest stride first.
-//    If nothing remains and every index is in range, the view reads p.
-// 2. Walks the repeated dimensions in row-major order; each combination is one
-//    logical element that reads p.
+// 1. Decomposes p - offset over the strided dimensions, largest stride first,
+//    into the logical element whose repeated indices are all zero. If nothing
+//    remains and every index is in range, the view reads p.
+// 2. Walks the repeated dimensions in row-major order, last fastest, stepping
+//    the logical element by their row-major strides; each combination is one
+//    element that reads p.
 kernel void unview_f32(device const float* src [[buffer(0)]],
                        device float* dst [[buffer(1)]],
                        constant View& vs [[buffer(2)]],
@@ -250,31 +263,38 @@ kernel void unview_f32(device const float* src [[buffer(0)]],
                        constant uint& n [[buffer(5)]],
                        uint p [[thread_position_in_grid]]) {
     if (p >= n) return;
-    int idx[MAX_DIMS];
-    for (int d = 0; d < MAX_DIMS; d++) idx[d] = 0;
     int rem = int(p) - vv.offset;
     bool hit = rem >= 0;
+    int flat = 0;
     for (int k = 0; k < inv.nstrided && hit; k++) {
-        int d = inv.strided[k];
-        int at = rem / vv.strides[d];
-        rem -= at * vv.strides[d];
-        hit = at < vv.shape[d];
-        idx[d] = at;
+        int at = rem / inv.stride[k];
+        rem -= at * inv.stride[k];
+        hit = at < inv.size[k];
+        flat += at * inv.step[k];
     }
     float acc = 0.0f;
     if (hit && rem == 0) {
-        int total = 1;
-        for (int k = 0; k < inv.nrepeated; k++) total *= vv.shape[inv.repeated[k]];
-        for (int f = 0; f < total; f++) {
-            int t = f;
-            for (int k = inv.nrepeated - 1; k >= 0; k--) {
-                int d = inv.repeated[k];
-                idx[d] = t % vv.shape[d];
-                t /= vv.shape[d];
+        if (inv.nrepeated == 0) {
+            acc = src[offset_of(vs, flat)];
+        } else if (inv.nrepeated == 1) {
+            int count = inv.repeated_size[0], step = inv.repeated_step[0];
+            for (int f = 0; f < count; f++) acc += src[offset_of(vs, flat + f * step)];
+        } else {
+            int at[MAX_DIMS];
+            int total = 1;
+            for (int k = 0; k < inv.nrepeated; k++) {
+                at[k] = 0;
+                total *= inv.repeated_size[k];
             }
-            int flat = 0;
-            for (int d = 0; d < vv.ndim; d++) flat = flat * vv.shape[d] + idx[d];
-            acc += src[offset_of(vs, flat)];
+            for (int f = 0; f < total; f++) {
+                acc += src[offset_of(vs, flat)];
+                for (int k = inv.nrepeated - 1; k >= 0; k--) {
+                    flat += inv.repeated_step[k];
+                    if (++at[k] < inv.repeated_size[k]) break;
+                    flat -= at[k] * inv.repeated_step[k];
+                    at[k] = 0;
+                }
+            }
         }
     }
     dst[p] = acc;
@@ -478,12 +498,6 @@ template [[host_name("matmul_tiled_64x64_f32")]] kernel matmul_tiled_64_t matmul
 template [[host_name("matmul_tiled_32x64_f32")]] kernel matmul_tiled_32x64_t matmul_tiled<32, 64, 32, 4, 4>;
 
 #if __METAL_VERSION__ >= 300
-kernel void fill_zero_f32(device float* dst [[buffer(0)]],
-                          constant uint& n [[buffer(1)]],
-                          uint i [[thread_position_in_grid]]) {
-    if (i < n) dst[i] = 0.0f;
-}
-
 // Atomic, for measurement only: each thread adds its chunk sums straight into the
 // zeroed output, so the order of the additions, and the bits, can change from
 // run to run.

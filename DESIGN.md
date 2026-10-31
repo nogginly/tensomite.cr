@@ -325,7 +325,7 @@ flowchart TD
 Op          |Threads                                                                                  |Each thread                                                                                      
 ------------|-----------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------
 `Sum`, `Max`|one threadgroup per output, a thread per chunk of 16 (one thread for a run of 16 or less)|folds whole chunks in index order; the first thread folds the chunk results in chunk order       
-`ScatterAdd`|one per column                                                                           |zeroes its column, then adds the source rows into the rows their ids select, in order            
+`ScatterAdd`|one per column, after one per element to zero the output                                 |adds the source rows into the rows their ids select, in order                                    
 `Unview`    |one per output position                                                                  |inverts the view to find which logical elements read the position, and adds them in logical order
 
 `Unview` inverts a view by decomposing `position - offset` over the dimensions with a nonzero stride, largest first. The dimensions with stride 0 are the ones that repeat a position: their indices are walked in row-major order, which is logical order. The decomposition is unique when each stride exceeds the furthest the smaller ones can reach together. Every view tensomite builds satisfies that, and a view that did not would run on the host.
@@ -1199,6 +1199,20 @@ Op      |Per step|GPU ms|Share
 - **With both fixes, a step took 83.4 ms, from 109,** on the GB10: allocating 0.09 ms, from 17.4, with none of 1,269 allocations missing the pool, and the host's other work 2.2 ms, from 12.7. On the M5 Pro, Metal, which had the same retired list, trained the larger model at 59 ms a step, from 76, with no kernel changed.
 - **Views copied into each thread's local memory.** `Unview [2048,576]`, which reads one element per thread, still took 1.4 ms, and `Mul [16,6,128,128]` 0.58 ms for 1.6 million elements. A kernel argument indexed by a value known only at run time, as `v.strides[d]` in a loop over dimensions, is first copied to each thread's local memory: 76 bytes per view, 104 more for `Inverse`, and for a million threads hundreds of megabytes of traffic. Compiled to PTX, 28 of the hand-written kernels used local memory. `offset_of`, `stride_of` and `Unview` now loop over all `MAX_DIMS` dimensions, skipping those a view lacks, so the loops unroll and index arguments only by constants; `Inverse` holds the sorted strides and sizes themselves rather than dimension numbers. No kernel uses local memory now, and `spec/cuda_spec.cr` checks the PTX for it. With it, the larger model trains at about 20 ms a step on the GB10, from 83.4, with the same losses step for step: 5.4 times as fast as before Decision BG, and three times Metal's 59.5 on the M5 Pro. Metal's view arguments live in constant memory that kernels can index freely, so it made no such copies.
 - **The first step after a change to the kernels took 1.1 s,** where it had taken 0.11. I think the driver compiles new PTX for the GPU on first use and caches the result on disk: the next run of the same build took 58.5 ms for its first step. The trainer used to report the average time per step since step 0, which that one step kept high for hundreds of steps; it now reports the time per step since the previous report, leaving out validation, and the total at the end.
+
+**Profiling a Metal training step (Decision BI).** `examples/shakespeare.cr --device metal --profile 10` on the larger model, on the M5 Pro: of 59.1 ms a step, 57.0 were spent waiting for the GPU, and none of 1,269 allocations missed the pool. Timed alone, the ops took 42.2 ms of GPU time:
+
+Op          |Per step|GPU ms|Share
+------------|--------|------|-----
+`MatMul`    |75      |16.6  |39%  
+`Unview`    |36      |15.7  |37%  
+`ScatterAdd`|2       |3.1   |7%   
+`Mul`       |298     |2.3   |6%   
+
+- **`Unview [192]`, a layer norm's gradient summed over 2,048 rows, took 0.83 ms a call,** 14.9 ms a step: Metal still had the index arithmetic CUDA lost in Decision BG. Its kernel now takes the same `Inverse`, with row-major strides, and walks repeated dimensions by stepping. Metal's constant memory can be indexed freely, so its loops need not unroll. Compiled as C++ on the CPU, the new kernel gives the old one's bits on seven views, from `[2048,192]` expanded from `[192]` to a q slice of `[2048,576]`.
+- **`ScatterAdd [133120,1]`, the loss's gradient into the flattened logits, took 2.6 ms:** a thread per column zeroed its column before adding, and with one column a single thread zeroed 133,120 elements. On both GPUs a dispatch with a thread per element now zeroes the output first; the adds, and so the bits, are unchanged.
+- **With both kernel changes a step took 49.9 ms, from 59.1,** with the same losses: `Unview [192]` 0.40 ms a call, from 0.83, still the largest op, and `ScatterAdd` 1.2 ms a step, from 3.1. Only 192 threads share that `Unview`, each adding 2,048 numbers in turn.
+- **17 ms of the wall time was not in any op.** A step committed 114 command buffers, where its 906 dispatches need about 14 at 64 apiece, and each extra one was a pause in which the GPU waited for the host. The optimizer caused them (see "Optimizers"); with one wait per step, and without the kernel changes, a step commits 15 and takes 40.0 ms, its wall time now below the 42.1 ms of its ops timed alone.
 
 Metal keeps `Split` at decode: its decode was not profiled for this, and the fix there would be the same.
 
