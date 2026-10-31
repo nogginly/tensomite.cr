@@ -28,6 +28,9 @@ DEVICES.each do |device|
       i = tensor(device, [2], [1, 2])
       constant.call(i * 2).should be constant.call(i + 2)
       constant.call(i * 2).should_not be constant.call(a * 2)
+      inside = Tensomite.scope("part") { constant.call(a * 0.5) }
+      inside.should_not be constant.call(a * 0.5)
+      inside.scope.try(&.name).should eq "part"
     end
 
     it "divides a transposed view by a broadcast row" do
