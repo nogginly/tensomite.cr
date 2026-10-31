@@ -4,7 +4,7 @@ What the next session, or the next person, needs in order to carry on without th
 
 **Keeping it current.** Rewrite it rather than appending to it: at the end of each PR, and whenever a session's context passes about 70%. Anything that belongs in one of the other three documents goes there instead.
 
-*Last rewritten: 31 Oct 2026, with Metal's `Unview` loads open.*
+*Last rewritten: 31 Oct 2026, with tiled two-pass products open.*
 
 ## Where things stand
 
@@ -15,8 +15,8 @@ What the next session, or the next person, needs in order to carry on without th
   - macro kernels match their oracles and their gradients pass finite differences;
   - Shakespeare reached 1.573 nats/char in 20 minutes in the Linux container.
 - **M7b's exit, met** (evidence under 7b in `PLAN.md`): the tutorial, Shakespeare and GPT-2 models on modules with the same bits as the hand-written ones, on every device; the `Builder` chosen as the DSL (Decisions AN and AR).
-- **Open PR:** Metal's `Unview` loading 32 elements ahead on a dense source, with the same bits (`m8-metal-unview-loads`, Decision BJ): `Unview [192]` 0.027 ms a call, from 0.40, and 25.9 ms a training step, from 30.7. Merged: Decision BI, Metal's `Unview` and parallel `ScatterAdd` zeroing, and one wait per training step (`Tensor.realize(tensors)`), which took Metal from 59.1 to 30.7 ms a step on the larger Shakespeare model, against CUDA's 20.5; profiling for both GPUs with one report (Decision BH); the trainer on CUDA and the fixes its profile found (Decision BG).
-- **Now: M8, a CUDA backend** (Decisions AS–AV in `PLAN.md`; Vulkan moved to M12). Development is on the maintainer's DGX Spark, the exit on a cloud T4. Nothing in the container runs CUDA kernels: the maintainer runs them on the Spark, as with Metal on the Mac. The container and CI run the `CUDA` device and its kernels on `scripts/cuda_stub`, which compiles `kernels.cu` as host C++. Next: split long-`k` products with few tiles along `k` (Decision BJ's second part), then the rest of part 5, the exit runs on the Spark and a T4.
+- **Open PR:** `MatMulMode::TiledTwoPass` on CUDA and Metal, for products with few blocks of outputs and a long `k`, such as weight gradients, with `Split`'s bits (`m8-matmul-split-k`, Decision BJ's second part); not yet measured. Merged: Metal's `Unview` loading 32 elements ahead (Decision BJ), 25.9 ms a training step on the M5 Pro, from 59.1 before Decision BI; Decision BI, Metal's `Unview` and parallel `ScatterAdd` zeroing, and one wait per training step (`Tensor.realize(tensors)`); profiling for both GPUs with one report (Decision BH); the trainer on CUDA and the fixes its profile found (Decision BG).
+- **Now: M8, a CUDA backend** (Decisions AS–AV in `PLAN.md`; Vulkan moved to M12). Development is on the maintainer's DGX Spark, the exit on a cloud T4. Nothing in the container runs CUDA kernels: the maintainer runs them on the Spark, as with Metal on the Mac. The container and CI run the `CUDA` device and its kernels on `scripts/cuda_stub`, which compiles `kernels.cu` as host C++. Next: measure `TiledTwoPass` on the Mac and the GB10, then the rest of part 5, the exit runs on the Spark and a T4.
 - **A long-term goal:** inspecting running models (activations, attention, gradients) by the names of their parts; see "Inspectable" in `PLAN.md` and "Towards inspection" in `DESIGN.md`. Scopes are its first piece, and Decision AA must keep inspected nodes alive.
 - **Deferred:** Decision D, CPU threads (not needed for M7's exits). Decision AA, releasing buffers as soon as their last reader has run.
 

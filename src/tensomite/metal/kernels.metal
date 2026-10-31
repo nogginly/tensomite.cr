@@ -504,6 +504,108 @@ kernel void matmul_tiled(device const float* a [[buffer(0)]],
     }
 }
 
+// Tiled products in two passes, for when there are too few blocks of outputs to
+// fill the GPU, as in a weight's gradient, [m, k]·[k, n] with long k and small m
+// and n.
+//
+// The first pass gives each threadgroup a BM x BN block of outputs of one batch
+// matrix, as matmul_tiled does, and a run of dims[3] chunks of CHUNK along k. It
+// sums each chunk as matmul_tiled does and writes the chunk sums to scratch,
+// [batch][chunk][row][column]. The second pass, matmul_chunk_sums_f32, adds each
+// output's chunk sums in chunk order from zero.
+//
+// Bit-identical to matmul_tiled, and so to matmul_split_f32: the same chunk
+// sums, added in the same order, with the same exact zero add at the end.
+template <uint BM, uint BN, uint BK, uint TM, uint TN>
+kernel void matmul_tiled_chunks(device const float* a [[buffer(0)]],
+                                device const float* b [[buffer(1)]],
+                                device float* scratch [[buffer(2)]],
+                                constant View& va [[buffer(3)]],
+                                constant View& vb [[buffer(4)]],
+                                constant uint* dims [[buffer(5)]],
+                                uint3 group [[threadgroup_position_in_grid]],
+                                uint3 tid [[thread_position_in_threadgroup]]) {
+    constexpr uint TX = BN / TN, TY = BM / TM, THREADS = TX * TY;
+    threadgroup float as[BK * (BM + 1)];
+    threadgroup float bs[BK * (BN + 1)];
+    uint m = dims[0], k = dims[1], n = dims[2], run = dims[3];
+    uint chunks = (k + CHUNK - 1) / CHUNK, runs = (chunks + run - 1) / run;
+    uint batch = group.z / runs, first = group.z % runs * run;
+    uint row0 = group.y * BM, col0 = group.x * BN;
+    uint t = tid.y * TX + tid.x;
+    int pa = offset_of(va, batch * m * k);
+    int pb = offset_of(vb, batch * k * n);
+    int ra = va.strides[va.ndim - 2], sa = va.strides[va.ndim - 1];
+    int sb = vb.strides[vb.ndim - 2], cb = vb.strides[vb.ndim - 1];
+    float partial[TM][TN];
+    for (uint i = 0; i < TM; i++) {
+        for (uint j = 0; j < TN; j++) partial[i][j] = 0.0f;
+    }
+    uint stop = min(k, (first + run) * CHUNK);
+    for (uint k0 = first * CHUNK; k0 < stop; k0 += BK) {
+        uint width = min(BK, k - k0);
+        for (uint e = t; e < BM * BK; e += THREADS) {
+            uint r = sa == 1 ? e / BK : e % BM;
+            uint s = sa == 1 ? e % BK : e / BM;
+            bool inside = row0 + r < m && s < width;
+            as[s * (BM + 1) + r] = inside ? a[pa + int(row0 + r) * ra + int(k0 + s) * sa] : 0.0f;
+        }
+        for (uint e = t; e < BK * BN; e += THREADS) {
+            uint s = cb == 1 ? e / BN : e % BK;
+            uint c = cb == 1 ? e % BN : e / BK;
+            bool inside = col0 + c < n && s < width;
+            bs[s * (BN + 1) + c] = inside ? b[pb + int(k0 + s) * sb + int(col0 + c) * cb] : 0.0f;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint s = 0; s < width; s++) {
+            float x[TM], y[TN];
+            for (uint i = 0; i < TM; i++) x[i] = as[s * (BM + 1) + tid.y + i * TY];
+            for (uint j = 0; j < TN; j++) y[j] = bs[s * (BN + 1) + tid.x + j * TX];
+            for (uint i = 0; i < TM; i++) {
+                for (uint j = 0; j < TN; j++) {
+                    float product = x[i] * y[j];
+                    partial[i][j] = partial[i][j] + product;
+                }
+            }
+        }
+        if ((k0 + BK) % CHUNK == 0 || k0 + BK >= k) {
+            uint c = k0 / CHUNK;
+            for (uint i = 0; i < TM; i++) {
+                uint row = row0 + tid.y + i * TY;
+                for (uint j = 0; j < TN; j++) {
+                    uint col = col0 + tid.x + j * TX;
+                    if (row < m && col < n) scratch[((batch * chunks + c) * m + row) * n + col] = partial[i][j];
+                    partial[i][j] = 0.0f;
+                }
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+}
+
+// Output i of a product whose chunk sums matmul_tiled_chunks wrote: the sums
+// added in chunk order from zero, then the exact zero split-K adds for chunks
+// past k when their number is not a multiple of SLICES, then the bias. dims
+// holds m, k, n and whether there is a bias.
+kernel void matmul_chunk_sums_f32(device const float* scratch [[buffer(0)]],
+                                  device float* dst [[buffer(1)]],
+                                  device const float* bias [[buffer(2)]],
+                                  constant uint* dims [[buffer(3)]],
+                                  constant uint& total [[buffer(4)]],
+                                  uint i [[thread_position_in_grid]]) {
+    if (i >= total) return;
+    uint m = dims[0], k = dims[1], n = dims[2];
+    uint col = i % n, row = (i / n) % m, batch = i / (m * n);
+    uint chunks = (k + CHUNK - 1) / CHUNK;
+    float sum = 0.0f;
+    for (uint c = 0; c < chunks; c++) sum = sum + scratch[((batch * chunks + c) * m + row) * n + col];
+    float out = chunks % SLICES != 0 ? sum + 0.0f : sum;
+    dst[i] = with_bias(out, bias, col, dims[3]);
+}
+
+typedef decltype(matmul_tiled_chunks<64, 64, 32, 4, 4>) matmul_tiled_chunks_64_t;
+template [[host_name("matmul_tiled_chunks_64x64_f32")]] kernel matmul_tiled_chunks_64_t matmul_tiled_chunks<64, 64, 32, 4, 4>;
+
 typedef decltype(matmul_tiled<32, 32, 64, 4, 4>) matmul_tiled_32_t;
 typedef decltype(matmul_tiled<64, 64, 32, 4, 4>) matmul_tiled_64_t;
 typedef decltype(matmul_tiled<32, 64, 32, 4, 4>) matmul_tiled_32x64_t;
