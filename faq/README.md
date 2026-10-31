@@ -97,11 +97,22 @@ Question                               |In one line
 [Q-AB](q-ab-instance-variable-types.md)|Why must the builder be an argument? Instance variable types come from declarations, before any local exists.            
 [Q-AC](q-ac-stored-attention-mask.md)  |Why does GPT-2's file hold `attn.bias`? PyTorch saves buffers, and the causal mask is one.                               
 
+## GPU runtime and lifetimes
+
+Two running examples: the bias `b`'s buffer on its way back to the pool, and CUDA's first probe, which squares a million floats.
+
+Question                             |In one line                                                                                                              
+-------------------------------------|-------------------------------------------------------------------------------------------------------------------------
+[Q-U](q-u-finalizer-and-lock.md)     |Why can't a finalizer wait for a lock? The thread holding it may be its own, two frames up.                              
+[Q-V](q-v-encoded-is-not-executed.md)|When is reusing a buffer unsafe on Metal but not the CPU? When its consumer is encoded but not yet run.                  
+[Q-AH](q-ah-v2-symbols.md)           |Why does `libcuda` export both `cuMemAlloc` and `cuMemAlloc_v2`? Old binaries keep their old names; new code wants `_v2`.
+[Q-AI](q-ai-asynchronous-errors.md)  |Why did a bad launch fail at the copy? A launch only queues; the next wait reports the fault.                            
+[Q-AK](q-ak-emulating-barriers.md)   |Why can't the emulator loop over every kernel's threads? Threads that share memory across a barrier must run together.   
+
 ## Themes to come
 
 Theme                    |Questions                              
 -------------------------|---------------------------------------
-GPU runtime and lifetimes|Q-U, Q-V, Q-AH, Q-AI, Q-AK             
 GPU speed                |Q-X, Q-AL, Q-AM, Q-AN, Q-AP, Q-AQ, Q-AS
 Decoding and the KV cache|Q-AD, Q-AO                             
 
