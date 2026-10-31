@@ -34,6 +34,10 @@ EXACT = {
     table = random(d, [5, 3], 1)
     Tensomite.grad((table.gather(Tensor.from([1, 3, 1, 4, 1], [5], d)) * random(d, [5, 3], 2)).sum, [table]).first
   },
+  "scatter_add of one column" => ->(d : Device) {
+    table = random(d, [40, 1], 1)
+    Tensomite.grad((table.gather(Tensor.from([7, 0, 39, 7, 12, 7], [6], d)) * random(d, [6, 1], 2)).sum, [table]).first
+  },
   "unview of expand" => ->(d : Device) {
     bias = random(d, [4], 1)
     Tensomite.grad(((random(d, [3, 4], 2) + bias) * random(d, [3, 4], 3)).sum, [bias]).first

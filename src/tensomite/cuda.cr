@@ -528,6 +528,7 @@ module Tensomite
       if node.op == Op::Gather
         run(kernels["gather_f32"], node.size, *args, node.size.to_u32)
       else
+        run(kernels["fill_zero_f32"], node.size, output.pointer, node.size.to_u32)
         run(kernels["scatter_add_f32"], width, *args, ids.size.to_u32)
       end
     end
