@@ -322,11 +322,11 @@ flowchart TD
 
 **Kernels that add.** Each of these kernels combines in a fixed order. `ScatterAdd` and `Unview` add in the host's order and are bit-identical to it; `Sum` and `Max` work in chunks (below):
 
-Op          |Threads                                                                                  |Each thread                                                                                      
-------------|-----------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------
-`Sum`, `Max`|one threadgroup per output, a thread per chunk of 16 (one thread for a run of 16 or less)|folds whole chunks in index order; the first thread folds the chunk results in chunk order       
-`ScatterAdd`|one per column, after one per element to zero the output                                 |adds the source rows into the rows their ids select, in order                                    
-`Unview`    |one per output position                                                                  |inverts the view to find which logical elements read the position, and adds them in logical order
+Op          |Threads                                                                                  |Each thread                                                                                                                                         
+------------|-----------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------
+`Sum`, `Max`|one threadgroup per output, a thread per chunk of 16 (one thread for a run of 16 or less)|folds whole chunks in index order; the first thread folds the chunk results in chunk order                                                          
+`ScatterAdd`|one per column, or into one column one per id, after one per element to zero the output  |adds the source rows into the rows their ids select, in order; into one column, the thread of each id's first occurrence adds all of its occurrences
+`Unview`    |one per output position                                                                  |inverts the view to find which logical elements read the position, and adds them in logical order                                                   
 
 `Unview` inverts a view by decomposing `position - offset` over the dimensions with a nonzero stride, largest first. The dimensions with stride 0 are the ones that repeat a position: their indices are walked in row-major order, which is logical order. The decomposition is unique when each stride exceeds the furthest the smaller ones can reach together. Every view tensomite builds satisfies that, and a view that did not would run on the host.
 
@@ -1227,6 +1227,8 @@ All `MatMul`           |16.6 → 12.9        |9.6 → 6.3
 Training step          |25.9 → 22.4        |20.5 → 17.2      
 
 The smallest product gains most, from 9 threadgroups to about 256; the others already had 36. Weight gradients still run below forward products, 1,800 GFLOP/s against 2,100 to 2,300 on Metal and 3,200 to 3,400 against 4,900 on CUDA, I think mostly from writing and rereading the chunk sums.
+
+**A scatter into one column (Decision BK).** Cross-entropy picks one log-probability per row from the logits flattened to `[rows × classes, 1]`, so its gradient is `ScatterAdd [133120,1]` for the larger model: one column, so one thread, adding 2,048 rows in turn, 0.66 ms on the M5 Pro and 0.82 on the GB10. For one column both GPUs now run a thread per id. Each first looks for the same id earlier in the list and stops if it finds one; the thread left for each distinct id adds every occurrence's row in index order from zero, as the host does, so the bits are the same. For 2,048 ids that is about four million comparisons across 2,048 threads. Of the ids out of range, only the first is reported, as before. A scatter into several columns keeps a thread per column.
 
 Metal keeps `Split` at decode: its decode was not profiled for this, and the fix there would be the same.
 

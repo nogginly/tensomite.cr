@@ -76,17 +76,21 @@ SPLIT = {
 # Ops whose GPU results may differ in the last bits: division and transcendental
 # functions, whose rounding is the GPU maths library's (Decision K, level 3).
 CLOSE = {
-  "div"                           => ->(d : Device) { random(d, [5, 7], 1) / random(d, [5, 7], 2, 0.5f32, 2f32) },
-  "exp"                           => ->(d : Device) { random(d, [5, 7], 1, -4f32, 4f32).exp },
-  "log"                           => ->(d : Device) { random(d, [7, 5], 1, 0.01f32, 10f32).transpose.log },
-  "tanh"                          => ->(d : Device) { random(d, [5, 7], 1, -3f32, 3f32).tanh },
-  "sqrt"                          => ->(d : Device) { random(d, [5, 7], 1, 0f32, 10f32).sqrt },
-  "softmax"                       => ->(d : Device) { random(d, [4, 9], 1, -5f32, 5f32).softmax },
-  "layernorm"                     => ->(d : Device) { random(d, [4, 8], 1).layernorm(random(d, [8], 2), random(d, [8], 3)) },
-  "gelu"                          => ->(d : Device) { random(d, [4, 8], 1, -3f32, 3f32).gelu },
-  "log_softmax"                   => ->(d : Device) { random(d, [4, 9], 1, -5f32, 5f32).log_softmax },
-  "long rows"                     => ->(d : Device) { random(d, [3, 700], 1, -5f32, 5f32).softmax },
-  "long layernorm"                => ->(d : Device) { random(d, [3, 768], 1).layernorm(random(d, [768], 2), random(d, [768], 3)) },
+  "div"                      => ->(d : Device) { random(d, [5, 7], 1) / random(d, [5, 7], 2, 0.5f32, 2f32) },
+  "exp"                      => ->(d : Device) { random(d, [5, 7], 1, -4f32, 4f32).exp },
+  "log"                      => ->(d : Device) { random(d, [7, 5], 1, 0.01f32, 10f32).transpose.log },
+  "tanh"                     => ->(d : Device) { random(d, [5, 7], 1, -3f32, 3f32).tanh },
+  "sqrt"                     => ->(d : Device) { random(d, [5, 7], 1, 0f32, 10f32).sqrt },
+  "softmax"                  => ->(d : Device) { random(d, [4, 9], 1, -5f32, 5f32).softmax },
+  "layernorm"                => ->(d : Device) { random(d, [4, 8], 1).layernorm(random(d, [8], 2), random(d, [8], 3)) },
+  "gelu"                     => ->(d : Device) { random(d, [4, 8], 1, -3f32, 3f32).gelu },
+  "log_softmax"              => ->(d : Device) { random(d, [4, 9], 1, -5f32, 5f32).log_softmax },
+  "long rows"                => ->(d : Device) { random(d, [3, 700], 1, -5f32, 5f32).softmax },
+  "long layernorm"           => ->(d : Device) { random(d, [3, 768], 1).layernorm(random(d, [768], 2), random(d, [768], 3)) },
+  "cross_entropy's gradient" => ->(d : Device) {
+    logits = random(d, [64, 10], 1)
+    Tensomite.grad(logits.cross_entropy(Tensor.from(Array.new(64) { |i| (i * 7) % 10 }, [64], d)), [logits]).first
+  },
   "kernel with exp, log and sqrt" => ->(d : Device) { Kernels::SPEC_MIXED.call(random(d, [4, 5], 1), random(d, [5, 4], 2).transpose) },
   "gradient"                      => ->(d : Device) {
     w = random(d, [4, 3], 1)
@@ -150,6 +154,12 @@ describe "GPU devices against the CPU" do
         result = table.gather(Tensor.from([0, 2], [2], gpu))
         expect_raises(ExecutionError, /index 2 out of range for 2 rows/) { result.realize }
         (table * 2).to_a(Float32).should eq f32(2, 4, 6, 8)
+      end
+
+      it "raises for the first id out of range when scattering into one column" do
+        rows = Tensor.from(f32(1, 2, 3, 4), [4, 1], gpu)
+        result = rows.scatter_add_rows(Tensor.from([1, 5, 2, 9], [4], gpu), 3)
+        expect_raises(ExecutionError, /index 5 out of range for 3 rows/) { result.realize }
       end
 
       it "reads data back through map, download and to" do
