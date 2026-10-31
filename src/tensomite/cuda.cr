@@ -116,10 +116,17 @@ module Tensomite
       # then a thread per output adding them in chunk order. Bit-identical to
       # `Split`, with many more blocks when there are few rows.
       TwoPass
-      # `Tiled` for products of at least `TILED_ROWS` rows. Below that, as in
-      # decoding one token, `Split` when b's columns are contiguous in memory and
-      # `TwoPass` when they are not, as in a transposed b. Bit-identical to all
-      # three. The default.
+      # Two kernels: 64 x 64 blocks of outputs per block and run of chunks of
+      # `k`, writing each chunk's sum, then a thread per output adding them in
+      # chunk order. Bit-identical to `Split`, with many more blocks when there
+      # are few blocks of outputs and a long `k`.
+      TiledTwoPass
+      # `Tiled` for products of at least `TILED_ROWS` rows, or `TiledTwoPass`
+      # when they have fewer than `TWO_PASS_BLOCKS` blocks of outputs and at
+      # least `TWO_PASS_CHUNKS` chunks of `k`. Below that, as in decoding one
+      # token, `Split` when b's columns are contiguous in memory and `TwoPass`
+      # when they are not, as in a transposed b. Bit-identical to all four. The
+      # default.
       Auto
     end
 
@@ -146,6 +153,16 @@ module Tensomite
 
     # The fewest rows for which `MatMulMode::Auto` uses the tiled matmul.
     TILED_ROWS = 16
+
+    # `MatMulMode::Auto` uses `TiledTwoPass` for a product of fewer blocks of
+    # 64 x 64 outputs than this, with at least `TWO_PASS_CHUNKS` chunks of 64
+    # along `k`.
+    TWO_PASS_BLOCKS = 64
+    TWO_PASS_CHUNKS =  4
+
+    # `TiledTwoPass` gives each block enough chunks of `k` for about this many
+    # blocks in all.
+    private TWO_PASS_GROUPS = 256
 
     private BINARY = {
       Op::Add => "add_f32", Op::Sub => "sub_f32", Op::Mul => "mul_f32", Op::Div => "div_f32",
@@ -560,8 +577,12 @@ module Tensomite
       case matmul_mode
       in .serial?
         run(kernels["matmul_f32"], node.size, *args, node.size.to_u32)
+      in .tiled_two_pass?
+        launch_tiled_two_pass(kernels, node, output, m, k, n)
       in .split?, .tiled?, .auto?
-        if matmul_mode.tiled? || (matmul_mode.auto? && m >= TILED_ROWS)
+        if matmul_mode.auto? && m >= TILED_ROWS && two_pass?(node, m, k, n)
+          launch_tiled_two_pass(kernels, node, output, m, k, n)
+        elsif matmul_mode.tiled? || (matmul_mode.auto? && m >= TILED_ROWS)
           rows, cols = matmul_tile.block
           grid = {(n + cols - 1) // cols, (m + rows - 1) // rows, node.size // (m * n)}
           context.launch(kernels[matmul_tile.kernel], grid, {cols // TILE_PATCH, rows // TILE_PATCH}, *args)
@@ -583,6 +604,30 @@ module Tensomite
         grid = {(n + DECODE_COLS - 1) // DECODE_COLS, chunks, node.size // (m * n) * ((m + DECODE_ROWS - 1) // DECODE_ROWS)}
         context.launch(kernels["matmul_chunks_f32"], grid, {DECODE_COLS, 1}, pointer(a), pointer(b), scratch,
           view_args(a.view), view_args(b.view), m.to_u32, k.to_u32, n.to_u32)
+      end
+      run(kernels["matmul_chunk_sums_f32"], node.size, scratch, output.pointer, bias_pointer(node), m.to_u32, k.to_u32, n.to_u32, node.size.to_u32)
+    end
+
+    # Returns true when a product has fewer than `TWO_PASS_BLOCKS` blocks of
+    # 64 x 64 outputs and at least `TWO_PASS_CHUNKS` chunks of `k`.
+    private def two_pass?(node : Node, m : Int32, k : Int32, n : Int32) : Bool
+      blocks = (n + 63) // 64 * ((m + 63) // 64) * (node.size // (m * n))
+      blocks < TWO_PASS_BLOCKS && (k + CHUNK - 1) // CHUNK >= TWO_PASS_CHUNKS
+    end
+
+    # TiledTwoPass: one block per 64 x 64 outputs of each batch matrix and run of
+    # chunks of `k`, then one thread per output.
+    private def launch_tiled_two_pass(kernels : Kernels, node : Node, output : CUDABuffer, m : Int32, k : Int32, n : Int32) : Nil
+      a, b = node.srcs[0], node.srcs[1]
+      chunks = (k + CHUNK - 1) // CHUNK
+      blocks = {(n + 63) // 64, (m + 63) // 64, node.size // (m * n)}
+      wanted = (TWO_PASS_GROUPS // blocks.product).clamp(1, Math.max(chunks, 1))
+      run = Math.max((chunks + wanted - 1) // wanted, 1)
+      runs = (chunks + run - 1) // run
+      scratch = scratch(node.size * chunks * 4)
+      if runs > 0
+        context.launch(kernels["matmul_tiled_chunks_64x64_f32"], {blocks[0], blocks[1], blocks[2] * runs}, {64 // TILE_PATCH, 64 // TILE_PATCH},
+          pointer(a), pointer(b), scratch, view_args(a.view), view_args(b.view), m.to_u32, k.to_u32, n.to_u32, run.to_u32)
       end
       run(kernels["matmul_chunk_sums_f32"], node.size, scratch, output.pointer, bias_pointer(node), m.to_u32, k.to_u32, n.to_u32, node.size.to_u32)
     end

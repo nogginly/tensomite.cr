@@ -1,6 +1,7 @@
 #!/bin/sh
 # Runs tensomite's Metal matmul kernels on the CPU and checks that every tiled
-# variant gives split-K's bits, on a set of shapes. Exits non-zero on a mismatch.
+# variant, and the tiled two passes, give split-K's bits, on a set of shapes.
+# Exits non-zero on a mismatch.
 #
 #     scripts/emulate_metal/run.sh
 #

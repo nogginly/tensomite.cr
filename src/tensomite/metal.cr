@@ -62,7 +62,7 @@ module Tensomite
       Op::Exp => "exp_f32", Op::Log => "log_f32", Op::Tanh => "tanh_f32", Op::Sqrt => "sqrt_f32",
       Op::Copy => "copy_f32",
     }
-    private OTHER          = %w[copy_into_f32 sum_f32 max_f32 sum_short_f32 max_short_f32 gather_f32 fill_zero_f32 scatter_add_f32 unview_f32 matmul_f32 matmul_split_f32 matmul_tiled_32x32_f32 matmul_tiled_64x64_f32 matmul_tiled_32x64_f32 softmax_f32 log_softmax_f32 layernorm_f32]
+    private OTHER          = %w[copy_into_f32 sum_f32 max_f32 sum_short_f32 max_short_f32 gather_f32 fill_zero_f32 scatter_add_f32 unview_f32 matmul_f32 matmul_split_f32 matmul_tiled_chunks_64x64_f32 matmul_chunk_sums_f32 matmul_tiled_32x32_f32 matmul_tiled_64x64_f32 matmul_tiled_32x64_f32 softmax_f32 log_softmax_f32 layernorm_f32]
     private OPTIONAL       = %w[matmul_atomic_f32]
     private COLS           =  32
     private SLICES         =   8
@@ -84,8 +84,15 @@ module Tensomite
       # through threadgroup memory (`#matmul_tile`): bit-identical to `Split`, and
       # faster when there are many rows.
       Tiled
-      # `Tiled` for products of at least `TILED_ROWS` rows, `Split` otherwise, as
-      # in decoding one token. Bit-identical to both. The default.
+      # Two passes: 64 x 64 blocks of outputs per threadgroup and run of chunks of
+      # `k`, writing each chunk's sum, then a thread per output adding them in
+      # chunk order. Bit-identical to `Split`, with many more threadgroups when
+      # there are few blocks of outputs and a long `k`.
+      TiledTwoPass
+      # `Tiled` for products of at least `TILED_ROWS` rows, or `TiledTwoPass`
+      # when they have fewer than `TWO_PASS_BLOCKS` blocks of outputs and at
+      # least `TWO_PASS_CHUNKS` chunks of `k`; `Split` for fewer rows, as in
+      # decoding one token. Bit-identical to all three. The default.
       Auto
     end
 
@@ -112,6 +119,16 @@ module Tensomite
 
     # The fewest rows for which `MatMulMode::Auto` uses the tiled matmul.
     TILED_ROWS = 16
+
+    # `MatMulMode::Auto` uses `TiledTwoPass` for a product of fewer blocks of
+    # 64 x 64 outputs than this, with at least `TWO_PASS_CHUNKS` chunks of 64
+    # along `k`.
+    TWO_PASS_BLOCKS = 64
+    TWO_PASS_CHUNKS =  4
+
+    # `TiledTwoPass` gives each threadgroup enough chunks of `k` for about this
+    # many threadgroups in all.
+    private TWO_PASS_GROUPS = 256
 
     # Each thread of the tiled matmul computes a patch of this many rows and columns.
     private TILE_PATCH = 4
@@ -227,6 +244,9 @@ module Tensomite
     # Buffers given back by finalizers, which may run on another thread; the
     # device's own thread moves them into the pool once no GPU work is pending.
     @retired = RetiredList(Void*).new
+    # Partial results of `TiledTwoPass`, grown as needed; dispatches run in
+    # order, so the next one may reuse it.
+    @scratch : MetalBuffer? = nil
 
     # Freed `MTLBuffer`s kept for reuse; see `BufferPool`. Holds up to 1 GiB by
     # default. (`#pool`, inherited, holds host memory, which `Metal` does not use.)
@@ -399,17 +419,17 @@ module Tensomite
       buffers = [mtl(a), mtl(b), output.mtl, bias ? mtl(bias) : output.mtl]
       constants = [view_args(a.view), view_args(b.view), dims]
       return if node.size == 0
-      case matmul_mode
+      case resolved_mode(node, m, k, n)
       in .serial?
         dispatch("matmul_f32", node.size, buffers, constants << u32(node.size))
-      in .split?, .tiled?, .auto?
-        if matmul_mode.tiled? || (matmul_mode.auto? && m >= TILED_ROWS)
-          rows, cols = matmul_tile.block
-          groups = {(n + cols - 1) // cols, (m + rows - 1) // rows, node.size // (m * n)}
-          dispatch_groups(matmul_tile.kernel, groups, {cols // TILE_PATCH, rows // TILE_PATCH}, buffers, constants)
-        else
-          dispatch_groups("matmul_split_f32", {(n + COLS - 1) // COLS, node.size // n}, {COLS, SLICES}, buffers, constants)
-        end
+      in .tiled_two_pass?
+        encode_tiled_two_pass(node, output, m, k, n)
+      in .tiled?
+        rows, cols = matmul_tile.block
+        groups = {(n + cols - 1) // cols, (m + rows - 1) // rows, node.size // (m * n)}
+        dispatch_groups(matmul_tile.kernel, groups, {cols // TILE_PATCH, rows // TILE_PATCH}, buffers, constants)
+      in .split?, .auto?
+        dispatch_groups("matmul_split_f32", {(n + COLS - 1) // COLS, node.size // n}, {COLS, SLICES}, buffers, constants)
       in .atomic?
         raise DeviceError.new("atomic matmul needs Metal 3") unless @pipelines.has_key?("matmul_atomic_f32")
         # The atomic adds start from the bias, or from zero.
@@ -420,6 +440,46 @@ module Tensomite
         end
         dispatch_groups("matmul_atomic_f32", {(n + COLS - 1) // COLS, node.size // n}, {COLS, SLICES}, buffers.first(3), constants)
       end
+    end
+
+    # Returns `#matmul_mode`, or for `Auto` the mode it picks for a product.
+    private def resolved_mode(node : Node, m : Int32, k : Int32, n : Int32) : MatMulMode
+      return matmul_mode unless matmul_mode.auto?
+      return MatMulMode::Split if m < TILED_ROWS
+      two_pass?(node, m, k, n) ? MatMulMode::TiledTwoPass : MatMulMode::Tiled
+    end
+
+    # Returns true when a product has fewer than `TWO_PASS_BLOCKS` blocks of
+    # 64 x 64 outputs and at least `TWO_PASS_CHUNKS` chunks of `k`.
+    private def two_pass?(node : Node, m : Int32, k : Int32, n : Int32) : Bool
+      blocks = (n + 63) // 64 * ((m + 63) // 64) * (node.size // (m * n))
+      blocks < TWO_PASS_BLOCKS && (k + 63) // 64 >= TWO_PASS_CHUNKS
+    end
+
+    # TiledTwoPass: one threadgroup per 64 x 64 outputs of each batch matrix and
+    # run of chunks of `k`, then one thread per output.
+    private def encode_tiled_two_pass(node : Node, output : MetalBuffer, m : Int32, k : Int32, n : Int32) : Nil
+      a, b, bias = node.srcs[0], node.srcs[1], node.srcs[2]?
+      chunks = (k + 63) // 64
+      blocks = {(n + 63) // 64, (m + 63) // 64, node.size // (m * n)}
+      wanted = (TWO_PASS_GROUPS // blocks.product).clamp(1, Math.max(chunks, 1))
+      run = Math.max((chunks + wanted - 1) // wanted, 1)
+      runs = (chunks + run - 1) // run
+      scratch = scratch(node.size * chunks * 4)
+      dims = Slice[m.to_u32, k.to_u32, n.to_u32, run.to_u32].to_unsafe_bytes
+      if runs > 0
+        dispatch_groups("matmul_tiled_chunks_64x64_f32", {blocks[0], blocks[1], blocks[2] * runs}, {64 // TILE_PATCH, 64 // TILE_PATCH},
+          [mtl(a), mtl(b), scratch.mtl], [view_args(a.view), view_args(b.view), dims])
+      end
+      sums = Slice[m.to_u32, k.to_u32, n.to_u32, bias ? 1_u32 : 0_u32].to_unsafe_bytes
+      dispatch("matmul_chunk_sums_f32", node.size, [scratch.mtl, output.mtl, bias ? mtl(bias) : output.mtl], [sums, u32(node.size)])
+    end
+
+    # Returns a buffer of at least *bytesize* bytes for partial results.
+    private def scratch(bytesize : Int32) : MetalBuffer
+      current = @scratch
+      return current if current && current.bytesize >= bytesize
+      @scratch = new_buffer(Math.max(bytesize, 4))
     end
 
     # Cat: one dispatch per source, copying it into its slice of the output.

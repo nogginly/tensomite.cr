@@ -147,6 +147,15 @@ require "./spec_helper"
           end
         end
 
+        it "gives split's bits in tiled two passes, for few blocks and a long k, batched and transposed" do
+          long = [{[70, 1100], [1100, 65], false}, {[3, 20, 300], [3, 300, 40], false}, {[100, 700], [130, 700], true}, {[16, 257], [257, 64], false}, {[320, 600], [600, 512], false}]
+          (shapes + long).each do |(a_shape, b_shape, b_transposed)|
+            split = tiled_product.call(Metal::MatMulMode::Split, Metal::MatMulTile::T64x64, a_shape, b_shape, b_transposed)
+            tiled_product.call(Metal::MatMulMode::TiledTwoPass, Metal::MatMulTile::T64x64, a_shape, b_shape, b_transposed).should eq split
+            tiled_product.call(Metal::MatMulMode::Auto, Metal::MatMulTile::T64x64, a_shape, b_shape, b_transposed).should eq split
+          end
+        end
+
         it "gives split's bits when automatic, whatever the number of rows" do
           [{[1, 300], [300, 50], false}, {[40, 300], [300, 50], false}].each do |(a_shape, b_shape, b_transposed)|
             tiled_product.call(Metal::MatMulMode::Auto, Metal::MatMulTile::T64x64, a_shape, b_shape, b_transposed)

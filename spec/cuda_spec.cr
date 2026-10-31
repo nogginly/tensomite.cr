@@ -214,6 +214,18 @@ require "./spec_helper"
         end
       end
 
+      it "gives split's bits in tiled two passes, for few blocks and a long k, batched and transposed" do
+        long = [{[70, 1100], [1100, 65], false}, {[3, 20, 300], [3, 300, 40], false}, {[100, 700], [130, 700], true}, {[16, 257], [257, 64], false}, {[320, 600], [600, 512], false}]
+        (shapes + long).each do |(a_shape, b_shape, b_transposed)|
+          split = tiled_product.call(CUDA::MatMulMode::Split, CUDA::MatMulTile::T64x64, a_shape, b_shape, b_transposed)
+          tiled_product.call(CUDA::MatMulMode::TiledTwoPass, CUDA::MatMulTile::T64x64, a_shape, b_shape, b_transposed).should eq split
+        end
+        long.each do |(a_shape, b_shape, b_transposed)|
+          tiled_product.call(CUDA::MatMulMode::Auto, CUDA::MatMulTile::T64x64, a_shape, b_shape, b_transposed)
+            .should eq tiled_product.call(CUDA::MatMulMode::Split, CUDA::MatMulTile::T64x64, a_shape, b_shape, b_transposed)
+        end
+      end
+
       it "adds a bias with the bits of a separate add, in every mode" do
         rng = Random.new(9)
         bias = Tensor.from(Array(Float32).new(70) { rng.rand(-1f32...1f32) }, [70], cuda)

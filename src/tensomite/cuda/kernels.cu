@@ -492,6 +492,83 @@ TILED(matmul_tiled_32x32_f32, 32, 32, 64)
 TILED(matmul_tiled_64x64_f32, 64, 64, 32)
 TILED(matmul_tiled_32x64_f32, 32, 64, 32)
 
+// Tiled products in two passes, for when there are too few blocks of outputs to
+// fill the GPU, as in a weight's gradient, [m, k]·[k, n] with long k and small m
+// and n.
+//
+// The first pass gives each block a BM x BN block of outputs of one batch
+// matrix, as matmul_tiled does, and a run of `run` chunks of CHUNK along k. It
+// sums each chunk as matmul_tiled does and writes the chunk sums to scratch,
+// [batch][chunk][row][column]. The second pass, matmul_chunk_sums_f32, adds each
+// output's chunk sums in chunk order from zero.
+//
+// Bit-identical to matmul_tiled, and so to matmul_split_f32: the same chunk
+// sums, added in the same order, with the same exact zero add at the end.
+template <unsigned int BM, unsigned int BN, unsigned int BK, unsigned int TM, unsigned int TN>
+__device__ void matmul_tiled_chunks(const float* a, const float* b, float* scratch, const View& va, const View& vb,
+                                    unsigned int m, unsigned int k, unsigned int n, unsigned int run) {
+    constexpr unsigned int TX = BN / TN, TY = BM / TM, THREADS = TX * TY;
+    __shared__ float as[BK * (BM + 1)];
+    __shared__ float bs[BK * (BN + 1)];
+    unsigned int chunks = (k + CHUNK - 1) / CHUNK, runs = (chunks + run - 1) / run;
+    unsigned int batch = blockIdx.z / runs, first = blockIdx.z % runs * run;
+    unsigned int row0 = blockIdx.y * BM, col0 = blockIdx.x * BN;
+    unsigned int t = threadIdx.y * TX + threadIdx.x;
+    int pa = offset_of(va, batch * m * k);
+    int pb = offset_of(vb, batch * k * n);
+    int ra = stride_of(va, va.ndim - 2), sa = stride_of(va, va.ndim - 1);
+    int sb = stride_of(vb, vb.ndim - 2), cb = stride_of(vb, vb.ndim - 1);
+    float partial[TM][TN];
+    for (unsigned int i = 0; i < TM; i++) {
+        for (unsigned int j = 0; j < TN; j++) partial[i][j] = 0.0f;
+    }
+    unsigned int stop = min(k, (first + run) * CHUNK);
+    for (unsigned int k0 = first * CHUNK; k0 < stop; k0 += BK) {
+        unsigned int width = min(BK, k - k0);
+        for (unsigned int e = t; e < BM * BK; e += THREADS) {
+            unsigned int r = sa == 1 ? e / BK : e % BM;
+            unsigned int s = sa == 1 ? e % BK : e / BM;
+            bool inside = row0 + r < m && s < width;
+            as[s * (BM + 1) + r] = inside ? a[pa + int(row0 + r) * ra + int(k0 + s) * sa] : 0.0f;
+        }
+        for (unsigned int e = t; e < BK * BN; e += THREADS) {
+            unsigned int s = cb == 1 ? e / BN : e % BK;
+            unsigned int c = cb == 1 ? e % BN : e / BK;
+            bool inside = col0 + c < n && s < width;
+            bs[s * (BN + 1) + c] = inside ? b[pb + int(k0 + s) * sb + int(col0 + c) * cb] : 0.0f;
+        }
+        __syncthreads();
+        for (unsigned int s = 0; s < width; s++) {
+            float x[TM], y[TN];
+            for (unsigned int i = 0; i < TM; i++) x[i] = as[s * (BM + 1) + threadIdx.y + i * TY];
+            for (unsigned int j = 0; j < TN; j++) y[j] = bs[s * (BN + 1) + threadIdx.x + j * TX];
+            for (unsigned int i = 0; i < TM; i++) {
+                for (unsigned int j = 0; j < TN; j++) {
+                    float product = x[i] * y[j];
+                    partial[i][j] = partial[i][j] + product;
+                }
+            }
+        }
+        if ((k0 + BK) % CHUNK == 0 || k0 + BK >= k) {
+            unsigned int c = k0 / CHUNK;
+            for (unsigned int i = 0; i < TM; i++) {
+                unsigned int row = row0 + threadIdx.y + i * TY;
+                for (unsigned int j = 0; j < TN; j++) {
+                    unsigned int col = col0 + threadIdx.x + j * TX;
+                    if (row < m && col < n) scratch[((batch * chunks + c) * m + row) * n + col] = partial[i][j];
+                    partial[i][j] = 0.0f;
+                }
+            }
+        }
+        __syncthreads();
+    }
+}
+
+extern "C" __global__ void matmul_tiled_chunks_64x64_f32(const float* a, const float* b, float* scratch, View va, View vb,
+                                                         unsigned int m, unsigned int k, unsigned int n, unsigned int run) {
+    matmul_tiled_chunks<64, 64, 32, 4, 4>(a, b, scratch, va, vb, m, k, n, run);
+}
+
 // Fused row ops: one block per row along the last axis. Each pass folds the
 // row's chunks of REDUCE_CHUNK at fixed offsets, a thread per chunk, and the
 // first thread folds the chunk results in chunk order, as the reductions above
