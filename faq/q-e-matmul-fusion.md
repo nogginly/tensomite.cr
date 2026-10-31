@@ -51,4 +51,4 @@ flowchart LR
 ## See also
 
 - [Q-F](q-f-epilogue-fusion.md): which of GPT-2's ops can ride along at the end of a matmul.
-- [Q-X](README.md#themes-to-come): why tiles cut reads, in the GPU speed theme.
+- [Q-X](q-x-patch-per-thread.md): why tiles cut reads, in the GPU speed theme.

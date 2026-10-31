@@ -46,7 +46,7 @@ flowchart TB
 
 ### What was done instead
 
-The time was going on waiting, not adding: each thread asked for a number, waited a full memory round trip for it, added it, then asked for the next. Decision BJ kept the order and changed only the waiting. Metal's `Unview` loads 32 numbers before adding them, still one at a time and in order, so one round trip covers 32 numbers (Q-AS). `Unview [192]` went from 0.40 ms a call to 0.027, with the same bits.
+The time was going on waiting, not adding: each thread asked for a number, waited a full memory round trip for it, added it, then asked for the next. Decision BJ kept the order and changed only the waiting. Metal's `Unview` loads 32 numbers before adding them, still one at a time and in order, so one round trip covers 32 numbers ([Q-AS](q-as-loading-ahead.md)). `Unview [192]` went from 0.40 ms a call to 0.027, with the same bits.
 
 </details>
 

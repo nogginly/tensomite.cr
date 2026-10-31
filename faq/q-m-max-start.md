@@ -27,7 +27,7 @@ Input                       |Start from 0|Start from first element
 `[−3, −1, −2]`              |**0**, wrong|−1                      
 `[−∞, −∞, 5]` (a masked row)|5           |5                       
 
-The second row is the spec's case. It matters in practice: attention adds a causal mask of −∞ to the scores, and softmax first subtracts each row's maximum (Q-G), so rows full of large negative numbers are routine.
+The second row is the spec's case. It matters in practice: attention adds a causal mask of −∞ to the scores, and softmax first subtracts each row's maximum ([Q-G](q-g-online-softmax.md)), so rows full of large negative numbers are routine.
 
 ```mermaid
 flowchart LR

@@ -55,7 +55,7 @@ flowchart LR
 
 ### Where it shows up in tensomite
 
-`View#expand` sets the stride of every broadcast dimension to 0, and `Tensor#+` expands both operands to a common shape before building the node. So kernels never see broadcasting: every binary kernel handles "two inputs of the same shape, any strides". The fan-out in the diagram also explains gradients: when `b[0]` is read twice, its gradient is the sum of both readers' (Q-Q).
+`View#expand` sets the stride of every broadcast dimension to 0, and `Tensor#+` expands both operands to a common shape before building the node. So kernels never see broadcasting: every binary kernel handles "two inputs of the same shape, any strides". The fan-out in the diagram also explains gradients: when `b[0]` is read twice, its gradient is the sum of both readers' ([Q-Q](q-q-gradient-of-a-broadcast.md)).
 
 </details>
 

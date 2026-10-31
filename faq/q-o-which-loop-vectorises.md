@@ -49,7 +49,7 @@ flowchart TB
 
 ### Where it shows up in tensomite
 
-The same split, independent work at once and dependent sums in order, recurs throughout: softmax's `exp` pass vectorises while its sum stays in order ([Q-T](q-t-softmax-two-passes.md)); GPU kernels give each thread its own outputs rather than splitting one sum ([Q-AR](q-ar-splitting-a-sum.md)); and Metal's `Unview` loads ahead in parallel but adds in order (Q-AS).
+The same split, independent work at once and dependent sums in order, recurs throughout: softmax's `exp` pass vectorises while its sum stays in order ([Q-T](q-t-softmax-two-passes.md)); GPU kernels give each thread its own outputs rather than splitting one sum ([Q-AR](q-ar-splitting-a-sum.md)); and Metal's `Unview` loads ahead in parallel but adds in order ([Q-AS](q-as-loading-ahead.md)).
 
 </details>
 

@@ -48,7 +48,7 @@ flowchart LR
 
 ### Where it shows up in tensomite
 
-The oracle keeps its cost on purpose: it is the reference every device is checked against. `BLAS` calls OpenBLAS or Accelerate for matmuls rather than competing with them. And the same layers reappear on the GPU: tiling into fast on-chip memory is to the Metal and CUDA matmuls what register and cache blocking are to BLAS (Q-X).
+The oracle keeps its cost on purpose: it is the reference every device is checked against. `BLAS` calls OpenBLAS or Accelerate for matmuls rather than competing with them. And the same layers reappear on the GPU: tiling into fast on-chip memory is to the Metal and CUDA matmuls what register and cache blocking are to BLAS ([Q-X](q-x-patch-per-thread.md)).
 
 </details>
 
