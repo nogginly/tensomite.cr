@@ -263,6 +263,8 @@ require "./spec_helper"
 
       it "profiles launches, transfers and GPU time per op" do
         a = Tensor.from(f32(1, 2, 3, 4), [2, 2], cuda)
+        # The constant 1 is shared, so it is uploaded once, here, if at all.
+        a + 1
         profile = CUDA::Profile.new(per_kernel: true, shapes: true)
         cuda.profile = profile
         # (a + 1) * a = [2, 6, 12, 20], which sums to 40.
@@ -272,7 +274,7 @@ require "./spec_helper"
         profile.launches.should eq 3
         profile.kernels.keys.should eq ["Add [2,2]", "Mul [2,2]", "Sum []"]
         profile.host_ops.keys.should eq ["Add I32"]
-        {profile.uploads, profile.downloads}.should eq({3, 1})
+        {profile.uploads, profile.downloads}.should eq({2, 1})
       end
 
       it "runs GPT-2's ops on the GPU, kernels and row ops included" do
