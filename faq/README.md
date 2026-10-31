@@ -109,11 +109,24 @@ Question                             |In one line
 [Q-AI](q-ai-asynchronous-errors.md)  |Why did a bad launch fail at the copy? A launch only queues; the next wait reports the fault.                            
 [Q-AK](q-ak-emulating-barriers.md)   |Why can't the emulator loop over every kernel's threads? Threads that share memory across a barrier must run together.   
 
+## GPU speed
+
+Two running examples: GPT-2's decode products, `qkv [768, 2304]` beside the transposed head; and the Metal training profile, with `Unview [192]`.
+
+Question                                   |In one line                                                                                                                
+-------------------------------------------|---------------------------------------------------------------------------------------------------------------------------
+[Q-X](q-x-patch-per-thread.md)             |Why does a 4 × 4 patch per thread cut reads? Each loaded value is used 4 times: 8 loads for 16 multiply-adds.              
+[Q-AL](q-al-storing-the-head-transposed.md)|What if the head's weights were stored transposed? The head would read well, and the embedding lookup badly.               
+[Q-AM](q-am-which-gains-from-two-passes.md)|Which decode products gain from two passes? The head, whose reads were strided; not those already side by side.            
+[Q-AN](q-an-which-way-the-weights-run.md)  |What makes the head's reads slow? 32 threads read 32 rows 3 KB apart, not one row.                                         
+[Q-AP](q-ap-narrower-blocks.md)            |Why did narrower blocks hurt mlp in but not mlp out? More blocks help only a product short of them; shorter reads hurt all.
+[Q-AQ](q-aq-predicting-the-profile.md)     |Where would Metal's 59 ms go? One slow kernel, matmuls spread wide, and the GPU waiting on the host.                       
+[Q-AS](q-as-loading-ahead.md)              |How can loading ahead help if no addition happens sooner? The time was waiting for memory, not adding.                     
+
 ## Themes to come
 
-Theme                    |Questions                              
--------------------------|---------------------------------------
-GPU speed                |Q-X, Q-AL, Q-AM, Q-AN, Q-AP, Q-AQ, Q-AS
-Decoding and the KV cache|Q-AD, Q-AO                             
+Theme                    |Questions 
+-------------------------|----------
+Decoding and the KV cache|Q-AD, Q-AO
 
 Q-C and Q-P were labels on a decision and a list, not questions, so they have no page.
