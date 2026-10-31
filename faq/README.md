@@ -45,11 +45,21 @@ Question                      |In one line
 [Q-L](q-l-cat-slice-views.md) |Why does `Cat` write through slice views? A slice is a view, so writing is just a copy through two views.    
 [Q-M](q-m-max-start.md)       |Why does `max` start from the first element? Zero is not neutral for maximum; all-negative rows would give 0.
 
+## Memory and devices
+
+The running example: the bias `b = [10, 20, 30]` from the previous theme, followed onto each kind of device.
+
+Question                                         |In one line                                                                                                                                 
+-------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------
+[Q-B](q-b-unified-as-special-case.md)            |Why is unified memory a special case of discrete? Code that always copies works on both; code that reads directly breaks on discrete.       
+[Q-AE](q-ae-mapped-memory-on-a-discrete-card.md) |Why can device-local, host-visible memory fail on a discrete card? On a card it is a small window, and allocations past it cannot be mapped.
+[Q-AF](q-af-compute-and-graphics-capabilities.md)|Why does Vulkan need the `graphics` capability? Its driver is in the graphics library, which a container gets only from the host.           
+[Q-AJ](q-aj-host-copy-after-upload.md)           |Why may a host copy stay valid after an upload? It equals the GPU's memory until something writes that memory.                              
+
 ## Themes to come
 
 Theme                    |Questions                              
 -------------------------|---------------------------------------
-Memory and devices       |Q-B, Q-AE, Q-AF, Q-AJ                  
 Fusion and kernels       |Q-D, Q-E, Q-F, Q-G, Q-T                
 CPU speed                |Q-N, Q-O                               
 Autograd                 |Q-Q, Q-W                               
