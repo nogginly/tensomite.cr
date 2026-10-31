@@ -33,11 +33,22 @@ Question                           |In one line
 [Q-AR](q-ar-splitting-a-sum.md)    |Why not split one long sum across 32 threads? It regroups the additions, and the bits change.                                    
 [Q-AT](q-at-chunk-sums.md)         |Why write every chunk sum rather than one per run? Adding a run first regroups the sum, as in Q-AR.                              
 
+## Lazy graphs and views
+
+The running example: `a = [[1, 2, 3], [4, 5, 6]]` and a bias `b = [10, 20, 30]`, added as `a + b`.
+
+Question                      |In one line                                                                                                  
+------------------------------|-------------------------------------------------------------------------------------------------------------
+[Q-A](q-a-lazy-errors.md)     |Why does an error in a lazy graph surface far from its cause? Building and running happen at different times.
+[Q-K](q-k-stride-zero.md)     |What does a stride of 0 mean? Move nowhere: every row reads the same storage, so broadcasting copies nothing.
+[Q-J](q-j-reduce-axis-last.md)|Why does `sum(axis)` move the summed axis to the end? So each output's inputs are one run of neighbours.     
+[Q-L](q-l-cat-slice-views.md) |Why does `Cat` write through slice views? A slice is a view, so writing is just a copy through two views.    
+[Q-M](q-m-max-start.md)       |Why does `max` start from the first element? Zero is not neutral for maximum; all-negative rows would give 0.
+
 ## Themes to come
 
 Theme                    |Questions                              
 -------------------------|---------------------------------------
-Lazy graphs and views    |Q-A, Q-J, Q-K, Q-L, Q-M                
 Memory and devices       |Q-B, Q-AE, Q-AF, Q-AJ                  
 Fusion and kernels       |Q-D, Q-E, Q-F, Q-G, Q-T                
 CPU speed                |Q-N, Q-O                               
