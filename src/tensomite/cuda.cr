@@ -535,7 +535,8 @@ module Tensomite
       run(kernels["copy_into_f32"], value.size, pointer(value), output.pointer, view_args(value.view), view_args(region), value.size.to_u32)
     end
 
-    # Gather, one thread per output element, and ScatterAdd, one thread per column.
+    # Gather, one thread per output element, and ScatterAdd, one thread per output
+    # element to zero it and then one per column, or for one column one per id.
     # Both report an id out of range through the error buffer (see `#sync`).
     private def launch_rows(kernels : Kernels, node : Node, output : CUDABuffer) : Nil
       rows_src, ids = node.srcs
@@ -546,7 +547,11 @@ module Tensomite
         run(kernels["gather_f32"], node.size, *args, node.size.to_u32)
       else
         run(kernels["fill_zero_f32"], node.size, output.pointer, node.size.to_u32)
-        run(kernels["scatter_add_f32"], width, *args, ids.size.to_u32)
+        if width == 1
+          run(kernels["scatter_add_column_f32"], ids.size, *args, ids.size.to_u32)
+        else
+          run(kernels["scatter_add_f32"], width, *args, ids.size.to_u32)
+        end
       end
     end
 
@@ -745,7 +750,7 @@ module Tensomite
       cuda(tensor.node.buffer!).pointer
     end
 
-    # The error buffer that `gather_f32` and `scatter_add_f32` report into:
+    # The error buffer that `gather_f32` and the `ScatterAdd` kernels report into:
     # a count, then the first id out of range and the number of rows.
     private def errors : LibCUDA::DevicePtr
       @errors ||= context.alloc(12).tap { |pointer| context.upload(pointer, Bytes.new(12)) }

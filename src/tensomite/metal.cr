@@ -62,7 +62,7 @@ module Tensomite
       Op::Exp => "exp_f32", Op::Log => "log_f32", Op::Tanh => "tanh_f32", Op::Sqrt => "sqrt_f32",
       Op::Copy => "copy_f32",
     }
-    private OTHER          = %w[copy_into_f32 sum_f32 max_f32 sum_short_f32 max_short_f32 gather_f32 fill_zero_f32 scatter_add_f32 unview_f32 matmul_f32 matmul_split_f32 matmul_tiled_chunks_64x64_f32 matmul_chunk_sums_f32 matmul_tiled_32x32_f32 matmul_tiled_64x64_f32 matmul_tiled_32x64_f32 softmax_f32 log_softmax_f32 layernorm_f32]
+    private OTHER          = %w[copy_into_f32 sum_f32 max_f32 sum_short_f32 max_short_f32 gather_f32 fill_zero_f32 scatter_add_f32 scatter_add_column_f32 unview_f32 matmul_f32 matmul_split_f32 matmul_tiled_chunks_64x64_f32 matmul_chunk_sums_f32 matmul_tiled_32x32_f32 matmul_tiled_64x64_f32 matmul_tiled_32x64_f32 softmax_f32 log_softmax_f32 layernorm_f32]
     private OPTIONAL       = %w[matmul_atomic_f32]
     private COLS           =  32
     private SLICES         =   8
@@ -503,7 +503,7 @@ module Tensomite
     end
 
     # Gather, one thread per output element, and ScatterAdd, one thread per output
-    # element to zero it and then one per column.
+    # element to zero it and then one per column, or for one column one per id.
     # Both report an id out of range through the error buffer (see `#flush`).
     private def encode_rows(node : Node, output : MetalBuffer) : Nil
       rows_src, ids = node.srcs
@@ -514,7 +514,8 @@ module Tensomite
         dispatch("gather_f32", node.size, buffers, constants << u32(node.size))
       else
         dispatch("fill_zero_f32", node.size, [output.mtl], [u32(node.size)])
-        dispatch("scatter_add_f32", width, buffers, constants << u32(ids.size))
+        name, threads = width == 1 ? {"scatter_add_column_f32", ids.size} : {"scatter_add_f32", width}
+        dispatch(name, threads, buffers, constants << u32(ids.size))
       end
     end
 
