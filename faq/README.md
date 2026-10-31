@@ -77,11 +77,19 @@ Question                                 |In one line
 [Q-N](q-n-where-blas-speed-comes-from.md)|Why does a naive matmul lose to BLAS by thousands of times? Several factors of 5 to 20, multiplied: bookkeeping, loop order, reuse, wider instructions.
 [Q-O](q-o-which-loop-vectorises.md)      |Why does `c[j] += …` vectorise when `acc += …` cannot? Independent outputs can run side by side; one running sum cannot without regrouping.            
 
+## Autograd
+
+The running example: the bias `b = [10, 20, 30]` again, in `loss = ((a + b) · w).sum`.
+
+Question                                |In one line                                                                                             
+----------------------------------------|--------------------------------------------------------------------------------------------------------
+[Q-Q](q-q-gradient-of-a-broadcast.md)   |What is a broadcast tensor's gradient? The sum over every place it was copied to: `[5, 7, 9]`.          
+[Q-W](q-w-gradient-node-of-an-expand.md)|What does that gradient look like in the graph? An `Unview` node, the one backward rule all views share.
+
 ## Themes to come
 
 Theme                    |Questions                              
 -------------------------|---------------------------------------
-Autograd                 |Q-Q, Q-W                               
 Modules                  |Q-Y, Q-AA, Q-AB, Q-AC                  
 GPU runtime and lifetimes|Q-U, Q-V, Q-AH, Q-AI, Q-AK             
 GPU speed                |Q-X, Q-AL, Q-AM, Q-AN, Q-AP, Q-AQ, Q-AS
