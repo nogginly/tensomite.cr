@@ -504,7 +504,8 @@ module Tensomite
 
     # Compiles the hand-written kernels and builds a compute pipeline for each.
     private def compile : Nil
-      build(SOURCE, BINARY.values + UNARY.values + OTHER, OPTIONAL)
+      ahead = ENV["TENSOMITE_UNVIEW_AHEAD"]?.try { |value| "#define UNVIEW_AHEAD #{value.to_i}\n" } || ""
+      build(ahead + SOURCE, BINARY.values + UNARY.values + OTHER, OPTIONAL)
     end
 
     # Compiles *source*, with fast math off, and adds a pipeline to the cache for

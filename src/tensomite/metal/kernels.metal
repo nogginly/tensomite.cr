@@ -246,7 +246,9 @@ struct Inverse {
     int repeated_step[MAX_DIMS];
 };
 
+#ifndef UNVIEW_AHEAD
 #define UNVIEW_AHEAD 8
+#endif
 
 // Output position p is the sum of the source elements that view vv reads from
 // p, in logical order, as the host's index-order accumulation adds them.
