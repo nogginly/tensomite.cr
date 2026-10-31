@@ -103,8 +103,24 @@ module Tensomite
       Tensor.lazy(Node.new(op, [self], shape, dtype, device))
     end
 
+    # Constants that arithmetic with a number has made, by device, dtype and
+    # value, so that a training step uploads each one once rather than once per
+    # use. Cleared when it reaches `SCALARS` entries, as a learning-rate
+    # schedule makes new values every step.
+    @@scalars = {} of {UInt64, DType, Int64} => Tensor
+
+    private SCALARS = 4096
+
+    # Returns a scalar of *value* in this tensor's dtype on its device, shared
+    # with every other use of the same value there.
     private def scalar(value : Number) : Tensor
-      Tensor.scalar(value, dtype, device)
+      return Tensor.scalar(value, dtype, device) unless dtype.f32? || value.to_i64 == value
+      bits = dtype.f32? ? value.to_f32.unsafe_as(UInt32).to_i64 : value.to_i64
+      key = {device.object_id, dtype, bits}
+      @@scalars[key]? || begin
+        @@scalars.clear if @@scalars.size >= SCALARS
+        @@scalars[key] = Tensor.scalar(value, dtype, device)
+      end
     end
   end
 end
