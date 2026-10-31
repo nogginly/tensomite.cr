@@ -86,11 +86,21 @@ Question                                |In one line
 [Q-Q](q-q-gradient-of-a-broadcast.md)   |What is a broadcast tensor's gradient? The sum over every place it was copied to: `[5, 7, 9]`.          
 [Q-W](q-w-gradient-node-of-an-expand.md)|What does that gradient look like in the graph? An `Unview` node, the one backward rule all views share.
 
+## Modules
+
+The running example: one transformer block of the tiny GPT-2, by its parameter names, from `h.0.ln_1.weight` to `h.0.mlp.c_proj.bias`.
+
+Question                               |In one line                                                                                                              
+---------------------------------------|-------------------------------------------------------------------------------------------------------------------------
+[Q-Y](q-y-decay-by-parameter.md)       |How do named parameters simplify AdamW's split? A rule replaces a list; tensomite puts a `decay?` flag on each parameter.
+[Q-AA](q-aa-what-a-macro-buys.md)      |What would a `parts` macro buy over a builder? A shorter call, at the cost of worse errors and lint exclusions.          
+[Q-AB](q-ab-instance-variable-types.md)|Why must the builder be an argument? Instance variable types come from declarations, before any local exists.            
+[Q-AC](q-ac-stored-attention-mask.md)  |Why does GPT-2's file hold `attn.bias`? PyTorch saves buffers, and the causal mask is one.                               
+
 ## Themes to come
 
 Theme                    |Questions                              
 -------------------------|---------------------------------------
-Modules                  |Q-Y, Q-AA, Q-AB, Q-AC                  
 GPU runtime and lifetimes|Q-U, Q-V, Q-AH, Q-AI, Q-AK             
 GPU speed                |Q-X, Q-AL, Q-AM, Q-AN, Q-AP, Q-AQ, Q-AS
 Decoding and the KV cache|Q-AD, Q-AO                             
