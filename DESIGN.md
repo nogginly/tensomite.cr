@@ -1228,6 +1228,8 @@ Training step          |25.9 → 22.4        |20.5 → 17.2
 
 The smallest product gains most, from 9 threadgroups to about 256; the others already had 36. Weight gradients still run below forward products, 1,800 GFLOP/s against 2,100 to 2,300 on Metal and 3,200 to 3,400 against 4,900 on CUDA, I think mostly from writing and rereading the chunk sums.
 
+**Constants shared (Decision BK).** Arithmetic with a number, as in `x * 2` or AdamW's `m / (1 - β₁ᵗ)`, makes the number a scalar tensor on the device. Each use made a new one, so a training step uploaded 363 of them on the GB10, 1.26 ms of synchronous copies. They are now kept by device, dtype, value and scope and shared: tensors never change, and `Tensor#write`, the one op that writes into a buffer, writes only into a target its caller names, which these are not. The scope keeps each part of a model to its own nodes, so diagrams still fold identical blocks; AdamW's constants, made outside every scope, are shared across all the parameters, while those of a forward pass are made once per pass. A learning-rate schedule makes a few new values each step, so the table is cleared when it reaches 4,096 entries. On the CUDA stub a small model's step makes 19 uploads, from 205, with the same losses. `Tensor.scalar` itself still makes a new tensor each call.
+
 Metal keeps `Split` at decode: its decode was not profiled for this, and the fix there would be the same.
 
 **Training step in the Linux container through M7** (the 0.8M-param model, 30 steps, identical losses):
