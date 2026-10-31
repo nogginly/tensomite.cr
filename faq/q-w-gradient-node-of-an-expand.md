@@ -72,7 +72,7 @@ The seed's own `expand` is the same trick in reverse: `Sum`'s gradient broadcast
 
 ### Where it shows up in tensomite
 
-`Op::Unview` is a primitive on every device. On the GPUs it is the kernel that [Q-AR](q-ar-splitting-a-sum.md) and Q-AS are about: `Unview [192]`, the gradient of a layer norm's weight, is this same column sum over 2,048 rows, and was for a while the slowest op of a training step.
+`Op::Unview` is a primitive on every device. On the GPUs it is the kernel that [Q-AR](q-ar-splitting-a-sum.md) and [Q-AS](q-as-loading-ahead.md) are about: `Unview [192]`, the gradient of a layer norm's weight, is this same column sum over 2,048 rows, and was for a while the slowest op of a training step.
 
 </details>
 

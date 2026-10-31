@@ -123,10 +123,13 @@ Question                                   |In one line
 [Q-AQ](q-aq-predicting-the-profile.md)     |Where would Metal's 59 ms go? One slow kernel, matmuls spread wide, and the GPU waiting on the host.                       
 [Q-AS](q-as-loading-ahead.md)              |How can loading ahead help if no addition happens sooner? The time was waiting for memory, not adding.                     
 
-## Themes to come
+## Decoding and the KV cache
 
-Theme                    |Questions 
--------------------------|----------
-Decoding and the KV cache|Q-AD, Q-AO
+The running example: decoding GPT-2 small's 80th token, with a cache of capacity 1,024.
+
+Question                              |In one line                                                                                                           
+--------------------------------------|----------------------------------------------------------------------------------------------------------------------
+[Q-AD](q-ad-cache-written-in-place.md)|What does a cache written in place save? A fixed 72 KB a token, where `cat` copied everything, about 6 MB at token 80.
+[Q-AO](q-ao-the-empty-slots.md)       |How does attention avoid the empty slots? It reads a slice of the filled positions; the rest are never touched.       
 
 Q-C and Q-P were labels on a decision and a list, not questions, so they have no page.

@@ -4,7 +4,7 @@
 
 ## The question
 
-Online softmax sums `exp(x − m)` over a row a tile at a time, keeping a running maximum `m`. When a later tile brings a bigger maximum `m'`, it rescales the sum so far by `exp(m − m')` (see Q-G). For the row `[1, 2 | 3, 4]`, in two tiles, the sum comes to 1.553.
+Online softmax sums `exp(x − m)` over a row a tile at a time, keeping a running maximum `m`. When a later tile brings a bigger maximum `m'`, it rescales the sum so far by `exp(m − m')` (see [Q-G](q-g-online-softmax.md)). For the row `[1, 2 | 3, 4]`, in two tiles, the sum comes to 1.553.
 
 Redo it with the tiles in the other order, `[4, 3 | 2, 1]`. Does the rescaling step change anything? What does that tell you about whether the order of tiles matters, and why might the last digits still differ on a real GPU?
 

@@ -47,5 +47,5 @@ flowchart LR
 
 ## See also
 
-- [Q-O](README.md#themes-to-come): loop-carried dependencies in matmul, in the CPU speed theme.
-- [Q-AS](README.md#themes-to-come): the same split, loads ahead and additions in order, on a GPU.
+- [Q-O](q-o-which-loop-vectorises.md): loop-carried dependencies in matmul, in the CPU speed theme.
+- [Q-AS](q-as-loading-ahead.md): the same split, loads ahead and additions in order, on a GPU.
