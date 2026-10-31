@@ -56,11 +56,22 @@ Question                                         |In one line
 [Q-AF](q-af-compute-and-graphics-capabilities.md)|Why does Vulkan need the `graphics` capability? Its driver is in the graphics library, which a container gets only from the host.           
 [Q-AJ](q-aj-host-copy-after-upload.md)           |Why may a host copy stay valid after an upload? It equals the GPU's memory until something writes that memory.                              
 
+## Fusion and kernels
+
+Two running examples: GPT-2's `gelu` on a `[1024, 3072]` activation, and the softmax row `[1, 2, 3, 4]`.
+
+Question                        |In one line                                                                                                           
+--------------------------------|----------------------------------------------------------------------------------------------------------------------
+[Q-D](q-d-spir-v-writer.md)     |Why would a SPIR-V writer need no compiler? It writes the bytecode itself; the driver always does the rest.           
+[Q-E](q-e-matmul-fusion.md)     |Why is matmul not fused like elementwise ops? It reuses every input many times, so tiling rules; only its edges fuse. 
+[Q-F](q-f-epilogue-fusion.md)   |Which ops ride along at the end of a matmul? Those that need only their own element; not softmax or layernorm.        
+[Q-G](q-g-online-softmax.md)    |How can softmax work a tile at a time? Rescale the running sum by `exp(m − m')` when the maximum grows.               
+[Q-T](q-t-softmax-two-passes.md)|Why can softmax's `exp` pass vectorise and keep the bits? The `exp`s are independent; only the sum must stay in order.
+
 ## Themes to come
 
 Theme                    |Questions                              
 -------------------------|---------------------------------------
-Fusion and kernels       |Q-D, Q-E, Q-F, Q-G, Q-T                
 CPU speed                |Q-N, Q-O                               
 Autograd                 |Q-Q, Q-W                               
 Modules                  |Q-Y, Q-AA, Q-AB, Q-AC                  
