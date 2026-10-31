@@ -175,6 +175,31 @@ extern "C" __global__ void scatter_add_f32(const float* src, const int* ids, flo
     }
 }
 
+// ScatterAdd into one column, one thread per id. The thread holding an id's
+// first occurrence adds the source rows of every occurrence, in index order,
+// from zero, as the host does; rows no id selects keep the zeros fill_zero_f32
+// wrote. Of the ids out of range, only the first is reported.
+extern "C" __global__ void scatter_add_column_f32(const float* src, const int* ids, float* dst, int* errors,
+                                                  View vs, View vi, unsigned int width, int rows, unsigned int n) {
+    unsigned int i = thread_index();
+    if (i >= n) return;
+    int id = ids[offset_of(vi, i)];
+    bool bad = id < 0 || id >= rows;
+    for (unsigned int k = 0; k < i; k++) {
+        int other = ids[offset_of(vi, k)];
+        if (bad ? (other < 0 || other >= rows) : other == id) return;
+    }
+    if (bad) {
+        report(errors, id, rows);
+        return;
+    }
+    float acc = 0.0f;
+    for (unsigned int k = i; k < n; k++) {
+        if (ids[offset_of(vi, k)] == id) acc = acc + src[offset_of(vs, k)];
+    }
+    dst[id] = acc;
+}
+
 // How to invert a view: the strides, sizes and row-major strides of its
 // dimensions with a nonzero stride and more than one index, by decreasing
 // stride, then the sizes and row-major strides of the rest (stride 0 or one

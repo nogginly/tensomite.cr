@@ -232,6 +232,38 @@ kernel void scatter_add_f32(device const float* src [[buffer(0)]],
     }
 }
 
+// ScatterAdd into one column, one thread per id. The thread holding an id's
+// first occurrence adds the source rows of every occurrence, in index order,
+// from zero, as the host does; rows no id selects keep the zeros fill_zero_f32
+// wrote. Of the ids out of range, only the first is reported.
+kernel void scatter_add_column_f32(device const float* src [[buffer(0)]],
+                                   device const int* ids [[buffer(1)]],
+                                   device float* dst [[buffer(2)]],
+                                   device atomic_int* errors [[buffer(3)]],
+                                   constant View& vs [[buffer(4)]],
+                                   constant View& vi [[buffer(5)]],
+                                   constant uint& width [[buffer(6)]],
+                                   constant int& rows [[buffer(7)]],
+                                   constant uint& n [[buffer(8)]],
+                                   uint i [[thread_position_in_grid]]) {
+    if (i >= n) return;
+    int id = ids[offset_of(vi, i)];
+    bool bad = id < 0 || id >= rows;
+    for (uint k = 0; k < i; k++) {
+        int other = ids[offset_of(vi, k)];
+        if (bad ? (other < 0 || other >= rows) : other == id) return;
+    }
+    if (bad) {
+        report(errors, id, rows);
+        return;
+    }
+    float acc = 0.0f;
+    for (uint k = i; k < n; k++) {
+        if (ids[offset_of(vi, k)] == id) acc = acc + src[offset_of(vs, k)];
+    }
+    dst[id] = acc;
+}
+
 // How to invert a view: the strides, sizes and row-major strides of its
 // dimensions with a nonzero stride and more than one index, by decreasing
 // stride, then the sizes and row-major strides of the rest (stride 0 or one
