@@ -1234,6 +1234,16 @@ The smallest product gains most, from 9 threadgroups to about 256; the others al
 
 **Where training stands after Decision BK.** On `main`, the larger Shakespeare model trains at 21.8 ms a step on the M5 Pro and 15.0 on the GB10, from 59.1 and 20.5 when Decision BI began, and from 109 on the GB10 before Decision BG, with the same losses throughout. The GPUs now run nearly back to back: the ops timed alone add up to 97% of the M5 Pro's wall time and 99% of the GB10's. `MatMul` takes 60% and 43% of that, and the rest is spread over about 850 launches of small elementwise, reduction and view ops, `Mul` alone 298 of them; fusing those into fewer kernels is the next large gain.
 
+**AdamW fused (Decision BM).** AdamW's step was about fifteen primitive ops per parameter: for the larger model's 36 parameters, over half of a training step's 925 launches, each reading and writing a parameter-sized tensor. From the second step on, `AdamW` runs three kernel macros per parameter instead:
+
+Kernel               |Computes                                                 |Inputs
+---------------------|---------------------------------------------------------|------
+`adamw_moment`       |`m = β₁m + (1 − β₁)g`                                    |4     
+`adamw_second_moment`|`v = β₂v + (1 − β₂)g²`                                   |4     
+`adamw_update`       |`p · decay − m / (1 − β₁ᵗ) / (√(v / (1 − β₂ᵗ)) + ε) · lr`|8     
+
+A macro's constants are fixed when it is compiled, so the numbers that change each step, the bias corrections, the learning rate and the decay, are scalar inputs, broadcast like any other, which the optimizer makes once per value. Each kernel does the composite's operations in its order, so the bits are unchanged: a parameter without decay is multiplied by 1, which is exact. The first step keeps the composite, having no `m` or `v` to read. `CUDA` kernels now take any number of inputs; `adamw_update` has eight, and Metal binds up to 31 buffers, enough for fourteen. On the CUDA stub a step of the larger model launches 511 kernels, from 925, with the same losses and parameters to the bit.
+
 Metal keeps `Split` at decode: its decode was not profiled for this, and the fix there would be the same.
 
 **Training step in the Linux container through M7** (the 0.8M-param model, 30 steps, identical losses):
