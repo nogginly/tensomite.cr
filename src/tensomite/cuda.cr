@@ -674,26 +674,20 @@ module Tensomite
     end
 
     # Kernel: one thread per element, running the kernel's generated CUDA C++,
-    # compiled the first time the kernel runs on this device. Up to four inputs,
-    # which is more than any kernel tensomite defines.
+    # compiled the first time the kernel runs on this device.
     private def launch_kernel(node : Node, output : CUDABuffer) : Nil
       kernel = node.kernel || raise Error.new("kernel node without a kernel")
       compiled = @macro_kernels[kernel.cuda_name] ||= context.load(CUDA.compile(PRELUDE + kernel.cuda, CUDA.target_arch(gpu), "#{kernel.cuda_name}.cu"))
-      function = compiled[kernel.cuda_name]
-      s = node.srcs
-      n = node.size.to_u32
-      case s.size
-      when 1 then run(function, node.size, pointer(s[0]), output.pointer, view_args(s[0].view), n)
-      when 2 then run(function, node.size, pointer(s[0]), pointer(s[1]), output.pointer, view_args(s[0].view), view_args(s[1].view), n)
-      when 3
-        run(function, node.size, pointer(s[0]), pointer(s[1]), pointer(s[2]), output.pointer,
-          view_args(s[0].view), view_args(s[1].view), view_args(s[2].view), n)
-      when 4
-        run(function, node.size, pointer(s[0]), pointer(s[1]), pointer(s[2]), pointer(s[3]), output.pointer,
-          view_args(s[0].view), view_args(s[1].view), view_args(s[2].view), view_args(s[3].view), n)
-      else
-        raise DeviceError.new("CUDA kernels take at most 4 inputs, not #{s.size}")
-      end
+      return if node.size == 0
+      # Arguments by kind, each loop over one type: the inputs' pointers, the
+      # output's, the inputs' views, then the count.
+      srcs = node.srcs
+      params = Array(Void*).new(2 * srcs.size + 2)
+      srcs.each { |src| params << Pointer.malloc(1, pointer(src)).as(Void*) }
+      params << Pointer.malloc(1, output.pointer).as(Void*)
+      srcs.each { |src| params << Pointer.malloc(1, view_args(src.view)).as(Void*) }
+      params << Pointer.malloc(1, node.size.to_u32).as(Void*)
+      context.launch_params(compiled[kernel.cuda_name], {(node.size + BLOCK - 1) // BLOCK, 1, 1}, {BLOCK, 1}, params)
     end
 
     # Returns the kernels' `Inverse` for *view*: the stride, size and row-major
@@ -952,9 +946,14 @@ module Tensomite
 
       # Queues *function* on a grid of *grid* blocks, each of *block* threads.
       def launch(function : Void*, grid : {Int32, Int32, Int32}, block : {Int32, Int32}, *args) : Nil
+        launch_params(function, grid, block, CUDA.kernel_params(*args))
+      end
+
+      # Queues *function* as `#launch` does, with *params* as `cuLaunchKernel`
+      # takes them: a pointer to each argument.
+      def launch_params(function : Void*, grid : {Int32, Int32, Int32}, block : {Int32, Int32}, params : Array(Void*)) : Nil
         return if grid.any?(&.zero?)
         @launches += 1
-        params = CUDA.kernel_params(*args)
         CUDA.check LibCUDA.cuLaunchKernel(function, grid[0].to_u32, grid[1].to_u32, grid[2].to_u32,
           block[0].to_u32, block[1].to_u32, 1, 0, Pointer(Void).null, params.to_unsafe, Pointer(Void*).null), "cuLaunchKernel"
       end

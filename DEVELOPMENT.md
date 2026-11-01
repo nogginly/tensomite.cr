@@ -78,7 +78,7 @@ src/tensomite/module.cr     Parameter, Init, Module and Layer
 src/tensomite/modules.cr    Linear, Embedding, LayerNorm, Activation, Sequential
 src/tensomite/builder.cr    Builder and Sequential.build: built-in modules with shared settings
 src/tensomite/kernel.cr     the Tensomite.kernel macro and the Kernel class
-src/tensomite/kernels.cr    the kernels tensomite's own ops use, such as gelu
+src/tensomite/kernels.cr    the kernels tensomite's own ops use: gelu and AdamW's steps
 src/tensomite/buffer_pool.cr  BufferPool
 src/tensomite/optim.cr      SGD and AdamW
 src/tensomite/cuda.cr       opt-in CUDA (-Dcuda): versions, GPUs, NVRTC, contexts; cuda/lib.cr binds libcuda and libnvrtc

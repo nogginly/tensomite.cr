@@ -52,6 +52,30 @@ describe AdamW do
     expect_close(p.first.to_a(Float32), expected, 1e-5)
   end
 
+  it "gives the bits of its composite of primitive ops, step after step" do
+    params = [Parameter.new(Tensor.from(random_values(12, 1), [3, 4])), Parameter.new(Tensor.from(random_values(4, 2), [4]), decay: false)]
+    optimizer = AdamW.new(params, lr: 0.05, beta2: 0.99, weight_decay: 0.1)
+    values = params.map(&.value)
+    m = [] of Tensor
+    v = [] of Tensor
+    (1..4).each do |step|
+      optimizer.lr = 0.05 / step
+      grads = [Tensor.from(random_values(12, 10 + step), [3, 4]), Tensor.from(random_values(4, 20 + step), [4])]
+      loss = (params[0].value * grads[0]).sum + (params[1].value * grads[1]).sum
+      optimizer.step(loss)
+      values = values.map_with_index do |value, i|
+        m_i = grads[i] * 0.1
+        v_i = grads[i] * grads[i] * 0.01
+        m_i, v_i = m[i] * 0.9 + m_i, v[i] * 0.99 + v_i if step > 1
+        m.size > i ? (m[i] = m_i) : m << m_i
+        v.size > i ? (v[i] = v_i) : v << v_i
+        decayed = i == 0 ? value * (1 - 0.05 / step * 0.1) : value
+        (decayed - m_i / (1 - 0.9 ** step) / ((v_i / (1 - 0.99 ** step)).sqrt + 1e-8) * (0.05 / step)).realize
+      end
+      params.zip(values) { |param, value| param.value.to_a(Float32).should eq value.to_a(Float32) }
+    end
+  end
+
   it "minimises a quadratic" do
     optimizer = AdamW.new(lr: 0.1, weight_decay: 0.0)
     target = Tensor.from(f32(3, -2), [2])
