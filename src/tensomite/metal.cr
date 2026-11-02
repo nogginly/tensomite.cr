@@ -377,7 +377,7 @@ module Tensomite
       name = srcs.size == 2 ? BINARY[node.op]? : UNARY[node.op]?
       return false unless name
       dispatch(name, node.size, srcs.map { |src| mtl(src) } << output.mtl,
-        srcs.map { |src| view_args(src.view) } << u32(node.size))
+        srcs.map { |src| elementwise_view_args(src.view) } << u32(node.size))
       true
     end
 
@@ -619,7 +619,7 @@ module Tensomite
       build(PRELUDE + kernel.msl, [kernel.msl_name]) unless @pipelines.has_key?(kernel.msl_name)
       srcs = node.srcs
       dispatch(kernel.msl_name, node.size, srcs.map { |src| mtl(src) } << output.mtl,
-        srcs.map { |src| view_args(src.view) } << u32(node.size))
+        srcs.map { |src| elementwise_view_args(src.view) } << u32(node.size))
     end
 
     # Encodes one dispatch of kernel *name* over *threads* threads, binding
@@ -694,6 +694,21 @@ module Tensomite
         args[2 + MAX_DIMS + dim] = view.strides[dim]
       end
       args[2 + 2 * MAX_DIMS] = view.dense? ? 1 : 0
+      args.to_unsafe_bytes
+    end
+
+    # Returns *view* as `#view_args` does, for a kernel that reads it only through
+    # `offset_of`: without the leading dimensions it repeats, which add nothing to
+    # a position, so that a broadcast scalar needs no index arithmetic at all.
+    private def elementwise_view_args(view : View) : Bytes
+      skip = view.repeated_leading
+      return view_args(view) if skip == 0
+      args = Slice(Int32).new(3 + 2 * MAX_DIMS)
+      args[0], args[1] = view.ndim - skip, view.offset
+      (view.ndim - skip).times do |dim|
+        args[2 + dim] = view.shape[skip + dim]
+        args[2 + MAX_DIMS + dim] = view.strides[skip + dim]
+      end
       args.to_unsafe_bytes
     end
 
