@@ -126,19 +126,34 @@ module Tensomite
       @slots = params
     end
 
+    # Each step after the first runs three fused kernels per parameter, for `m`,
+    # `v` and the update, with the composite's bits.
     protected def update(index : Int32, param : Tensor, grad : Tensor) : Tensor
-      m = grad * (1 - beta1)
-      v = grad * grad * (1 - beta2)
       if prev = @m[index]?
-        m = prev * beta1 + m
-        v = @v[index] * beta2 + v
+        m = Kernels::ADAMW_MOMENT.call(prev, grad, constant(param, beta1), constant(param, 1 - beta1))
+        v = Kernels::ADAMW_SECOND_MOMENT.call(@v[index], grad, constant(param, beta2), constant(param, 1 - beta2))
+      else
+        m = grad * (1 - beta1)
+        v = grad * grad * (1 - beta2)
       end
       m = keep(@m, index, m)
       v = keep(@v, index, v)
-      m_hat = m / (1 - beta1 ** steps)
-      v_hat = v / (1 - beta2 ** steps)
-      decayed = weight_decay == 0 || !decays?(index) ? param : param * (1 - lr * weight_decay)
-      decayed - m_hat / (v_hat.sqrt + eps) * lr
+      decay = weight_decay == 0 || !decays?(index) ? 1.0 : 1 - lr * weight_decay
+      Kernels::ADAMW_UPDATE.call(param, m, v, constant(param, decay), constant(param, 1 - beta1 ** steps),
+        constant(param, 1 - beta2 ** steps), constant(param, eps), constant(param, lr))
+    end
+
+    @constants = {} of {UInt64, Float64} => Tensor
+
+    # Returns *value* as a scalar on *param*'s device, shared by every use of
+    # it. A learning-rate schedule makes new values each step, so the table is
+    # cleared when it reaches 256 entries.
+    private def constant(param : Tensor, value : Float64) : Tensor
+      key = {param.device.object_id, value}
+      @constants[key]? || begin
+        @constants.clear if @constants.size >= 256
+        @constants[key] = Tensor.scalar(value, param.dtype, param.device)
+      end
     end
   end
 end
