@@ -778,7 +778,9 @@ static float scaled_at(device const float* a, int start, int stride, device cons
 }
 
 // Softmax of `x · scale + mask`, per row: the maximum, folded as row_max folds
-// it; then the exponentials and their sum; then the division.
+// it, while each thread writes `x · scale + mask` for the chunks it owns into
+// the output; then, from those, the exponentials and their sum; then the
+// division. Each thread rereads only what it wrote, so no barrier is needed.
 kernel void softmax_scaled_f32(device const float* a [[buffer(0)]],
                                device const float* m [[buffer(1)]],
                                device float* dst [[buffer(2)]],
@@ -802,8 +804,10 @@ kernel void softmax_scaled_f32(device const float* a [[buffer(0)]],
         if (c < chunks) {
             uint stop = min(n, (c + 1) * REDUCE_CHUNK);
             float acc = scaled_at(a, start, stride, m, mstart, mstride, c * REDUCE_CHUNK, scale, flags);
+            dst[base + c * REDUCE_CHUNK] = acc;
             for (uint s = c * REDUCE_CHUNK + 1; s < stop; s++) {
                 float x = scaled_at(a, start, stride, m, mstart, mstride, s, scale, flags);
+                dst[base + s] = x;
                 acc = x > acc ? x : acc;
             }
             partial[t] = acc;
@@ -820,7 +824,7 @@ kernel void softmax_scaled_f32(device const float* a [[buffer(0)]],
     top = shared;
     threadgroup_barrier(mem_flags::mem_threadgroup);
     float total;
-    ROW_SUM(total, float e = precise::exp(scaled_at(a, start, stride, m, mstart, mstride, s, scale, flags) - top); dst[base + s] = e; acc = acc + e;)
+    ROW_SUM(total, float e = precise::exp(dst[base + s] - top); dst[base + s] = e; acc = acc + e;)
     OWN_ELEMENTS(dst[base + s] = dst[base + s] / total;)
 }
 

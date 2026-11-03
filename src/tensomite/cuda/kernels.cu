@@ -692,7 +692,9 @@ __device__ float scaled_at(const float* a, int start, int stride, const float* m
 }
 
 // Softmax of `x · scale + mask`, per row: the maximum, folded as row_max folds
-// it; then the exponentials and their sum; then the division.
+// it, while each thread writes `x · scale + mask` for the chunks it owns into
+// the output; then, from those, the exponentials and their sum; then the
+// division. Each thread rereads only what it wrote, so no barrier is needed.
 extern "C" __global__ void softmax_scaled_f32(const float* a, const float* m, float* dst, View v, View vm,
                                               unsigned int n, float scale, unsigned int flags) {
     __shared__ float partial[REDUCE_THREADS];
@@ -708,8 +710,10 @@ extern "C" __global__ void softmax_scaled_f32(const float* a, const float* m, fl
         if (c < chunks) {
             unsigned int stop = min(n, (c + 1) * REDUCE_CHUNK);
             float acc = scaled_at(a, start, stride, m, mstart, mstride, c * REDUCE_CHUNK, scale, flags);
+            dst[base + c * REDUCE_CHUNK] = acc;
             for (unsigned int s = c * REDUCE_CHUNK + 1; s < stop; s++) {
                 float x = scaled_at(a, start, stride, m, mstart, mstride, s, scale, flags);
+                dst[base + s] = x;
                 acc = x > acc ? x : acc;
             }
             partial[t] = acc;
@@ -726,7 +730,7 @@ extern "C" __global__ void softmax_scaled_f32(const float* a, const float* m, fl
     top = shared;
     __syncthreads();
     float total;
-    ROW_SUM(total, float e = expf(scaled_at(a, start, stride, m, mstart, mstride, s, scale, flags) - top); dst[base + s] = e; acc = acc + e;)
+    ROW_SUM(total, float e = expf(dst[base + s] - top); dst[base + s] = e; acc = acc + e;)
     OWN_ELEMENTS(dst[base + s] = dst[base + s] / total;)
 }
 
