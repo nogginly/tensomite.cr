@@ -63,13 +63,17 @@ jobs:
           TENSOMITE_GPT2_DIR: models/gpt2
         run: crystal spec --release
 
+      - name: Run the server app's specs
+        run: crystal spec apps/server/spec
+
       - name: Type-check benchmarks and examples
         run: |
           for f in bench/*.cr examples/*.cr; do
             case "$f" in *cuda*) flags=-Dcuda ;; *) flags= ;; esac
             crystal build --no-codegen $flags "$f"
           done
-          for f in bench/gpt2.cr bench/gpt2_digest.cr; do crystal build --no-codegen -Dcuda "$f"; done
+          for f in bench/gpt2.cr bench/gpt2_digest.cr apps/server/server.cr; do crystal build --no-codegen -Dcuda "$f"; done
+          crystal build --no-codegen apps/server/server.cr
 
       # NVRTC needs no GPU, and the stand-in libcuda gives the CUDA device a GPU
       # in host memory that runs its kernels compiled as host C++: NVRTC compiles
@@ -89,7 +93,7 @@ jobs:
 
       - name: Check formatting (Linux)
         if: ${{ runner.os == 'Linux' }}
-        run: crystal tool format --check src spec bench examples
+        run: crystal tool format --check src spec bench examples apps
 
       - name: Build ameba when not cached (Linux)
         if: ${{ runner.os == 'Linux' }}
@@ -100,4 +104,4 @@ jobs:
 
       - name: Run static code analysis (Linux)
         if: ${{ runner.os == 'Linux' }}
-        run: bin/ameba src/ spec/ bench/ examples/
+        run: bin/ameba src/ spec/ bench/ examples/ apps/

@@ -27,7 +27,7 @@ Everything before a PR|all three of the above                               |`op
 
 All three must be clean before a PR.
 
-Benchmarks live in `bench/` and examples in `examples/`. Both run in release mode, for example `crystal run --release bench/matmul.cr`. CI type-checks, formats and lints them with everything else, but does not run them.
+Benchmarks live in `bench/` and examples in `examples/`. Both run in release mode, for example `crystal run --release bench/matmul.cr`. CI type-checks, formats and lints them with everything else, but does not run them. Apps live in `apps/`, each with its own specs, which CI runs: `crystal spec apps/server/spec`.
 
 **Training on Tiny Shakespeare** (the M5 exit):
 
@@ -94,6 +94,7 @@ spec/fixtures/              reference outputs and small reference files (see bel
 scripts/                    fixture generation, model download, document checks, emulate_metal/ (Metal kernels on the CPU) and cuda_stub/ (CUDA builds without a driver)
 bench/                      benchmarks, run with --release
 examples/                   programs using the library, such as training on Shakespeare and TUTORIAL.md's multiply.cr
+apps/server/                an inference server and CLI on the library, with its own specs (apps/server/README.md)
 models/, data/              downloaded weights and datasets (git-ignored)
 ```
 

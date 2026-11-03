@@ -404,6 +404,8 @@ sampler = Sampler.new(temperature: 0.8, top_k: 40, seed: 1)
 puts bpe.decode(model.generate(bpe.encode("Once upon a time"), 10, sampler))
 ```
 
+To stream text a token at a time, decode each token's bytes with `bpe.decode_bytes(ids)`, which may end partway through a character, and print only whole characters; `bpe.id?("<|endoftext|>")` gives GPT-2's end-of-text token, 50256, after which the model has finished. `apps/server` does both, serving a model over HTTP.
+
 `generate` returns only the new tokens. Without a sampler it picks the likeliest token each time (greedy), so the output is always the same. With a `Sampler` it picks at random, in proportion to each token's probability, among the `top_k` likeliest tokens (all of them when `top_k` is 0, the default). A `temperature` above 1 makes unlikely tokens more likely to be picked, and below 1 less likely. The same seed gives the same text.
 
 `GPT2` is a `Module`, and its parts have the names used in Hugging Face's file: `wte` and `wpe` (the token and position embeddings), `h.0` to `h.11` (the blocks, each with `ln_1`, `attn`, `ln_2` and `mlp`), and `ln_f`. So `model.named_params["h.0.attn.c_attn.weight"]` is that weight, and diagrams of the model use the same names.
