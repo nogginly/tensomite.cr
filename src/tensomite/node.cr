@@ -57,6 +57,12 @@ module Tensomite
     # scaled and offset by sources 1 and 2 (weight and bias, expanded to the
     # output shape), fused.
     LayerNorm
+    # Layer normalisation's gradients, fused, per row along the last axis, with
+    # `Node#epsilon`. With sources g, x and the weight (expanded to the output
+    # shape), the input's gradient `(ĝ - mean(ĝ) - x̂ · mean(ĝ · x̂)) / σ`, where
+    # `ĝ = g · weight`; with source x alone, the normalised input
+    # `x̂ = (x - mean) / σ`.
+    LayerNormGrad
     # Source 1 copied into the region `Node#source_view` of source 0, in place:
     # the node's buffer is source 0's, and every other element keeps its value.
     # See `Tensor#write`.

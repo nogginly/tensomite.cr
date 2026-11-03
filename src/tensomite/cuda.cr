@@ -461,15 +461,15 @@ module Tensomite
     private def launch(kernels : Kernels, node : Node, output : CUDABuffer) : Bool
       return false unless node.dtype.f32? && node.srcs.all? { |src| src.ndim <= MAX_DIMS }
       case node.op
-      when Op::Sum, Op::Max                                            then launch_reduce(kernels, node, output)
-      when Op::Cat                                                     then launch_cat(kernels, node, output)
-      when Op::Write                                                   then launch_write(kernels, node, output)
-      when Op::Gather, Op::ScatterAdd                                  then launch_rows(kernels, node, output)
-      when Op::Unview                                                  then return launch_unview(kernels, node, output)
-      when Op::MatMul                                                  then launch_matmul(kernels, node, output)
-      when Op::Softmax, Op::SoftmaxGrad, Op::LogSoftmax, Op::LayerNorm then launch_row_op(kernels, node, output)
-      when Op::Kernel                                                  then launch_kernel(node, output)
-      else                                                                  return launch_elementwise(kernels, node, output)
+      when Op::Sum, Op::Max                                                               then launch_reduce(kernels, node, output)
+      when Op::Cat                                                                        then launch_cat(kernels, node, output)
+      when Op::Write                                                                      then launch_write(kernels, node, output)
+      when Op::Gather, Op::ScatterAdd                                                     then launch_rows(kernels, node, output)
+      when Op::Unview                                                                     then return launch_unview(kernels, node, output)
+      when Op::MatMul                                                                     then launch_matmul(kernels, node, output)
+      when Op::Softmax, Op::SoftmaxGrad, Op::LogSoftmax, Op::LayerNorm, Op::LayerNormGrad then launch_row_op(kernels, node, output)
+      when Op::Kernel                                                                     then launch_kernel(node, output)
+      else                                                                                     return launch_elementwise(kernels, node, output)
       end
       true
     end
@@ -654,8 +654,8 @@ module Tensomite
       current.pointer
     end
 
-    # Softmax, SoftmaxGrad, LogSoftmax and LayerNorm: one block per row along the
-    # last axis, with a thread per chunk of the row up to `REDUCE_THREADS`.
+    # Softmax, SoftmaxGrad, LogSoftmax, LayerNorm and LayerNormGrad: one block per
+    # row along the last axis, with a thread per chunk of the row up to `REDUCE_THREADS`.
     private def launch_row_op(kernels : Kernels, node : Node, output : CUDABuffer) : Nil
       n = node.shape.last
       rows = node.size // n
@@ -667,12 +667,25 @@ module Tensomite
         epsilon = node.epsilon || raise Error.new("layernorm needs an epsilon")
         context.launch(kernels["layernorm_f32"], rows, threads, pointer(src), pointer(weight), pointer(bias), output.pointer,
           view_args(src.view), view_args(weight.view), view_args(bias.view), n.to_u32, epsilon.to_f32)
+      elsif node.op == Op::LayerNormGrad
+        launch_layernorm_grad(kernels, node, output, rows, threads)
       elsif node.op == Op::SoftmaxGrad || node.softmax_flags != 0
         launch_softmax_with(kernels, node, output, rows, threads)
       else
         name = node.op == Op::Softmax ? "softmax_f32" : "log_softmax_f32"
         context.launch(kernels[name], rows, threads, pointer(src), output.pointer, view_args(src.view), n.to_u32)
       end
+    end
+
+    # A layer norm's gradient of its input, from g, x and the weight, or its
+    # normalised input, from x alone, which stands in for g and the weight.
+    private def launch_layernorm_grad(kernels : Kernels, node : Node, output : CUDABuffer, rows : Int32, threads : Int32) : Nil
+      x = node.srcs.size == 1 ? node.srcs[0] : node.srcs[1]
+      g = node.srcs.size == 1 ? x : node.srcs[0]
+      weight = node.srcs[2]? || x
+      epsilon = node.epsilon || raise Error.new("layernorm needs an epsilon")
+      context.launch(kernels["layernorm_grad_f32"], rows, threads, pointer(g), pointer(x), pointer(weight), output.pointer,
+        view_args(g.view), view_args(x.view), view_args(weight.view), node.shape.last.to_u32, epsilon, (node.srcs.size == 1 ? 0 : 1).to_u32)
     end
 
     # A softmax with a scale or mask, or a softmax's gradient. The second
