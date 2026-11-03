@@ -67,6 +67,13 @@ module Tensomite
       strides.all?(&.zero?)
     end
 
+    # Returns the number of leading dimensions whose stride is 0, which repeat the
+    # rest of the view: all of them for a broadcast scalar, one for a bias
+    # expanded over rows.
+    def repeated_leading : Int32
+      strides.index { |stride| stride != 0 } || ndim
+    end
+
     # Returns the length of the runs of consecutive logical indices that a kernel
     # can walk with a fixed stride (`#run_stride`) in every one of *views*, which
     # share a shape of *size* elements: all of them when each view is dense or

@@ -481,10 +481,10 @@ module Tensomite
       n = node.size.to_u32
       if srcs.size == 2 && (name = BINARY[node.op]?)
         a, b = srcs
-        run(kernels[name], node.size, pointer(a), pointer(b), output.pointer, view_args(a.view), view_args(b.view), n)
+        run(kernels[name], node.size, pointer(a), pointer(b), output.pointer, elementwise_view_args(a.view), elementwise_view_args(b.view), n)
       elsif srcs.size == 1 && (name = UNARY[node.op]?)
         a = srcs.first
-        run(kernels[name], node.size, pointer(a), output.pointer, view_args(a.view), n)
+        run(kernels[name], node.size, pointer(a), output.pointer, elementwise_view_args(a.view), n)
       else
         return false
       end
@@ -685,7 +685,7 @@ module Tensomite
       params = Array(Void*).new(2 * srcs.size + 2)
       srcs.each { |src| params << Pointer.malloc(1, pointer(src)).as(Void*) }
       params << Pointer.malloc(1, output.pointer).as(Void*)
-      srcs.each { |src| params << Pointer.malloc(1, view_args(src.view)).as(Void*) }
+      srcs.each { |src| params << Pointer.malloc(1, elementwise_view_args(src.view)).as(Void*) }
       params << Pointer.malloc(1, node.size.to_u32).as(Void*)
       context.launch_params(compiled[kernel.cuda_name], {(node.size + BLOCK - 1) // BLOCK, 1, 1}, {BLOCK, 1}, params)
     end
@@ -737,6 +737,21 @@ module Tensomite
         args[2 + MAX_DIMS + dim] = view.strides[dim]
       end
       args[2 + 2 * MAX_DIMS] = view.dense? ? 1 : 0
+      args
+    end
+
+    # Returns *view* as `#view_args` does, for a kernel that reads it only through
+    # `offset_of`: without the leading dimensions it repeats, which add nothing to
+    # a position, so that a broadcast scalar needs no index arithmetic at all.
+    private def elementwise_view_args(view : View) : ViewArgs
+      skip = view.repeated_leading
+      return view_args(view) if skip == 0
+      args = ViewArgs.new(0)
+      args[0], args[1] = view.ndim - skip, view.offset
+      (view.ndim - skip).times do |dim|
+        args[2 + dim] = view.shape[skip + dim]
+        args[2 + MAX_DIMS + dim] = view.strides[skip + dim]
+      end
       args
     end
 
