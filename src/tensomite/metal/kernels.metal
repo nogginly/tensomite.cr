@@ -644,6 +644,16 @@ typedef decltype(matmul_tiled<32, 64, 32, 4, 4>) matmul_tiled_32x64_t;
 template [[host_name("matmul_tiled_32x32_f32")]] kernel matmul_tiled_32_t matmul_tiled<32, 32, 64, 4, 4>;
 template [[host_name("matmul_tiled_64x64_f32")]] kernel matmul_tiled_64_t matmul_tiled<64, 64, 32, 4, 4>;
 template [[host_name("matmul_tiled_32x64_f32")]] kernel matmul_tiled_32x64_t matmul_tiled<32, 64, 32, 4, 4>;
+// Larger patches per thread: each value read from threadgroup memory feeds more
+// products, at the cost of registers.
+typedef decltype(matmul_tiled<64, 64, 32, 8, 4>) matmul_tiled_64p84_t;
+typedef decltype(matmul_tiled<64, 64, 32, 8, 8>) matmul_tiled_64p88_t;
+typedef decltype(matmul_tiled<128, 64, 16, 8, 8>) matmul_tiled_128x64p88_t;
+typedef decltype(matmul_tiled<64, 128, 16, 8, 8>) matmul_tiled_64x128p88_t;
+template [[host_name("matmul_tiled_64x64p8x4_f32")]] kernel matmul_tiled_64p84_t matmul_tiled<64, 64, 32, 8, 4>;
+template [[host_name("matmul_tiled_64x64p8x8_f32")]] kernel matmul_tiled_64p88_t matmul_tiled<64, 64, 32, 8, 8>;
+template [[host_name("matmul_tiled_128x64p8x8_f32")]] kernel matmul_tiled_128x64p88_t matmul_tiled<128, 64, 16, 8, 8>;
+template [[host_name("matmul_tiled_64x128p8x8_f32")]] kernel matmul_tiled_64x128p88_t matmul_tiled<64, 128, 16, 8, 8>;
 
 #if __METAL_VERSION__ >= 300
 // Atomic, for measurement only: each thread adds its chunk sums straight into the

@@ -27,7 +27,7 @@ Everything before a PR|all three of the above                               |`op
 
 All three must be clean before a PR.
 
-Benchmarks live in `bench/` and examples in `examples/`. Both run in release mode, for example `crystal run --release bench/matmul.cr`. CI type-checks, formats and lints them with everything else, but does not run them.
+Benchmarks live in `bench/` and examples in `examples/`. Both run in release mode, for example `crystal run --release bench/matmul.cr`. CI type-checks, formats and lints them with everything else, but does not run them. `bench/matmul_tiles.cr`, on Apple Silicon, times Metal's tiled matmul with each `Metal::MatMulTile` on a training step's products and checks each against `Split` bit for bit.
 
 **Training on Tiny Shakespeare** (the M5 exit):
 

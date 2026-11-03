@@ -62,7 +62,7 @@ module Tensomite
       Op::Exp => "exp_f32", Op::Log => "log_f32", Op::Tanh => "tanh_f32", Op::Sqrt => "sqrt_f32",
       Op::Copy => "copy_f32",
     }
-    private OTHER          = %w[copy_into_f32 sum_f32 max_f32 sum_short_f32 max_short_f32 gather_f32 fill_zero_f32 scatter_add_f32 scatter_add_column_f32 unview_f32 matmul_f32 matmul_split_f32 matmul_tiled_chunks_64x64_f32 matmul_chunk_sums_f32 matmul_tiled_32x32_f32 matmul_tiled_64x64_f32 matmul_tiled_32x64_f32 softmax_f32 softmax_scaled_f32 softmax_grad_f32 log_softmax_f32 layernorm_f32 layernorm_grad_f32]
+    private OTHER          = %w[copy_into_f32 sum_f32 max_f32 sum_short_f32 max_short_f32 gather_f32 fill_zero_f32 scatter_add_f32 scatter_add_column_f32 unview_f32 matmul_f32 matmul_split_f32 matmul_tiled_chunks_64x64_f32 matmul_chunk_sums_f32 matmul_tiled_32x32_f32 matmul_tiled_64x64_f32 matmul_tiled_32x64_f32 matmul_tiled_64x64p8x4_f32 matmul_tiled_64x64p8x8_f32 matmul_tiled_128x64p8x8_f32 matmul_tiled_64x128p8x8_f32 softmax_f32 softmax_scaled_f32 softmax_grad_f32 log_softmax_f32 layernorm_f32 layernorm_grad_f32]
     private OPTIONAL       = %w[matmul_atomic_f32]
     private COLS           =  32
     private SLICES         =   8
@@ -96,24 +96,43 @@ module Tensomite
       Auto
     end
 
-    # The outputs a threadgroup of the tiled matmul computes, rows by columns.
+    # The outputs a threadgroup of the tiled matmul computes, rows by columns,
+    # and the patch of them each thread computes: 4 x 4 unless the name gives
+    # another, as `P8x8` does.
     enum MatMulTile
       T32x32
       T64x64
       T32x64
+      T64x64P8x4
+      T64x64P8x8
+      T128x64P8x8
+      T64x128P8x8
 
       # Returns the block's rows and columns.
       def block : {Int32, Int32}
         case self
-        in .t32x32? then {32, 32}
-        in .t64x64? then {64, 64}
-        in .t32x64? then {32, 64}
+        in .t32x32?                               then {32, 32}
+        in .t64x64?, .t64x64_p8x4?, .t64x64_p8x8? then {64, 64}
+        in .t32x64?                               then {32, 64}
+        in .t128x64_p8x8?                         then {128, 64}
+        in .t64x128_p8x8?                         then {64, 128}
+        end
+      end
+
+      # Returns the rows and columns of each thread's patch.
+      def patch : {Int32, Int32}
+        case self
+        in .t32x32?, .t64x64?, .t32x64?                  then {4, 4}
+        in .t64x64_p8x4?                                 then {8, 4}
+        in .t64x64_p8x8?, .t128x64_p8x8?, .t64x128_p8x8? then {8, 8}
         end
       end
 
       protected def kernel : String
         rows, cols = block
-        "matmul_tiled_#{rows}x#{cols}_f32"
+        patch_rows, patch_cols = patch
+        suffix = patch == {4, 4} ? "" : "p#{patch_rows}x#{patch_cols}"
+        "matmul_tiled_#{rows}x#{cols}#{suffix}_f32"
       end
     end
 
@@ -130,7 +149,7 @@ module Tensomite
     # many threadgroups in all.
     private TWO_PASS_GROUPS = 256
 
-    # Each thread of the tiled matmul computes a patch of this many rows and columns.
+    # Each thread of `TiledTwoPass` computes a patch of this many rows and columns.
     private TILE_PATCH = 4
 
     # Returns true when the system has a Metal GPU. Some virtual machines, such as
@@ -410,7 +429,7 @@ module Tensomite
     # `Split` and `Atomic` launch one threadgroup per output row and block of
     # `COLS` columns, with `SLICES` threads per column, each summing chunks of `k`.
     # `Tiled` launches one threadgroup per block of `#matmul_tile` outputs of each
-    # batch matrix, with a thread per `TILE_PATCH` x `TILE_PATCH` patch.
+    # batch matrix, with a thread per patch of `MatMulTile#patch` outputs.
     private def encode_matmul(node : Node, output : MetalBuffer) : Nil
       a, b, bias = node.srcs[0], node.srcs[1], node.srcs[2]?
       m, k, n = a.shape[-2], a.shape[-1], b.shape[-1]
@@ -426,8 +445,9 @@ module Tensomite
         encode_tiled_two_pass(node, output, m, k, n)
       in .tiled?
         rows, cols = matmul_tile.block
+        patch_rows, patch_cols = matmul_tile.patch
         groups = {(n + cols - 1) // cols, (m + rows - 1) // rows, node.size // (m * n)}
-        dispatch_groups(matmul_tile.kernel, groups, {cols // TILE_PATCH, rows // TILE_PATCH}, buffers, constants)
+        dispatch_groups(matmul_tile.kernel, groups, {cols // patch_cols, rows // patch_rows}, buffers, constants)
       in .split?, .auto?
         dispatch_groups("matmul_split_f32", {(n + COLS - 1) // COLS, node.size // n}, {COLS, SLICES}, buffers, constants)
       in .atomic?

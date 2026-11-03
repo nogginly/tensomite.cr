@@ -1,7 +1,7 @@
 // Checks that the tiled Metal matmul gives split-K's bits, emulated on the CPU.
 // Built and run by run.sh, which extracts the kernels into kernels.inc.
 //
-// Each case runs matmul_split_f32, every matmul_tiled variant, the two passes of
+// Each case runs matmul_split_f32, every matmul_tiled variant tensomite instantiates, the two passes of
 // matmul_tiled_chunks and matmul_chunk_sums_f32 with runs of 1, 3 and every
 // chunk, and, as a control, the serial matmul_f32, which adds over k in plain
 // index order and so should differ from the others whenever k is more than one
@@ -62,6 +62,7 @@ int main() {
     uint dims[4] = {c.m, c.k, c.n, 1};
     uint rows = c.batch * c.m;
     std::vector<float> split(rows * c.n), t32(rows * c.n), t64(rows * c.n), t3264(rows * c.n);
+    std::vector<float> p84(rows * c.n), p88(rows * c.n), p128x64(rows * c.n), p64x128(rows * c.n);
     launch({(c.n + COLS - 1) / COLS, rows, 1}, {COLS, SLICES}, [&](uint3 g, uint2 t) {
       matmul_split_f32(a.data(), b.data(), split.data(), bias.data(), va, vb, dims, uint2{g.x, g.y}, t); });
     launch({(c.n + 31) / 32, (c.m + 31) / 32, c.batch}, {8, 8}, [&](uint3 g, uint2 t) {
@@ -70,6 +71,14 @@ int main() {
       matmul_tiled<64, 64, 32, 4, 4>(a.data(), b.data(), t64.data(), bias.data(), va, vb, dims, g, uint3{t.x, t.y, 0}); });
     launch({(c.n + 63) / 64, (c.m + 31) / 32, c.batch}, {16, 8}, [&](uint3 g, uint2 t) {
       matmul_tiled<32, 64, 32, 4, 4>(a.data(), b.data(), t3264.data(), bias.data(), va, vb, dims, g, uint3{t.x, t.y, 0}); });
+    launch({(c.n + 63) / 64, (c.m + 63) / 64, c.batch}, {16, 8}, [&](uint3 g, uint2 t) {
+      matmul_tiled<64, 64, 32, 8, 4>(a.data(), b.data(), p84.data(), bias.data(), va, vb, dims, g, uint3{t.x, t.y, 0}); });
+    launch({(c.n + 63) / 64, (c.m + 63) / 64, c.batch}, {8, 8}, [&](uint3 g, uint2 t) {
+      matmul_tiled<64, 64, 32, 8, 8>(a.data(), b.data(), p88.data(), bias.data(), va, vb, dims, g, uint3{t.x, t.y, 0}); });
+    launch({(c.n + 63) / 64, (c.m + 127) / 128, c.batch}, {8, 16}, [&](uint3 g, uint2 t) {
+      matmul_tiled<128, 64, 16, 8, 8>(a.data(), b.data(), p128x64.data(), bias.data(), va, vb, dims, g, uint3{t.x, t.y, 0}); });
+    launch({(c.n + 127) / 128, (c.m + 63) / 64, c.batch}, {16, 8}, [&](uint3 g, uint2 t) {
+      matmul_tiled<64, 128, 16, 8, 8>(a.data(), b.data(), p64x128.data(), bias.data(), va, vb, dims, g, uint3{t.x, t.y, 0}); });
     uint count = rows * c.n;
     uint chunks = (c.k + CHUNK - 1) / CHUNK;
     std::vector<std::vector<float>> passes;
@@ -93,6 +102,8 @@ int main() {
     int bad = 0;
     for (size_t i = 0; i < split.size(); i++)
       if (bits(split[i]) != bits(t32[i]) || bits(split[i]) != bits(t64[i]) || bits(split[i]) != bits(t3264[i]) ||
+          bits(split[i]) != bits(p84[i]) || bits(split[i]) != bits(p88[i]) || bits(split[i]) != bits(p128x64[i]) ||
+          bits(split[i]) != bits(p64x128[i]) ||
           std::any_of(passes.begin(), passes.end(), [&](auto& p) { return bits(p[i]) != bits(split[i]); })) {
         if (bad++ < 3) printf("  mismatch at %zu: split %08x t32 %08x t64 %08x t32x64 %08x\n", i, bits(split[i]), bits(t32[i]), bits(t64[i]), bits(t3264[i]));
       }
