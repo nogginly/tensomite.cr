@@ -524,11 +524,12 @@ The expression language is deliberately small: `+`, `-` (binary and unary), `*`,
 
 - **On host devices,** each row is one loop that does the composite's operations in the composite's order, so a fused op gives the composite's bits. The composites in `spec/row_ops_spec.cr` are the oracles.
 - **On Metal,** each row gets a threadgroup that makes three passes over it: reduce, write, normalise. The reductions are the chunked ones of "Reductions in chunks", so a softmax row padded with -∞, as a masked attention row is, keeps its bits, and prefill still equals decode. In the last pass, each thread rewrites only the elements it wrote itself.
-- **Backward rules** are built from primitives and checked by finite differences:
+- **Attention's scale and mask (Decision BO).** `softmax(scale: s, mask: m)` is the softmax of `x · s + m`, with `m` broadcast to `x`'s shape. Along the last axis it is one `Softmax` node with the mask as a second source and the scale on the node; each kernel computes `x · s`, then `+ m`, as separate statements, as it reads each element, so the bits are those of a `Mul`, an `Add` and a `Softmax`. Attention's scores no longer make two extra passes over a `[batch, heads, length, positions]` tensor. With `SoftmaxGrad`, measured on the larger model: a step takes 19.6 ms on the M5 Pro, from 20.5, and 13.6 on the GB10, from 14.3. The GB10's `Softmax` is unchanged at 0.65 ms, as reading the mask costs it little more traffic; the M5 Pro's grows from 0.43 to 0.59, I think from finding each mask element through its view twice, once per pass, which Metal pays for in arithmetic (Decision BN). `SoftmaxGrad` takes 0.25 and 0.36 ms for the four layers, against about 1.2 for the five ops it replaced.
+- **Backward rules** are checked by finite differences. Softmax's is one fused op, `SoftmaxGrad`, from the output's gradient `g` and the softmax's output `y`: it adds `g · y` along each row in the order a `Sum` adds them (sequentially on host devices, in chunks of 16 on the GPUs), then writes `y · (g - Σ)`, times the scale, so its bits are those of the five primitives it replaces. The mask's gradient is the same without the scale. The others are built from primitives:
 
   Op         |Gradient of the input
   -----------|-----------------------------------------------------------------------
-  `Softmax`  |`y · (g - Σ g·y)`, per row
+  `Softmax`  |`y · (g - Σ g·y) · s`, per row, fused
   `LogSoftmax`|`g - exp(y) · Σ g`, per row
   `LayerNorm`|`(ĝ - mean(ĝ) - x̂ · mean(ĝ · x̂)) / σ`, with `ĝ = g · weight` and `x̂ = (x - mean) / σ`
 

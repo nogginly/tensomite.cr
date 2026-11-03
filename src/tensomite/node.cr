@@ -43,8 +43,14 @@ module Tensomite
     ScatterAdd
     # `Node#kernel` applied elementwise to the sources, which have the output shape.
     Kernel
-    # Softmax of each row along the last axis, fused.
+    # Softmax of each row along the last axis, fused: of source 0 times
+    # `Node#scale` when it has one, plus source 1 (a mask, expanded to the output
+    # shape) when there is one.
     Softmax
+    # The gradient of a softmax's input, fused, per row along the last axis:
+    # `y · (g - Σ g·y)`, times `Node#scale` when it has one, from the gradient
+    # (source 0) and the softmax's output (source 1).
+    SoftmaxGrad
     # Log of the softmax of each row along the last axis, fused.
     LogSoftmax
     # Layer normalisation of each row along the last axis, by `Node#epsilon`, then
@@ -74,13 +80,23 @@ module Tensomite
     getter kernel : Kernel?
     # The epsilon a `LayerNorm` node adds to each row's variance.
     getter epsilon : Float32?
+    # The factor a `Softmax` node multiplies its input by, or a `SoftmaxGrad` node
+    # its result by.
+    getter scale : Float32?
     getter buffer : Buffer?
     # The scope the node was built in (see `Tensomite.scope`).
     getter scope : Scope? = Scope.current
     # A name for diagrams, usually given to leaves such as a model's weights.
     property name : String?
 
-    def initialize(@op : Op, @srcs : Array(Tensor), @shape, @dtype, @device, @axis = nil, @source_view = nil, @kernel = nil, @epsilon = nil)
+    def initialize(@op : Op, @srcs : Array(Tensor), @shape, @dtype, @device, @axis = nil, @source_view = nil, @kernel = nil, @epsilon = nil, @scale = nil)
+    end
+
+    # Returns the options of a `Softmax` or `SoftmaxGrad` node as the GPU kernels
+    # take them: bit 1 when it has a scale, bit 2 when a softmax has a mask. A
+    # plain softmax has none.
+    def softmax_flags : UInt32
+      (scale ? 1_u32 : 0_u32) | (op == Op::Softmax && srcs.size > 1 ? 2_u32 : 0_u32)
     end
 
     def initialize(buffer : Buffer, @shape, @dtype, @device)

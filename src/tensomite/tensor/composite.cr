@@ -3,11 +3,29 @@ module Tensomite
     # Returns the softmax along *axis*: `exp(x - max) / sum(exp(x - max))`.
     # Subtracting the maximum keeps `exp` from overflowing without changing the result.
     #
-    # Along the last axis it is one fused op (`Op::Softmax`), which computes what
-    # the composite computes, operation for operation, on host devices.
-    def softmax(axis : Int32 = -1) : Tensor
-      return row_op(Op::Softmax) if fusable_row?(axis)
-      e = (self - max(axis, keepdims: true)).exp
+    # With *scale* or *mask*, `x` is this tensor times *scale*, plus *mask*
+    # broadcast to its shape, as attention scores are:
+    #
+    # ```
+    # scores.softmax(scale: 1 / Math.sqrt(head_width), mask: Tensor.causal_mask(n, n))
+    # ```
+    #
+    # Along the last axis it is one fused op (`Op::Softmax`), with the scale and
+    # mask applied as it reads each element, and its gradient is another
+    # (`Op::SoftmaxGrad`); both compute what the composite computes, operation
+    # for operation, so they give its bits.
+    def softmax(axis : Int32 = -1, *, scale : Number? = nil, mask : Tensor? = nil) : Tensor
+      if fusable_row?(axis)
+        if mask.nil? || View.broadcast_shape(shape, mask.shape) == shape
+          check_compatible("softmax", {mask}) if mask
+          srcs = mask ? [self, mask.expand(shape)] : [self]
+          return Tensor.lazy(Node.new(Op::Softmax, srcs, shape, dtype, device, scale: scale.try(&.to_f32)))
+        end
+      end
+      x = scale ? self * scale : self
+      x = x + mask if mask
+      return x.softmax(axis) if scale || mask
+      e = (x - x.max(axis, keepdims: true)).exp
       e / e.sum(axis, keepdims: true)
     end
 

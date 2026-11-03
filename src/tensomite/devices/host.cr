@@ -112,7 +112,7 @@ module Tensomite
       in Op::GreaterEqual then binary(T, node, dst) { |x, y| x >= y ? T.new(1) : T.zero }
       in Op::Unview       then unview(T, node, dst)
       in Op::ScatterAdd   then scatter_add(T, node, dst)
-      in Op::Softmax, Op::LogSoftmax, Op::LayerNorm
+      in Op::Softmax, Op::SoftmaxGrad, Op::LogSoftmax, Op::LayerNorm
         rows(node, Slice.new(dst.to_unsafe.as(Float32*), dst.size))
       in Op::Kernel
         kernel = node.kernel || raise Error.new("kernel node without a kernel")
@@ -235,8 +235,11 @@ module Tensomite
     # composite's operations in the composite's order, rounding each to `Float32`,
     # so it gives the composite's bits:
     #
-    # - Softmax: the maximum, folded from the first element; then `e = exp(x - max)`
-    #   and their sum, folded from zero; then `e / sum`.
+    # - Softmax: `x · scale + mask`, when it has them; the maximum, folded from the
+    #   first element; then `e = exp(x - max)` and their sum, folded from zero;
+    #   then `e / sum`.
+    # - SoftmaxGrad: the sum of `g · y`, folded from zero; then `y · (g - sum)`,
+    #   times the scale when it has one.
     # - LogSoftmax: `shifted = x - max`; the sum of `exp(shifted)`; then
     #   `shifted - log(sum)`.
     # - LayerNorm: `mean = sum / n`; `centred = x - mean`; `variance =
@@ -253,26 +256,35 @@ module Tensomite
         base = row * n
         pos = src.view.offset_of(base)
         case node.op
-        when Op::Softmax, Op::LogSoftmax
+        when Op::Softmax
+          if node.scale || node.srcs.size > 1
+            scaled_softmax_row(node, xs, pos, stride, dst, base, n)
+            next
+          end
           HostDevice.check_run(pos, n, stride, xs.size) { describe(node) }
           row_in, row_out = xs.to_unsafe + pos, dst.to_unsafe + base
           top = row_in[0]
           (1...n).each { |j| top = (v = row_in[j * stride]) > top ? v : top }
           total = 0f32
-          if node.op == Op::Softmax
-            if stride == 1
-              n.times { |j| row_out[j] = Maths.exp(row_in[j] - top) }
-            else
-              n.times { |j| row_out[j] = Maths.exp(row_in[j * stride] - top) }
-            end
-            n.times { |j| total += row_out[j] }
-            n.times { |j| row_out[j] = row_out[j] / total }
+          if stride == 1
+            n.times { |j| row_out[j] = Maths.exp(row_in[j] - top) }
           else
-            n.times { |j| row_out[j] = row_in[j * stride] - top }
-            n.times { |j| total += Maths.exp(row_out[j]) }
-            log_total = Maths.log(total)
-            n.times { |j| row_out[j] = row_out[j] - log_total }
+            n.times { |j| row_out[j] = Maths.exp(row_in[j * stride] - top) }
           end
+          n.times { |j| total += row_out[j] }
+          n.times { |j| row_out[j] = row_out[j] / total }
+        when Op::SoftmaxGrad
+          softmax_grad_row(node, xs, pos, stride, dst, base, n)
+        when Op::LogSoftmax
+          HostDevice.check_run(pos, n, stride, xs.size) { describe(node) }
+          row_in, row_out = xs.to_unsafe + pos, dst.to_unsafe + base
+          top = row_in[0]
+          (1...n).each { |j| top = (v = row_in[j * stride]) > top ? v : top }
+          total = 0f32
+          n.times { |j| row_out[j] = row_in[j * stride] - top }
+          n.times { |j| total += Maths.exp(row_out[j]) }
+          log_total = Maths.log(total)
+          n.times { |j| row_out[j] = row_out[j] - log_total }
         else
           weight, bias = node.srcs[1], node.srcs[2]
           ws, bs = elements(Float32, weight), elements(Float32, bias)
@@ -287,6 +299,46 @@ module Tensomite
           std = Math.sqrt(squares / count + epsilon)
           n.times { |j| dst[base + j] = dst[base + j] / std * ws[pw + j * sw] + bs[pb + j * sb] }
         end
+      end
+    end
+
+    # Writes the softmax of `x · scale + mask` for the row at *base*: each of
+    # those operations rounded as its own op would round it, into the output
+    # row, then the softmax of the row in place.
+    private def scaled_softmax_row(node : Node, xs : Slice(Float32), pos : Int32, stride : Int32,
+                                   dst : Slice(Float32), base : Int32, n : Int32) : Nil
+      scale = node.scale
+      mask = node.srcs[1]?
+      ms = mask ? elements(Float32, mask) : xs
+      pm, sm = mask ? {mask.view.offset_of(base), mask.view.run_stride} : {0, 0}
+      row_out = dst.to_unsafe + base
+      n.times do |j|
+        x = xs[pos + j * stride]
+        x = x * scale if scale
+        x = x + ms[pm + j * sm] if mask
+        row_out[j] = x
+      end
+      top = row_out[0]
+      (1...n).each { |j| top = (v = row_out[j]) > top ? v : top }
+      n.times { |j| row_out[j] = Maths.exp(row_out[j] - top) }
+      total = 0f32
+      n.times { |j| total += row_out[j] }
+      n.times { |j| row_out[j] = row_out[j] / total }
+    end
+
+    # Writes `y · (g - Σ g·y)`, times the scale when the node has one, for the
+    # row at *base*, from the gradient *gs* and the softmax's output (source 1).
+    private def softmax_grad_row(node : Node, gs : Slice(Float32), pg : Int32, sg : Int32,
+                                 dst : Slice(Float32), base : Int32, n : Int32) : Nil
+      y = node.srcs[1]
+      ys, py, sy = elements(Float32, y), y.view.offset_of(base), y.view.run_stride
+      total = 0f32
+      n.times { |j| total += gs[pg + j * sg] * ys[py + j * sy] }
+      scale = node.scale
+      row_out = dst.to_unsafe + base
+      n.times do |j|
+        value = ys[py + j * sy] * (gs[pg + j * sg] - total)
+        row_out[j] = scale ? value * scale : value
       end
     end
 

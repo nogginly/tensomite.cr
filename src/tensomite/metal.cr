@@ -62,7 +62,7 @@ module Tensomite
       Op::Exp => "exp_f32", Op::Log => "log_f32", Op::Tanh => "tanh_f32", Op::Sqrt => "sqrt_f32",
       Op::Copy => "copy_f32",
     }
-    private OTHER          = %w[copy_into_f32 sum_f32 max_f32 sum_short_f32 max_short_f32 gather_f32 fill_zero_f32 scatter_add_f32 scatter_add_column_f32 unview_f32 matmul_f32 matmul_split_f32 matmul_tiled_chunks_64x64_f32 matmul_chunk_sums_f32 matmul_tiled_32x32_f32 matmul_tiled_64x64_f32 matmul_tiled_32x64_f32 softmax_f32 log_softmax_f32 layernorm_f32]
+    private OTHER          = %w[copy_into_f32 sum_f32 max_f32 sum_short_f32 max_short_f32 gather_f32 fill_zero_f32 scatter_add_f32 scatter_add_column_f32 unview_f32 matmul_f32 matmul_split_f32 matmul_tiled_chunks_64x64_f32 matmul_chunk_sums_f32 matmul_tiled_32x32_f32 matmul_tiled_64x64_f32 matmul_tiled_32x64_f32 softmax_f32 softmax_scaled_f32 softmax_grad_f32 log_softmax_f32 layernorm_f32]
     private OPTIONAL       = %w[matmul_atomic_f32]
     private COLS           =  32
     private SLICES         =   8
@@ -357,15 +357,15 @@ module Tensomite
     private def encode(node : Node, output : MetalBuffer) : Bool
       return false unless node.dtype.f32? && node.srcs.all? { |src| src.ndim <= MAX_DIMS }
       case node.op
-      when Op::Sum, Op::Max                           then encode_reduce(node, output)
-      when Op::Cat                                    then encode_cat(node, output)
-      when Op::Write                                  then encode_write(node, output)
-      when Op::Gather, Op::ScatterAdd                 then encode_rows(node, output)
-      when Op::Unview                                 then return encode_unview(node, output)
-      when Op::MatMul                                 then encode_matmul(node, output)
-      when Op::Kernel                                 then encode_kernel(node, output)
-      when Op::Softmax, Op::LogSoftmax, Op::LayerNorm then encode_row_op(node, output)
-      else                                                 return encode_elementwise(node, output)
+      when Op::Sum, Op::Max                                            then encode_reduce(node, output)
+      when Op::Cat                                                     then encode_cat(node, output)
+      when Op::Write                                                   then encode_write(node, output)
+      when Op::Gather, Op::ScatterAdd                                  then encode_rows(node, output)
+      when Op::Unview                                                  then return encode_unview(node, output)
+      when Op::MatMul                                                  then encode_matmul(node, output)
+      when Op::Kernel                                                  then encode_kernel(node, output)
+      when Op::Softmax, Op::SoftmaxGrad, Op::LogSoftmax, Op::LayerNorm then encode_row_op(node, output)
+      else                                                                  return encode_elementwise(node, output)
       end
       true
     end
@@ -593,8 +593,8 @@ module Tensomite
       end
     end
 
-    # Softmax, LogSoftmax and LayerNorm: one threadgroup per row, with a thread per
-    # chunk of the row up to `REDUCE_THREADS`.
+    # Softmax, SoftmaxGrad, LogSoftmax and LayerNorm: one threadgroup per row,
+    # with a thread per chunk of the row up to `REDUCE_THREADS`.
     private def encode_row_op(node : Node, output : MetalBuffer) : Nil
       n = node.shape.last
       rows = node.size // n
@@ -606,10 +606,27 @@ module Tensomite
         epsilon = node.epsilon || raise Error.new("layernorm needs an epsilon")
         dispatch_groups("layernorm_f32", {rows, 1}, {threads, 1}, [mtl(src), mtl(weight), mtl(bias), output.mtl],
           [view_args(src.view), view_args(weight.view), view_args(bias.view), u32(n), Slice[epsilon].to_unsafe_bytes])
+      when Op::SoftmaxGrad then encode_softmax_with(node, output, rows, threads)
       else
-        name = node.op == Op::Softmax ? "softmax_f32" : "log_softmax_f32"
-        dispatch_groups(name, {rows, 1}, {threads, 1}, [mtl(src), output.mtl], [view_args(src.view), u32(n)])
+        if node.softmax_flags != 0
+          encode_softmax_with(node, output, rows, threads)
+        else
+          name = node.op == Op::Softmax ? "softmax_f32" : "log_softmax_f32"
+          dispatch_groups(name, {rows, 1}, {threads, 1}, [mtl(src), output.mtl], [view_args(src.view), u32(n)])
+        end
       end
+    end
+
+    # A softmax with a scale or mask, or a softmax's gradient. The second
+    # source, a mask or the softmax's output, is the first again when there is
+    # none.
+    private def encode_softmax_with(node : Node, output : MetalBuffer, rows : Int32, threads : Int32) : Nil
+      src = node.srcs.first
+      other = node.srcs[1]? || src
+      name = node.op == Op::Softmax ? "softmax_scaled_f32" : "softmax_grad_f32"
+      dispatch_groups(name, {rows, 1}, {threads, 1}, [mtl(src), mtl(other), output.mtl],
+        [view_args(src.view), view_args(other.view), u32(node.shape.last), Slice[node.scale || 1f32].to_unsafe_bytes,
+         Slice[node.softmax_flags].to_unsafe_bytes])
     end
 
     # Kernel: one thread per element, running the kernel's generated MSL, which is

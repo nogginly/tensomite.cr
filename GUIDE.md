@@ -152,6 +152,7 @@ Method                               |Use
 -------------------------------------|------------------------------------------------------------------------
 `gelu`                               |the GELU activation (tanh approximation), as in GPT-2                   
 `softmax(axis = -1)`                 |turns scores into probabilities that sum to 1                           
+`softmax(scale: s, mask: m)`         |the softmax of `x · s + m`, as attention takes it, in one fused op      
 `log_softmax(axis = -1)`             |the log of `softmax`, computed stably                                   
 `layernorm(weight, bias, eps = 1e-5)`|normalises each row to mean 0 and variance 1, then scales and shifts    
 `cross_entropy(targets)`             |the mean loss of `[n, classes]` scores against `[n]` `I32` class indices

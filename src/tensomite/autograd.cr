@@ -138,8 +138,11 @@ module Tensomite
       in Op::Unview
         [through(g, node.source_view || raise Error.new("unview needs a source view"))] of Tensor?
       in Op::Softmax
-        # dx = y · (g - Σ g·y), per row.
-        [result * (g - (g * result).sum(-1, keepdims: true))] of Tensor?
+        # dx = y · (g - Σ g·y) · scale, per row; the mask's gradient lacks the scale.
+        grads = [softmax_grad(g, result, node.scale)] of Tensor?
+        srcs.size > 1 ? grads << (node.scale ? softmax_grad(g, result, nil) : grads.first) : grads
+      in Op::SoftmaxGrad
+        raise Error.new("softmax's gradient has no gradient")
       in Op::LogSoftmax
         # dx = g - exp(y) · Σ g, per row.
         [g - result.exp * g.sum(-1, keepdims: true)] of Tensor?
@@ -175,6 +178,12 @@ module Tensomite
       scaled = g * weight
       dx = (scaled - scaled.mean(-1, keepdims: true) - normalised * (scaled * normalised).mean(-1, keepdims: true)) / std
       [dx, g * normalised, g] of Tensor?
+    end
+
+    # Returns the gradient of a softmax's input from *g* and its output *y*:
+    # `y · (g - Σ g·y)` per row, times *scale* when given, as one fused op.
+    private def self.softmax_grad(g : Tensor, y : Tensor, scale : Float32?) : Tensor
+      Tensor.lazy(Node.new(Op::SoftmaxGrad, [g, y], y.shape, y.dtype, y.device, scale: scale))
     end
 
     # Returns *g*, the result of reducing over *axis* (all axes when `nil`), broadcast
