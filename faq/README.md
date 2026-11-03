@@ -15,6 +15,8 @@ flowchart LR
     autograd --> modules["Modules"]
     order --> decode["Decoding and the KV cache"]
     runtime --> gpuspeed
+    gpuspeed --> training["Fusion in training"]
+    fusion --> training
     style order stroke:#1971c2,stroke-width:3px
 ```
 
@@ -122,6 +124,17 @@ Question                                   |In one line
 [Q-AP](q-ap-narrower-blocks.md)            |Why did narrower blocks hurt mlp in but not mlp out? More blocks help only a product short of them; shorter reads hurt all.
 [Q-AQ](q-aq-predicting-the-profile.md)     |Where would Metal's 59 ms go? One slow kernel, matmuls spread wide, and the GPU waiting on the host.                       
 [Q-AS](q-as-loading-ahead.md)              |How can loading ahead help if no addition happens sooner? The time was waiting for memory, not adding.                     
+
+## Fusion in training
+
+The running example: one training step of the larger Shakespeare model on the GB10 and the M5 Pro, followed from 925 launches to 334.
+
+Question                                        |In one line                                                                                                                    
+------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------
+[Q-AU](q-au-fewer-launches-less-saving.md)      |Why did fusing AdamW save less than its launches suggested? Each fused kernel cost more, and launches had overlapped with work.
+[Q-AV](q-av-which-kernel-the-fast-path-helps.md)|Which kernels gain when broadcast scalars skip their divisions? Those that did the most of them, on the GPU that paid for them.
+[Q-AW](q-aw-counting-passes-over-memory.md)     |How much should fusing softmax's scale and mask save? Count the passes over memory: about 0.9 ms on the GB10.                  
+[Q-AX](q-ax-launches-not-bytes.md)              |Which GPU gains more from fusing layer norm's backward? Neither: the cost was launches, not bytes.                             
 
 ## Decoding and the KV cache
 
