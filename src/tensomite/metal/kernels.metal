@@ -763,6 +763,94 @@ kernel void softmax_f32(device const float* a [[buffer(0)]],
     OWN_ELEMENTS(dst[base + s] = dst[base + s] / total;)
 }
 
+// Returns element `s` of a row of `x · scale + mask`, from the row's starts and
+// strides in `a` and `m`: the scale when `flags` has bit 1, the mask when it has
+// bit 2, each operation its own statement, rounded as its own op would round it.
+static float scaled_at(device const float* a, int start, int stride, device const float* m, int mstart, int mstride,
+                       uint s, float scale, uint flags) {
+    float x = a[start + int(s) * stride];
+    if (flags & 1u) x = x * scale;
+    if (flags & 2u) {
+        float y = m[mstart + int(s) * mstride];
+        x = x + y;
+    }
+    return x;
+}
+
+// Softmax of `x · scale + mask`, per row: the maximum, folded as row_max folds
+// it; then the exponentials and their sum; then the division.
+kernel void softmax_scaled_f32(device const float* a [[buffer(0)]],
+                               device const float* m [[buffer(1)]],
+                               device float* dst [[buffer(2)]],
+                               constant View& v [[buffer(3)]],
+                               constant View& vm [[buffer(4)]],
+                               constant uint& n [[buffer(5)]],
+                               constant float& scale [[buffer(6)]],
+                               constant uint& flags [[buffer(7)]],
+                               uint row [[threadgroup_position_in_grid]],
+                               uint t [[thread_position_in_threadgroup]],
+                               uint threads [[threads_per_threadgroup]]) {
+    threadgroup float partial[REDUCE_THREADS];
+    threadgroup float shared;
+    uint base = row * n;
+    int start = offset_of(v, base), stride = run_stride(v);
+    int mstart = offset_of(vm, base), mstride = run_stride(vm);
+    uint chunks = (n + REDUCE_CHUNK - 1) / REDUCE_CHUNK;
+    float top = scaled_at(a, start, stride, m, mstart, mstride, 0, scale, flags);
+    for (uint first = 0; first < chunks; first += threads) {
+        uint c = first + t;
+        if (c < chunks) {
+            uint stop = min(n, (c + 1) * REDUCE_CHUNK);
+            float acc = scaled_at(a, start, stride, m, mstart, mstride, c * REDUCE_CHUNK, scale, flags);
+            for (uint s = c * REDUCE_CHUNK + 1; s < stop; s++) {
+                float x = scaled_at(a, start, stride, m, mstart, mstride, s, scale, flags);
+                acc = x > acc ? x : acc;
+            }
+            partial[t] = acc;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (t == 0) {
+            uint k_end = min(threads, chunks - first);
+            for (uint k = 0; k < k_end; k++) top = partial[k] > top ? partial[k] : top;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (t == 0) shared = top;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    top = shared;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float total;
+    ROW_SUM(total, float e = precise::exp(scaled_at(a, start, stride, m, mstart, mstride, s, scale, flags) - top); dst[base + s] = e; acc = acc + e;)
+    OWN_ELEMENTS(dst[base + s] = dst[base + s] / total;)
+}
+
+// The gradient of a softmax's input, per row: the sum of g · y, in chunk order
+// as sum_f32 adds; then y · (g - sum), times the scale when `flags` has bit 1.
+kernel void softmax_grad_f32(device const float* g [[buffer(0)]],
+                             device const float* y [[buffer(1)]],
+                             device float* dst [[buffer(2)]],
+                             constant View& vg [[buffer(3)]],
+                             constant View& vy [[buffer(4)]],
+                             constant uint& n [[buffer(5)]],
+                             constant float& scale [[buffer(6)]],
+                             constant uint& flags [[buffer(7)]],
+                             uint row [[threadgroup_position_in_grid]],
+                             uint t [[thread_position_in_threadgroup]],
+                             uint threads [[threads_per_threadgroup]]) {
+    threadgroup float partial[REDUCE_THREADS];
+    threadgroup float shared;
+    uint base = row * n;
+    int gstart = offset_of(vg, base), gstride = run_stride(vg);
+    int ystart = offset_of(vy, base), ystride = run_stride(vy);
+    float total;
+    ROW_SUM(total, float p = g[gstart + int(s) * gstride] * y[ystart + int(s) * ystride]; acc = acc + p;)
+    OWN_ELEMENTS(
+        float d = g[gstart + int(s) * gstride] - total;
+        float o = y[ystart + int(s) * ystride] * d;
+        if (flags & 1u) o = o * scale;
+        dst[base + s] = o;)
+}
+
 kernel void log_softmax_f32(device const float* a [[buffer(0)]],
                             device float* dst [[buffer(1)]],
                             constant View& v [[buffer(2)]],

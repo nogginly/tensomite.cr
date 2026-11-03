@@ -132,6 +132,18 @@ describe "GPU devices against the CPU" do
         end
       end
 
+      it "computes a scaled, masked softmax and its gradient exactly as its composite does" do
+        x, w = random(gpu, [2, 3, 40, 40], 4), random(gpu, [2, 3, 40, 40], 5)
+        mask = Tensor.causal_mask(40, 40, gpu)
+        y = x.softmax(scale: 0.35, mask: mask)
+        dx = Tensomite.grad((y * w).sum, [x]).first
+        y.to_a(Float32).should eq (x * 0.35 + mask).softmax.to_a(Float32)
+        dz = y * (w - (w * y).sum(-1, keepdims: true))
+        dx.to_a(Float32).should eq (dz * 0.35).to_a(Float32)
+        xt = x.transpose
+        xt.softmax(scale: 0.35).to_a(Float32).should eq (xt * 0.35).softmax.to_a(Float32)
+      end
+
       it "trains an attention model with AdamW as the CPU does" do
         # Five steps of embedding, attention, GELU MLP and cross-entropy, so that
         # every op of training a GPT, forward and backward, runs on the device.

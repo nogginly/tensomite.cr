@@ -152,8 +152,8 @@ module Tensomite
           .reshape([batch, length, heads, head_width]).permute([0, 2, 1, 3])
       end
       k, v = cache.append(k, v) if cache
-      scores = q.matmul(k.transpose) * (1 / Math.sqrt(head_width)) + mask
-      attended = scores.softmax.matmul(v).permute([0, 2, 1, 3]).reshape([batch * length, width])
+      weights = q.matmul(k.transpose).softmax(scale: 1 / Math.sqrt(head_width), mask: mask)
+      attended = weights.matmul(v).permute([0, 2, 1, 3]).reshape([batch * length, width])
       c_proj.call(attended)
     end
   end

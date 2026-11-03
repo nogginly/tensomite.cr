@@ -677,6 +677,78 @@ extern "C" __global__ void softmax_f32(const float* a, float* dst, View v, unsig
     OWN_ELEMENTS(dst[base + s] = dst[base + s] / total;)
 }
 
+// Returns element `s` of a row of `x · scale + mask`, from the row's starts and
+// strides in `a` and `m`: the scale when `flags` has bit 1, the mask when it has
+// bit 2, each operation its own statement, rounded as its own op would round it.
+__device__ float scaled_at(const float* a, int start, int stride, const float* m, int mstart, int mstride,
+                           unsigned int s, float scale, unsigned int flags) {
+    float x = a[start + int(s) * stride];
+    if (flags & 1u) x = x * scale;
+    if (flags & 2u) {
+        float y = m[mstart + int(s) * mstride];
+        x = x + y;
+    }
+    return x;
+}
+
+// Softmax of `x · scale + mask`, per row: the maximum, folded as row_max folds
+// it; then the exponentials and their sum; then the division.
+extern "C" __global__ void softmax_scaled_f32(const float* a, const float* m, float* dst, View v, View vm,
+                                              unsigned int n, float scale, unsigned int flags) {
+    __shared__ float partial[REDUCE_THREADS];
+    __shared__ float shared;
+    unsigned int row = blockIdx.x, t = threadIdx.x, threads = blockDim.x;
+    unsigned int base = row * n;
+    int start = offset_of(v, base), stride = run_stride(v);
+    int mstart = offset_of(vm, base), mstride = run_stride(vm);
+    unsigned int chunks = (n + REDUCE_CHUNK - 1) / REDUCE_CHUNK;
+    float top = scaled_at(a, start, stride, m, mstart, mstride, 0, scale, flags);
+    for (unsigned int first = 0; first < chunks; first += threads) {
+        unsigned int c = first + t;
+        if (c < chunks) {
+            unsigned int stop = min(n, (c + 1) * REDUCE_CHUNK);
+            float acc = scaled_at(a, start, stride, m, mstart, mstride, c * REDUCE_CHUNK, scale, flags);
+            for (unsigned int s = c * REDUCE_CHUNK + 1; s < stop; s++) {
+                float x = scaled_at(a, start, stride, m, mstart, mstride, s, scale, flags);
+                acc = x > acc ? x : acc;
+            }
+            partial[t] = acc;
+        }
+        __syncthreads();
+        if (t == 0) {
+            unsigned int k_end = min(threads, chunks - first);
+            for (unsigned int k = 0; k < k_end; k++) top = partial[k] > top ? partial[k] : top;
+        }
+        __syncthreads();
+    }
+    if (t == 0) shared = top;
+    __syncthreads();
+    top = shared;
+    __syncthreads();
+    float total;
+    ROW_SUM(total, float e = expf(scaled_at(a, start, stride, m, mstart, mstride, s, scale, flags) - top); dst[base + s] = e; acc = acc + e;)
+    OWN_ELEMENTS(dst[base + s] = dst[base + s] / total;)
+}
+
+// The gradient of a softmax's input, per row: the sum of g · y, in chunk order
+// as sum_f32 adds; then y · (g - sum), times the scale when `flags` has bit 1.
+extern "C" __global__ void softmax_grad_f32(const float* g, const float* y, float* dst, View vg, View vy,
+                                            unsigned int n, float scale, unsigned int flags) {
+    __shared__ float partial[REDUCE_THREADS];
+    __shared__ float shared;
+    unsigned int row = blockIdx.x, t = threadIdx.x, threads = blockDim.x;
+    unsigned int base = row * n;
+    int gstart = offset_of(vg, base), gstride = run_stride(vg);
+    int ystart = offset_of(vy, base), ystride = run_stride(vy);
+    float total;
+    ROW_SUM(total, float p = g[gstart + int(s) * gstride] * y[ystart + int(s) * ystride]; acc = acc + p;)
+    OWN_ELEMENTS(
+        float d = g[gstart + int(s) * gstride] - total;
+        float o = y[ystart + int(s) * ystride] * d;
+        if (flags & 1u) o = o * scale;
+        dst[base + s] = o;)
+}
+
 extern "C" __global__ void log_softmax_f32(const float* a, float* dst, View v, unsigned int n) {
     __shared__ float partial[REDUCE_THREADS];
     __shared__ float shared;
