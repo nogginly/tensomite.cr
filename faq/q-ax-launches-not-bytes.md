@@ -1,6 +1,6 @@
 # Q-AX: Which GPU gains more from fusing layer norm's backward?
 
-*[Fusion in training](README.md#fusion-in-training) · previous: [Q-AW](q-aw-counting-passes-over-memory.md) · last in the theme*
+*[Fusion in training](README.md#fusion-in-training) · previous: [Q-AW](q-aw-counting-passes-over-memory.md) · next: [Q-AY](q-ay-same-kernel-different-share.md)*
 
 ## The question
 
