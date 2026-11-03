@@ -141,8 +141,8 @@ module Tensomite
         # dx = y · (g - Σ g·y) · scale, per row; the mask's gradient lacks the scale.
         grads = [softmax_grad(g, result, node.scale)] of Tensor?
         srcs.size > 1 ? grads << (node.scale ? softmax_grad(g, result, nil) : grads.first) : grads
-      in Op::SoftmaxGrad
-        raise Error.new("softmax's gradient has no gradient")
+      in Op::SoftmaxGrad, Op::LayerNormGrad
+        raise Error.new("#{node.op} has no gradient")
       in Op::LogSoftmax
         # dx = g - exp(y) · Σ g, per row.
         [g - result.exp * g.sum(-1, keepdims: true)] of Tensor?
@@ -163,20 +163,18 @@ module Tensomite
       end
     end
 
-    # Returns the gradients of a fused layer norm's input, weight and bias, from
-    # the normalised input `x̂ = (x - mean) / σ` recomputed by primitives:
+    # Returns the gradients of a fused layer norm's input, weight and bias, each
+    # with the bits of the composite of primitives that computes it:
     #
-    # - weight: `g · x̂`, and bias: `g`, each in the expanded shape, so that
-    #   accumulating them sums over the rows;
-    # - input: `(ĝ - mean(ĝ) - x̂ · mean(ĝ · x̂)) / σ`, where `ĝ = g · weight`.
+    # - input: `(ĝ - mean(ĝ) - x̂ · mean(ĝ · x̂)) / σ`, where `ĝ = g · weight` and
+    #   `x̂ = (x - mean) / σ`, as one `LayerNormGrad`;
+    # - weight: `g · x̂`, with `x̂` from another, and bias: `g`, each in the
+    #   expanded shape, so that accumulating them sums over the rows.
     private def self.layernorm_backward(node : Node, g : Tensor) : Array(Tensor?)
       x, weight, _ = node.srcs
       epsilon = node.epsilon || raise Error.new("layernorm needs an epsilon")
-      centred = x - x.mean(-1, keepdims: true)
-      std = ((centred * centred).mean(-1, keepdims: true) + epsilon).sqrt
-      normalised = centred / std
-      scaled = g * weight
-      dx = (scaled - scaled.mean(-1, keepdims: true) - normalised * (scaled * normalised).mean(-1, keepdims: true)) / std
+      dx = Tensor.lazy(Node.new(Op::LayerNormGrad, [g, x, weight], x.shape, x.dtype, x.device, epsilon: epsilon))
+      normalised = Tensor.lazy(Node.new(Op::LayerNormGrad, [x], x.shape, x.dtype, x.device, epsilon: epsilon))
       [dx, g * normalised, g] of Tensor?
     end
 

@@ -17,6 +17,16 @@ private def layernorm_composite(x : Tensor, weight : Tensor, bias : Tensor) : Te
   centred / (variance + 1e-5).sqrt * weight + bias
 end
 
+# Layer norm's gradients of the input and the weight, from primitives.
+private def layernorm_grads_composite(x : Tensor, weight : Tensor, g : Tensor) : {Tensor, Tensor}
+  centred = x - x.mean(-1, keepdims: true)
+  std = ((centred * centred).mean(-1, keepdims: true) + 1e-5).sqrt
+  normalised = centred / std
+  scaled = g * weight
+  dx = (scaled - scaled.mean(-1, keepdims: true) - normalised * (scaled * normalised).mean(-1, keepdims: true)) / std
+  {dx, (g * normalised).sum(0)}
+end
+
 private def random(device : Device, shape : Array(Int32), seed : Int32, scale = 3f32) : Tensor
   Tensor.from(random_values(shape.product(1), seed).map { |v| v * scale }, shape, device)
 end
@@ -62,6 +72,15 @@ describe "Fused row ops" do
         dmask.to_a(Float32).should eq dz.to_a(Float32)
         plain = x.softmax
         Tensomite.grad((plain * w).sum, [x]).first.to_a(Float32).should eq (plain * (w - (w * plain).sum(-1, keepdims: true))).to_a(Float32)
+      end
+
+      it "computes layernorm's gradients exactly as the composite does" do
+        x, w, b, g = random(device, [6, 40], 11), random(device, [40], 12), random(device, [40], 13), random(device, [6, 40], 14)
+        dx, dw, db = Tensomite.grad((x.layernorm(w, b) * g).sum, [x, w, b])
+        expected_dx, expected_dw = layernorm_grads_composite(x, w, g)
+        dx.to_a(Float32).should eq expected_dx.to_a(Float32)
+        dw.to_a(Float32).should eq expected_dw.to_a(Float32)
+        db.to_a(Float32).should eq g.sum(0).to_a(Float32)
       end
 
       it "gives softmax of a row padded with -inf the same values" do

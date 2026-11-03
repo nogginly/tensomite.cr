@@ -870,6 +870,58 @@ kernel void log_softmax_f32(device const float* a [[buffer(0)]],
     OWN_ELEMENTS(dst[base + s] = dst[base + s] - log_total;)
 }
 
+// Layer norm's gradients, per row, with the bits of the composite of primitives:
+// mean = Σx / n, centred = x - mean, σ = sqrt(Σcentred² / n + epsilon) and
+// x̂ = centred / σ, each sum in chunk order as sum_f32 adds. When `with_g` is 0,
+// the row of x̂; otherwise, with ĝ = g · w, ((ĝ - Σĝ / n) - x̂ · Σ(ĝ · x̂) / n) / σ.
+kernel void layernorm_grad_f32(device const float* g [[buffer(0)]],
+                               device const float* x [[buffer(1)]],
+                               device const float* w [[buffer(2)]],
+                               device float* dst [[buffer(3)]],
+                               constant View& vg [[buffer(4)]],
+                               constant View& vx [[buffer(5)]],
+                               constant View& vw [[buffer(6)]],
+                               constant uint& n [[buffer(7)]],
+                               constant float& epsilon [[buffer(8)]],
+                               constant uint& with_g [[buffer(9)]],
+                               uint row [[threadgroup_position_in_grid]],
+                               uint t [[thread_position_in_threadgroup]],
+                               uint threads [[threads_per_threadgroup]]) {
+    threadgroup float partial[REDUCE_THREADS];
+    threadgroup float shared;
+    uint base = row * n;
+    int xstart = offset_of(vx, base), xstride = run_stride(vx);
+    int gstart = offset_of(vg, base), gstride = run_stride(vg);
+    int wstart = offset_of(vw, base), wstride = run_stride(vw);
+    float count = float(n);
+    float total;
+    ROW_SUM(total, acc = acc + x[xstart + int(s) * xstride];)
+    float mean = total / count;
+    float squares;
+    ROW_SUM(squares, float c = x[xstart + int(s) * xstride] - mean; float p = c * c; acc = acc + p;)
+    float variance = squares / count;
+    float shifted = variance + epsilon;
+    float std = precise::sqrt(shifted);
+    if (!with_g) {
+        OWN_ELEMENTS(float c = x[xstart + int(s) * xstride] - mean; dst[base + s] = c / std;)
+        return;
+    }
+    float scaled_total;
+    ROW_SUM(scaled_total, float sc = g[gstart + int(s) * gstride] * w[wstart + int(s) * wstride]; acc = acc + sc;)
+    float scaled_mean = scaled_total / count;
+    float product_total;
+    ROW_SUM(product_total,
+            float c = x[xstart + int(s) * xstride] - mean; float xh = c / std;
+            float sc = g[gstart + int(s) * gstride] * w[wstart + int(s) * wstride];
+            float p = sc * xh; acc = acc + p;)
+    float product_mean = product_total / count;
+    OWN_ELEMENTS(
+        float c = x[xstart + int(s) * xstride] - mean; float xh = c / std;
+        float sc = g[gstart + int(s) * gstride] * w[wstart + int(s) * wstride];
+        float t1 = sc - scaled_mean; float t2 = xh * product_mean; float t3 = t1 - t2;
+        dst[base + s] = t3 / std;)
+}
+
 kernel void layernorm_f32(device const float* a [[buffer(0)]],
                           device const float* w [[buffer(1)]],
                           device const float* b [[buffer(2)]],

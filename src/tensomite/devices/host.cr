@@ -112,7 +112,7 @@ module Tensomite
       in Op::GreaterEqual then binary(T, node, dst) { |x, y| x >= y ? T.new(1) : T.zero }
       in Op::Unview       then unview(T, node, dst)
       in Op::ScatterAdd   then scatter_add(T, node, dst)
-      in Op::Softmax, Op::SoftmaxGrad, Op::LogSoftmax, Op::LayerNorm
+      in Op::Softmax, Op::SoftmaxGrad, Op::LogSoftmax, Op::LayerNorm, Op::LayerNormGrad
         rows(node, Slice.new(dst.to_unsafe.as(Float32*), dst.size))
       in Op::Kernel
         kernel = node.kernel || raise Error.new("kernel node without a kernel")
@@ -242,6 +242,10 @@ module Tensomite
     #   times the scale when it has one.
     # - LogSoftmax: `shifted = x - max`; the sum of `exp(shifted)`; then
     #   `shifted - log(sum)`.
+    # - LayerNormGrad: `mean = sum(x) / n`, `centred = x - mean`, `σ =
+    #   sqrt(sum(centred²) / n + epsilon)`, `x̂ = centred / σ`; then either `x̂`,
+    #   or, with `ĝ = g · weight`, `mean(ĝ)` and `mean(ĝ · x̂)` as sums over n,
+    #   and `((ĝ - mean(ĝ)) - x̂ · mean(ĝ · x̂)) / σ`.
     # - LayerNorm: `mean = sum / n`; `centred = x - mean`; `variance =
     #   sum(centred²) / n`; then `centred / sqrt(variance + epsilon) * weight + bias`.
     #
@@ -275,6 +279,8 @@ module Tensomite
           n.times { |j| row_out[j] = row_out[j] / total }
         when Op::SoftmaxGrad
           softmax_grad_row(node, xs, pos, stride, dst, base, n)
+        when Op::LayerNormGrad
+          layernorm_grad_row(node, dst, base, n)
         when Op::LogSoftmax
           HostDevice.check_run(pos, n, stride, xs.size) { describe(node) }
           row_in, row_out = xs.to_unsafe + pos, dst.to_unsafe + base
@@ -339,6 +345,45 @@ module Tensomite
       n.times do |j|
         value = ys[py + j * sy] * (gs[pg + j * sg] - total)
         row_out[j] = scale ? value * scale : value
+      end
+    end
+
+    # Writes the row at *base* of a `LayerNormGrad`: the normalised input, or,
+    # given g and the weight, the input's gradient, each operation rounded as
+    # the composite's own op would round it.
+    private def layernorm_grad_row(node : Node, dst : Slice(Float32), base : Int32, n : Int32) : Nil
+      x = node.srcs.size == 1 ? node.srcs[0] : node.srcs[1]
+      xs, px, sx = elements(Float32, x), x.view.offset_of(base), x.view.run_stride
+      epsilon = node.epsilon || raise Error.new("layernorm needs an epsilon")
+      count = n.to_f32
+      total = 0f32
+      n.times { |j| total += xs[px + j * sx] }
+      mean = total / count
+      squares = 0f32
+      n.times do |j|
+        centred = xs[px + j * sx] - mean
+        squares += centred * centred
+      end
+      std = Math.sqrt(squares / count + epsilon)
+      row_out = dst.to_unsafe + base
+      if node.srcs.size == 1
+        n.times { |j| row_out[j] = (xs[px + j * sx] - mean) / std }
+        return
+      end
+      g, weight = node.srcs[0], node.srcs[2]
+      gs, pg, sg = elements(Float32, g), g.view.offset_of(base), g.view.run_stride
+      ws, pw, sw = elements(Float32, weight), weight.view.offset_of(base), weight.view.run_stride
+      # ĝ, then x̂, into the output row, so that each is computed once.
+      n.times { |j| row_out[j] = gs[pg + j * sg] * ws[pw + j * sw] }
+      scaled_total = 0f32
+      n.times { |j| scaled_total += row_out[j] }
+      scaled_mean = scaled_total / count
+      product_total = 0f32
+      n.times { |j| product_total += row_out[j] * ((xs[px + j * sx] - mean) / std) }
+      product_mean = product_total / count
+      n.times do |j|
+        normalised = (xs[px + j * sx] - mean) / std
+        row_out[j] = (row_out[j] - scaled_mean - normalised * product_mean) / std
       end
     end
 

@@ -763,6 +763,49 @@ extern "C" __global__ void log_softmax_f32(const float* a, float* dst, View v, u
     OWN_ELEMENTS(dst[base + s] = dst[base + s] - log_total;)
 }
 
+// Layer norm's gradients, per row, with the bits of the composite of primitives:
+// mean = Σx / n, centred = x - mean, σ = sqrt(Σcentred² / n + epsilon) and
+// x̂ = centred / σ, each sum in chunk order as sum_f32 adds. When `with_g` is 0,
+// the row of x̂; otherwise, with ĝ = g · w, ((ĝ - Σĝ / n) - x̂ · Σ(ĝ · x̂) / n) / σ.
+extern "C" __global__ void layernorm_grad_f32(const float* g, const float* x, const float* w, float* dst,
+                                              View vg, View vx, View vw, unsigned int n, float epsilon,
+                                              unsigned int with_g) {
+    __shared__ float partial[REDUCE_THREADS];
+    __shared__ float shared;
+    unsigned int row = blockIdx.x, t = threadIdx.x, threads = blockDim.x;
+    unsigned int base = row * n;
+    int xstart = offset_of(vx, base), xstride = run_stride(vx);
+    int gstart = offset_of(vg, base), gstride = run_stride(vg);
+    int wstart = offset_of(vw, base), wstride = run_stride(vw);
+    float count = float(n);
+    float total;
+    ROW_SUM(total, acc = acc + x[xstart + int(s) * xstride];)
+    float mean = total / count;
+    float squares;
+    ROW_SUM(squares, float c = x[xstart + int(s) * xstride] - mean; float p = c * c; acc = acc + p;)
+    float variance = squares / count;
+    float shifted = variance + epsilon;
+    float std = sqrtf(shifted);
+    if (!with_g) {
+        OWN_ELEMENTS(float c = x[xstart + int(s) * xstride] - mean; dst[base + s] = c / std;)
+        return;
+    }
+    float scaled_total;
+    ROW_SUM(scaled_total, float sc = g[gstart + int(s) * gstride] * w[wstart + int(s) * wstride]; acc = acc + sc;)
+    float scaled_mean = scaled_total / count;
+    float product_total;
+    ROW_SUM(product_total,
+            float c = x[xstart + int(s) * xstride] - mean; float xh = c / std;
+            float sc = g[gstart + int(s) * gstride] * w[wstart + int(s) * wstride];
+            float p = sc * xh; acc = acc + p;)
+    float product_mean = product_total / count;
+    OWN_ELEMENTS(
+        float c = x[xstart + int(s) * xstride] - mean; float xh = c / std;
+        float sc = g[gstart + int(s) * gstride] * w[wstart + int(s) * wstride];
+        float t1 = sc - scaled_mean; float t2 = xh * product_mean; float t3 = t1 - t2;
+        dst[base + s] = t3 / std;)
+}
+
 extern "C" __global__ void layernorm_f32(const float* a, const float* w, const float* b, float* dst,
                                          View v, View vw, View vb, unsigned int n, float epsilon) {
     __shared__ float partial[REDUCE_THREADS];

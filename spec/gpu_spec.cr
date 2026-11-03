@@ -144,6 +144,19 @@ describe "GPU devices against the CPU" do
         xt.softmax(scale: 0.35).to_a(Float32).should eq (xt * 0.35).softmax.to_a(Float32)
       end
 
+      it "computes layernorm's gradients exactly as its composite does" do
+        x, w, b, g = random(gpu, [6, 40], 6), random(gpu, [40], 7), random(gpu, [40], 8), random(gpu, [6, 40], 9)
+        dx, dw = Tensomite.grad((x.layernorm(w, b) * g).sum, [x, w])
+        centred = x - x.mean(-1, keepdims: true)
+        std = ((centred * centred).mean(-1, keepdims: true) + 1e-5).sqrt
+        normalised = centred / std
+        scaled = g * w
+        expected = (scaled - scaled.mean(-1, keepdims: true) - normalised * (scaled * normalised).mean(-1, keepdims: true)) / std
+        composite_dw = Tensomite.grad(((normalised * w + b) * g).sum, [w]).first
+        dx.to_a(Float32).should eq expected.to_a(Float32)
+        dw.to_a(Float32).should eq composite_dw.to_a(Float32)
+      end
+
       it "trains an attention model with AdamW as the CPU does" do
         # Five steps of embedding, attention, GELU MLP and cross-entropy, so that
         # every op of training a GPT, forward and backward, runs on the device.
