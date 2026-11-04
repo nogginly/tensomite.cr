@@ -37,7 +37,7 @@ module Tensomite
         @mlp = MLP.new(width, build)
       end
 
-      def forward(x : Tensor, mask : Tensor, cache : CausalSelfAttention::Cache) : Tensor
+      def forward(x : Tensor, mask : Tensor, cache : CausalSelfAttention::Cache? = nil) : Tensor
         x = x + @attn.call(@ln_1.call(x), mask, cache)
         x + @mlp.call(@ln_2.call(x))
       end
@@ -113,6 +113,26 @@ module Tensomite
       result = logits(ids, cache).realize
       cache.advance(count: ids.size)
       result
+    end
+
+    # Returns lazy logits `[batch * length, vocab]` for *ids*, `[batch, length]`
+    # token ids, each row its own sequence from position 0, without a cache: the
+    # forward pass of training.
+    #
+    # ```
+    # loss = model.call(ids).cross_entropy(targets) # ids [8, 256], targets [2048]
+    # ```
+    def forward(ids : Tensor) : Tensor
+      batch, length = ids.shape
+      if length > config.context
+        raise ShapeError.new("#{length} positions exceed the context of #{config.context}")
+      end
+      x = Tensomite.scope("embedding") do
+        (@wte.call(ids) + @wpe.weight.value.slice(0, 0, length)).reshape([batch * length, config.width])
+      end
+      mask = Tensor.causal_mask(length, length, device).named("causal mask")
+      @h.each { |block| x = block.call(x, mask) }
+      Tensomite.scope("head") { @ln_f.call(x).matmul(@wte.weight.value.transpose) }
     end
 
     # Returns the unrealised logits of *ids* from an empty cache, for diagrams

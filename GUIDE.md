@@ -391,7 +391,7 @@ For a model, name its parts with `Tensomite.scope("name") { ... }` and its weigh
 
 ## Pretrained models: GPT-2
 
-Tensomite loads GPT-2 from Hugging Face's safetensors files. `scripts/fetch_gpt2.sh models/gpt2` downloads GPT-2 small (124M parameters) with its tokeniser files.
+Tensomite loads GPT-2 from Hugging Face's safetensors files. `scripts/fetch_gpt2.sh` downloads GPT-2 small (124M parameters) with its tokeniser files into `models/gpt2`; `scripts/fetch_gpt2.sh medium` (or `large`, `xl`) downloads a larger one into `models/gpt2-medium`. Load those with their heads, `n_head` in their `config.json`: 16, 20 and 25.
 
 ```crystal
 model = GPT2.load("models/gpt2/model.safetensors")   # device: BLAS.default or Metal.default for speed
@@ -409,6 +409,16 @@ To stream text a token at a time, decode each token's bytes with `bpe.decode_byt
 `generate` returns only the new tokens. Without a sampler it picks the likeliest token each time (greedy), so the output is always the same. With a `Sampler` it picks at random, in proportion to each token's probability, among the `top_k` likeliest tokens (all of them when `top_k` is 0, the default). A `temperature` above 1 makes unlikely tokens more likely to be picked, and below 1 less likely. The same seed gives the same text.
 
 `GPT2` is a `Module`, and its parts have the names used in Hugging Face's file: `wte` and `wpe` (the token and position embeddings), `h.0` to `h.11` (the blocks, each with `ln_1`, `attn`, `ln_2` and `mlp`), and `ln_f`. So `model.named_params["h.0.attn.c_attn.weight"]` is that weight, and diagrams of the model use the same names.
+
+**Fine-tuning.** Called with a tensor of token ids `[batch, length]`, a GPT-2 runs each row as its own sequence from position 0, without a cache, and returns lazy logits `[batch * length, vocab]` to train with:
+
+```crystal
+optimizer = AdamW.new(model.params, lr: 1e-4, weight_decay: 0.01)
+loss = optimizer.step(model.call(inputs).cross_entropy(targets))   # inputs [8, 256], targets [2048]
+model.save("models/gpt2-tuned/model.safetensors")
+```
+
+`bench/train_gpt2.cr` fine-tunes GPT-2 small on a text file for a few steps and reports the cost of a step. Fine-tuning keeps a gradient and AdamW's `m` and `v` beside every weight, so GPT-2 small needs about 2 GB for them in F32, before activations.
 
 For other weights in safetensors files, `SafeTensors.open(path)` lists them (`names`) and loads each as a tensor (`file["name", device]`). `SafeTensors.write(path, {"name" => tensor, ...})` writes tensors to a new file.
 

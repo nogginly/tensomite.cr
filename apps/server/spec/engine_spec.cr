@@ -1,4 +1,5 @@
 require "spec"
+require "file_utils"
 require "../src/engine"
 
 include Tensomite
@@ -75,5 +76,17 @@ describe "Server.whole_characters" do
     bytes = "café".to_slice
     Server.whole_characters(bytes[0, bytes.size - 1]).should eq "caf"
     Server.whole_characters(bytes).should eq "café"
+  end
+end
+
+describe "Server.configured_heads" do
+  it "reads n_head from config.json, and is nil without one" do
+    dir = File.tempname("server-config")
+    Dir.mkdir(dir)
+    Server.configured_heads(dir).should be_nil
+    File.write(File.join(dir, "config.json"), %({"n_head": 16, "n_layer": 24}))
+    Server.configured_heads(dir).should eq 16
+  ensure
+    FileUtils.rm_rf(dir) if dir
   end
 end

@@ -1,3 +1,4 @@
+require "json"
 require "../../../src/tensomite"
 
 module Server
@@ -41,8 +42,10 @@ module Server
 
     # Returns an engine for the model in *dir*: `model.safetensors`, `vocab.json`
     # and `merges.txt`, as Hugging Face's GPT-2 repositories hold them, named after
-    # the directory.
-    def self.load(dir : String, heads : Int32, device : Tensomite::Device) : Engine
+    # the directory. Its attention *heads* are, unless given, `n_head` in the
+    # directory's `config.json`, or 12, as in GPT-2 small, without one.
+    def self.load(dir : String, heads : Int32?, device : Tensomite::Device) : Engine
+      heads ||= Server.configured_heads(dir) || 12
       model = Tensomite::GPT2.load(File.join(dir, "model.safetensors"), heads: heads, device: device)
       tokenizer = Tensomite::BPE.from_files(File.join(dir, "vocab.json"), File.join(dir, "merges.txt"))
       new(model, tokenizer, File.basename(File.expand_path(dir)))
@@ -107,6 +110,13 @@ module Server
       yield text[sent..] if text.size > sent
       Completion.new(text, prompt.size, count, reason)
     end
+  end
+
+  # Returns `n_head` from *dir*'s `config.json`, or `nil` when it has none.
+  def self.configured_heads(dir : String) : Int32?
+    path = File.join(dir, "config.json")
+    return unless File.exists?(path)
+    JSON.parse(File.read(path))["n_head"]?.try(&.as_i?)
   end
 
   # Returns the longest prefix of *bytes* that ends on a whole UTF-8 character, as

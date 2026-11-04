@@ -11,7 +11,7 @@ bin/release/server generate --model models/gpt2 "Once upon a time" --max-tokens 
 
 `ops run-server ARGS` builds and runs it in one step, and `ops run-debug-server ARGS` does the same with a debug build in `bin/debug/`. Without `ops`, `SHARDS_BIN_PATH=bin/release shards build --release server` builds the same binary. For CUDA, add `-Dcuda` to the build, as in `shards build --release -Dcuda server`.
 
-`--device` picks `cpu`, `blas` (the default), `metal` on Apple Silicon, or `cuda` in a build with `-Dcuda`. `--heads` gives the attention heads, 12 for GPT-2 small. Any directory holding `model.safetensors`, `vocab.json` and `merges.txt` works, including a GPT-2 tensomite has fine-tuned and saved.
+`--device` picks `cpu`, `blas` (the default), `metal` on Apple Silicon, or `cuda` in a build with `-Dcuda`. The attention heads come from `n_head` in the model's `config.json`, or `--heads`; 12 without either, as in GPT-2 small. `scripts/fetch_gpt2.sh medium` (or `large`, `xl`) downloads a larger GPT-2 into `models/gpt2-medium`. Any directory holding `model.safetensors`, `vocab.json` and `merges.txt` works, including a GPT-2 tensomite has fine-tuned and saved.
 
 ## How a request runs
 
