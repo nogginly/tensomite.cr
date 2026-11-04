@@ -57,7 +57,7 @@ start = Time.instant
 tokens = bpe.encode(File.read(data_path))
 split = tokens.size * 9 // 10
 train, val = tokens[0, split], tokens[split..]
-params = model.params.sum(&.value.size)
+params = model.params.sum(0_i64, &.value.size)
 puts "#{File.basename(model_dir)}: #{model.config.layers} layers, width #{model.config.width}, #{(params / 1e6).round(1)}M params on #{device_name}"
 puts "#{data_path}: #{tokens.size} tokens, tokenised in #{(Time.instant - start).total_seconds.round(1)} s; #{train.size} to train on"
 # Weights, gradients, and AdamW's m and v, each a float per parameter.
