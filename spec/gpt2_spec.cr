@@ -104,7 +104,7 @@ describe "GPT-2 on the tiny reference model" do
     loss = model.call(Tensor.from(ids[0, 8], [1, 8])).cross_entropy(Tensor.from(ids[1, 8], [8]))
     grads = Tensomite.grad(loss, model.params.map(&.value))
     grads.size.should eq model.params.size
-    grads.each { |grad| grad.to_a(Float32).any? { |value| value != 0 }.should be_true }
+    grads.all? { |grad| grad.to_a(Float32).any? { |value| value != 0 } }.should be_true
   end
 
   it "raises when positions exceed the context" do
