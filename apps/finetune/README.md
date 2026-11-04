@@ -69,7 +69,7 @@ Option                          |Default         |Meaning
 ```sh
 scripts/make_code_corpus.sh                              # data/crystal/input.txt
 bin/release/finetune --out runs/crystal --data data/crystal/input.txt --device cuda \
-  --batch 4 --context 512 --steps 6000 --eval-every 250 --patience 4 --prompt "  def "
+  --batch 4 --context 512 --steps 6000 --eval-every 250 --patience 4 --prompt "  def"
 crystal run --release -Dcuda bench/code_eval.cr -- --run runs/crystal --device cuda --verbose
 ```
 
@@ -83,7 +83,16 @@ For each method, the evaluation shows a model the file up to the `def` line, at 
 - **first line:** whether the completion's first line matches the real one;
 - **exact:** whether the whole completion matches the real body.
 
-It doesn't check types: the compiler checks only the methods a program calls, so a type check of the file would pass any body. On 8 methods, GPT-2 small closes 1 and parses 1, with a body loss of 2.19; most of its completions repeat a comment until they run out of tokens.
+It doesn't check types: the compiler checks only the methods a program calls, so a type check of the file would pass any body. Measured on 40 methods after the run above:
+
+Model              |Body loss|Closes|Parses|First line|Exact
+-------------------|---------|------|------|----------|-----
+GPT-2 small        |2.03     |6/40  |6/40  |1/40      |0/40 
+fine-tuned, `best/`|1.09     |30/40 |29/40 |8/40      |0/40 
+
+GPT-2 small mostly repeats comments or writes other languages; the fine-tuned model writes Crystal's grammar, often with the wrong logic, and most of its misses are loops such as `builder.builder.builder…`.
+
+Leave the trailing space off `--prompt`: GPT-2 attaches a space to the word after it, so a prompt ending in a lone space looks like indentation, and samples come out as spaces.
 
 ## Specs
 
