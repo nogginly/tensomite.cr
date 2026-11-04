@@ -22,8 +22,9 @@ module Tensomite
         @c_proj = build.linear(4 * width, width)
       end
 
-      def forward(x : Tensor) : Tensor
-        @c_proj.call(@c_fc.call(x).gelu)
+      def forward(x : Tensor, dropout : Dropout? = nil) : Tensor
+        output = @c_proj.call(@c_fc.call(x).gelu)
+        dropout ? dropout.call(output) : output
       end
     end
 
@@ -37,9 +38,9 @@ module Tensomite
         @mlp = MLP.new(width, build)
       end
 
-      def forward(x : Tensor, mask : Tensor, cache : CausalSelfAttention::Cache? = nil) : Tensor
-        x = x + @attn.call(@ln_1.call(x), mask, cache)
-        x + @mlp.call(@ln_2.call(x))
+      def forward(x : Tensor, mask : Tensor, cache : CausalSelfAttention::Cache? = nil, dropout : Dropout? = nil) : Tensor
+        x = x + @attn.call(@ln_1.call(x), mask, cache, dropout: dropout)
+        x + @mlp.call(@ln_2.call(x), dropout: dropout)
       end
     end
 
@@ -117,12 +118,15 @@ module Tensomite
 
     # Returns lazy logits `[batch * length, vocab]` for *ids*, `[batch, length]`
     # token ids, each row its own sequence from position 0, without a cache: the
-    # forward pass of training.
+    # forward pass of training. With *dropout*, it applies after the embeddings,
+    # to each block's attention weights, and after each attention and MLP, as
+    # GPT-2's training does.
     #
     # ```
     # loss = model.call(ids).cross_entropy(targets) # ids [8, 256], targets [2048]
+    # loss = model.call(ids, dropout: Dropout.new(0.1, seed: step.to_u64)).cross_entropy(targets)
     # ```
-    def forward(ids : Tensor) : Tensor
+    def forward(ids : Tensor, dropout : Dropout? = nil) : Tensor
       batch, length = ids.shape
       if length > config.context
         raise ShapeError.new("#{length} positions exceed the context of #{config.context}")
@@ -130,8 +134,9 @@ module Tensomite
       x = Tensomite.scope("embedding") do
         (@wte.call(ids) + @wpe.weight.value.slice(0, 0, length)).reshape([batch * length, config.width])
       end
+      x = dropout.call(x) if dropout
       mask = Tensor.causal_mask(length, length, device).named("causal mask")
-      @h.each { |block| x = block.call(x, mask) }
+      @h.each { |block| x = block.call(x, mask, dropout: dropout) }
       Tensomite.scope("head") { @ln_f.call(x).matmul(@wte.weight.value.transpose) }
     end
 

@@ -535,6 +535,10 @@ The expression language is deliberately small: `+`, `-` (binary and unary), `*`,
 
   The weight's gradient is `g · x̂` and the bias's is `g`, in the expanded shape, so that accumulating them sums over the rows.
 
+## Dropout
+
+`Tensor#dropout(rate, seed:)` zeroes a share *rate* of a tensor's elements and divides the rest by `1 - rate`, one primitive, `Op::Dropout` (Decision BY). Its mask comes from no random numbers at all: element *i* is kept when a hash of `(seed, i)`, two rounds of `lowbias32` in wrapping 32-bit integer arithmetic, is at least `rate · 2³²`. Integer arithmetic is exact on every device, so the CPU, Metal and CUDA make the same mask from the same seed, with nothing generated on the host or uploaded, and `gpu_spec` checks it bit for bit. The gradient is the same op, mask and scale on `g`. `Tensomite::Dropout` gives each use within a forward pass a seed of its own, mixed from one seed and a count of uses, so a forward pass that applies it in the same order makes the same masks. GPT-2 applies it where Hugging Face's does: after the embeddings, to each block's attention weights, and after each attention and MLP; only when given one, so inference never drops anything. `apps/finetune` seeds each step's from the run's seed and the step, so resumed runs keep their bits.
+
 ## Autograd
 
 `Tensomite.grad(loss, params)` returns the gradient of a one-element `loss` with respect to each param, as lazy tensors. It is a graph transform: it reads the unrealised graph behind `loss` and builds a second graph of ordinary primitive ops beside it. Nothing runs until a gradient is realised, and devices need no autograd code at all.

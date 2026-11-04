@@ -24,6 +24,9 @@ module Finetune
     property min_lr : Float64 = 1e-5
     property warmup : Int32 = 50
     property weight_decay : Float64 = 0.01
+    # The share of activations dropout zeroes in training; GPT-2 was trained
+    # with 0.1. 0 for a run whose settings predate it.
+    property dropout : Float64 = 0.0
     property beta1 : Float64 = 0.9
     property beta2 : Float64 = 0.999
     property seed : Int32 = 1337
@@ -123,10 +126,17 @@ module Finetune
     def step : Float32
       inputs, targets = batch(progress.step)
       optimizer.lr = settings.lr_at(progress.step)
-      loss = optimizer.step(model.call(inputs).cross_entropy(targets))
+      loss = optimizer.step(model.call(inputs, dropout: dropout(progress.step)).cross_entropy(targets))
       @progress = @progress.copy_with(step: progress.step + 1)
       GC.collect
       loss
+    end
+
+    # Returns the dropout of step *step*, seeded by the run's seed and the step,
+    # or `nil` when the run has none.
+    private def dropout(step : Int32) : Tensomite::Dropout?
+      return if settings.dropout == 0
+      Tensomite::Dropout.new(settings.dropout, seed: Tensomite::Dropout.mix((settings.seed.to_u64 << 32) | step.to_u64))
     end
 
     # Returns the mean loss over the validation text's `eval_batches` fixed

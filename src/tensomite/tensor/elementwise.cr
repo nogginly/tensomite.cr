@@ -103,6 +103,29 @@ module Tensomite
       Tensor.lazy(Node.new(op, [self], shape, dtype, device))
     end
 
+    # Returns this tensor with each element zeroed with probability *rate* and
+    # the rest divided by `1 - rate`, so that its expected value is unchanged:
+    # dropout, which training applies to activations so that a model cannot rely
+    # on any one of them.
+    #
+    # Which elements are zeroed depends only on *seed* and each element's
+    # position, through a hash every device computes the same way, so the same
+    # seed gives the same mask on every device and in every run, and the
+    # gradient applies the same mask. A *rate* of 0 returns the tensor itself.
+    #
+    # ```
+    # h = x.dropout(0.1, seed: 42_u64)
+    # ```
+    def dropout(rate : Float64, seed : UInt64) : Tensor
+      raise ArgumentError.new("dropout rate #{rate} is not in [0, 1)") unless 0 <= rate < 1
+      return self if rate == 0
+      check_float("dropout")
+      raise DTypeError.new("dropout needs F32, not #{dtype}") unless dtype.f32?
+      threshold = Math.min(rate * 4294967296.0, UInt32::MAX.to_f64).round.to_u32
+      mask = DropoutMask.new((seed & 0xffffffff_u64).to_u32, (seed >> 32).to_u32, threshold)
+      Tensor.lazy(Node.new(Op::Dropout, [self], shape, dtype, device, scale: (1 / (1 - rate)).to_f32, dropout: mask))
+    end
+
     # Constants that arithmetic with a number has made, by device, dtype, value
     # and scope (see `Tensomite.scope`), so that a training step uploads each one
     # once rather than once per use. The scope keeps each part of a model's

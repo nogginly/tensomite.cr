@@ -469,6 +469,7 @@ module Tensomite
       when Op::MatMul                                                                     then launch_matmul(kernels, node, output)
       when Op::Softmax, Op::SoftmaxGrad, Op::LogSoftmax, Op::LayerNorm, Op::LayerNormGrad then launch_row_op(kernels, node, output)
       when Op::Kernel                                                                     then launch_kernel(node, output)
+      when Op::Dropout                                                                    then launch_dropout(kernels, node, output)
       else                                                                                     return launch_elementwise(kernels, node, output)
       end
       true
@@ -697,6 +698,14 @@ module Tensomite
       name = node.op == Op::Softmax ? "softmax_scaled_f32" : "softmax_grad_f32"
       context.launch(kernels[name], rows, threads, pointer(src), pointer(other), output.pointer,
         view_args(src.view), view_args(other.view), node.shape.last.to_u32, node.scale || 1f32, node.softmax_flags)
+    end
+
+    # Dropout: one thread per element, hashing its position (see `Tensor#dropout`).
+    private def launch_dropout(kernels : Kernels, node : Node, output : CUDABuffer) : Nil
+      mask = node.dropout || raise Error.new("dropout without a mask")
+      src = node.srcs.first
+      run(kernels["dropout_f32"], node.size, pointer(src), output.pointer, elementwise_view_args(src.view), node.size.to_u32,
+        mask.seed, mask.stream, mask.threshold, node.scale || 1f32)
     end
 
     # Kernel: one thread per element, running the kernel's generated CUDA C++,

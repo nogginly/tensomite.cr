@@ -33,6 +33,27 @@ UNARY(tanh_f32, tanhf(x))
 UNARY(sqrt_f32, sqrtf(x))
 UNARY(copy_f32, x)
 
+// The hash dropout masks are drawn from: two rounds of lowbias32 in wrapping
+// 32-bit arithmetic, as Tensomite.dropout_hash computes it on the host.
+__device__ unsigned int lowbias32(unsigned int x) {
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    return x ^ (x >> 16);
+}
+
+// Dropout: logical element i of a is kept, times scale, when its hash under
+// (seed, stream) is at least threshold, and zeroed otherwise.
+extern "C" __global__ void dropout_f32(const float* a, float* dst, View va, unsigned int n,
+                                       unsigned int seed, unsigned int stream, unsigned int threshold, float scale) {
+    unsigned int i = thread_index();
+    if (i >= n) return;
+    float x = a[offset_of(va, i)];
+    bool kept = lowbias32(lowbias32(i + seed) ^ stream) >= threshold;
+    dst[i] = kept ? x * scale : 0.0f;
+}
+
 // Copies source element i into output position offset_of(vd, i): Copy into a
 // region of the output, as Cat does for each source.
 extern "C" __global__ void copy_into_f32(const float* src, float* dst, View vs, View vd, unsigned int n) {

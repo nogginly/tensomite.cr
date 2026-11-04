@@ -22,6 +22,7 @@ private def settings(dir : String) : Finetune::Settings
     run.model, run.data, run.heads = dir, File.join(dir, "text.txt"), 4
     run.batch, run.context, run.steps, run.warmup = 2, 16, 6, 2
     run.lr, run.min_lr, run.eval_batches, run.sample_length = 1e-2, 1e-3, 2, 5
+    run.dropout = 0.1
   end
 end
 

@@ -14,6 +14,7 @@ EXACT = {
   "kernel"                                => ->(d : Device) { Kernels::SPEC_AXPB.call(random(d, [3, 4], 1), random(d, [4], 2), random(d, [3, 1], 3)) },
   "kernel with a scalar and a sliced row" => ->(d : Device) { Kernels::SPEC_AXPB.call(random(d, [2, 3, 4], 1), Tensor.scalar(1.5, DType::F32, d), random(d, [3, 4], 2).slice(0, 2, 3)) },
   "mul by a scalar"                       => ->(d : Device) { random(d, [3, 4, 5], 1) * Tensor.scalar(-0.75, DType::F32, d) },
+  "dropout"                               => ->(d : Device) { random(d, [37, 41], 1).transpose.dropout(0.3, seed: 0x1234_5678_9abc_u64) },
   "add"                                   => ->(d : Device) { random(d, [5, 7], 1) + random(d, [7], 2) },
   "sub"                                   => ->(d : Device) { random(d, [7, 5], 1).transpose - random(d, [5, 1], 2) },
   "mul"                                   => ->(d : Device) { random(d, [5, 9], 1).slice(1, 2, 9) * random(d, [5, 7], 2) },

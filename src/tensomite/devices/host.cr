@@ -114,6 +114,7 @@ module Tensomite
       in Op::ScatterAdd   then scatter_add(T, node, dst)
       in Op::Softmax, Op::SoftmaxGrad, Op::LogSoftmax, Op::LayerNorm, Op::LayerNormGrad
         rows(node, Slice.new(dst.to_unsafe.as(Float32*), dst.size))
+      in Op::Dropout then dropout(node, Slice.new(dst.to_unsafe.as(Float32*), dst.size))
       in Op::Kernel
         kernel = node.kernel || raise Error.new("kernel node without a kernel")
         kernel.host(Slice.new(dst.to_unsafe.as(Float32*), dst.size), node.srcs.map { |src| elements(Float32, src) }, node.srcs.map(&.view))
@@ -166,6 +167,28 @@ module Tensomite
           run.times { |j| output[j] = yield input[j] }
         else
           run.times { |j| output[j] = yield input[j * stride] }
+        end
+      end
+    end
+
+    # Keeps logical element *i* of the source, times the scale, when its hash
+    # clears the threshold, and writes 0 otherwise.
+    private def dropout(node : Node, dst : Slice(Float32)) : Nil
+      return if dst.empty?
+      mask = node.dropout || raise Error.new("dropout without a mask")
+      scale = node.scale || raise Error.new("dropout without a scale")
+      src = node.srcs.first
+      xs = elements(Float32, src)
+      run = View.run_length(dst.size, {src.view})
+      stride = src.view.run_stride
+      (dst.size // run).times do |run_index|
+        base = run_index * run
+        pos = src.view.offset_of(base)
+        HostDevice.check_run(pos, run, stride, xs.size) { describe(node) }
+        input, output = xs.to_unsafe + pos, dst.to_unsafe + base
+        run.times do |j|
+          kept = Tensomite.dropout_hash(mask.seed, mask.stream, (base + j).to_u32) >= mask.threshold
+          output[j] = kept ? input[j * stride] * scale : 0f32
         end
       end
     end
