@@ -66,14 +66,19 @@ start = trainer.progress.step
 say.call(start == 0 ? "new run in #{dir} on #{device_name}" : "resuming #{dir} at step #{start} on #{device_name}")
 say.call("#{s.model} on #{s.data}: batch #{s.batch} × #{s.context}, #{s.steps} steps, lr #{s.lr} to #{s.min_lr}")
 
-since = Time.instant
+# The training steps' own time since the last report, leaving out validations,
+# samples and checkpoints.
+stepping, stepped = Time::Span.zero, 0
 until trainer.done?
+  started = Time.instant
   loss = trainer.step
+  stepping += Time.instant - started
+  stepped += 1
   step = trainer.progress.step
   if step % 10 == 0 || trainer.done?
-    ms = (Time.instant - since).total_milliseconds / 10
+    ms = stepping.total_milliseconds / stepped
     say.call("step #{step}: loss #{loss.round(4)}, lr #{s.lr_at(step - 1).round(7)}, #{ms.round(0)} ms/step")
-    since = Time.instant
+    stepping, stepped = Time::Span.zero, 0
   end
   stop = false
   if step % s.eval_every == 0 || trainer.done?
