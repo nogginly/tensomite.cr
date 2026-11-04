@@ -127,14 +127,16 @@ Question                                   |In one line
 
 ## Fusion in training
 
-The running example: one training step of the larger Shakespeare model on the GB10 and the M5 Pro, followed from 925 launches to 334.
+The running example: one training step of the larger Shakespeare model on the GB10 and the M5 Pro, followed from 925 launches to 334, and then into its matmuls.
 
-Question                                        |In one line                                                                                                                    
-------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------
-[Q-AU](q-au-fewer-launches-less-saving.md)      |Why did fusing AdamW save less than its launches suggested? Each fused kernel cost more, and launches had overlapped with work.
-[Q-AV](q-av-which-kernel-the-fast-path-helps.md)|Which kernels gain when broadcast scalars skip their divisions? Those that did the most of them, on the GPU that paid for them.
-[Q-AW](q-aw-counting-passes-over-memory.md)     |How much should fusing softmax's scale and mask save? Count the passes over memory: about 0.9 ms on the GB10.                  
-[Q-AX](q-ax-launches-not-bytes.md)              |Which GPU gains more from fusing layer norm's backward? Neither: the cost was launches, not bytes.                             
+Question                                        |In one line                                                                                                                              
+------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------
+[Q-AU](q-au-fewer-launches-less-saving.md)      |Why did fusing AdamW save less than its launches suggested? Each fused kernel cost more, and launches had overlapped with work.          
+[Q-AV](q-av-which-kernel-the-fast-path-helps.md)|Which kernels gain when broadcast scalars skip their divisions? Those that did the most of them, on the GPU that paid for them.          
+[Q-AW](q-aw-counting-passes-over-memory.md)     |How much should fusing softmax's scale and mask save? Count the passes over memory: about 0.9 ms on the GB10.                            
+[Q-AX](q-ax-launches-not-bytes.md)              |Which GPU gains more from fusing layer norm's backward? Neither: the cost was launches, not bytes.                                       
+[Q-AY](q-ay-same-kernel-different-share.md)     |Why is `MatMul` a larger share of a step on the M5 Pro? Arithmetic, not bandwidth: its matmuls run 2.3× slower, its memory as fast.      
+[Q-AZ](q-az-bigger-patches.md)                  |Why did bigger patches per thread make the matmul slower? Registers: a thread holding ~144 floats leaves too few threads to hide latency.
 
 ## Decoding and the KV cache
 
