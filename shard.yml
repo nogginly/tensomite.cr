@@ -12,3 +12,7 @@ crystal: ">= 1.22.0"
 development_dependencies:
   ameba:
     github: crystal-ameba/ameba
+
+targets:
+  server:
+    main: apps/server/server.cr

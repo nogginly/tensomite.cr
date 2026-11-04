@@ -35,3 +35,7 @@ actions:
   test:
     command: ops test_specs && ops test_apps && ops lint
     description: Run all tests and linter
+  run-server:
+    command: ops br server && bin/release/server
+  run-debug-server:
+    command: ops bd server && bin/debug/server
