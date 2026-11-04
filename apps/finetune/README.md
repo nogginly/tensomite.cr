@@ -60,7 +60,7 @@ Option                          |Default         |Meaning
 `--patience`                    |0               |validations without a new best before stopping; 0 never stops early                    
 `--prompt`                      |a newline       |what each validation's sample continues                                                
 
-**How long a run takes.** GPT-2 small at batch 8 × 256 trains at about 5,000 tokens/s on a GB10 and 2,700 on an M5 Pro, so a night is roughly 150M and 75M tokens. A small text is seen many times over: Tiny Shakespeare's 300K tokens would pass about 1,200 times in a night on the GB10. Set `--patience` so the run stops when validation stops improving, rather than memorising the text.
+**How long a run takes.** GPT-2 small at batch 8 × 256 trains at about 5,000 tokens/s on a GB10 and 2,700 on an M5 Pro, so a night is roughly 150M and 75M tokens. A small text is seen many times over: Tiny Shakespeare's 300K tokens would pass about 1,200 times in a night on the GB10. Set `--patience` so the run stops when validation stops improving, rather than memorising the text. On Tiny Shakespeare with GPT-2 small, the best validation loss came at step 200 without dropout and at step 500 with 0.1, which also kept validation loss nearly level for hundreds of steps after its best.
 
 ## Specs
 
