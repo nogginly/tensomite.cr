@@ -5,7 +5,10 @@
  * Loading PTX fails with CUDA_ERROR_NOT_SUPPORTED, unless TENSOMITE_CUDA_KERNELS
  * names a library of kernels compiled as host C++ (emulate.h). Then loading any
  * module succeeds, its kernels are that library's, found by name, and a launch
- * runs them on the host. */
+ * runs them on the host.
+ *
+ * As the driver does, it keeps a current context per thread: calls that need one
+ * fail with CUDA_ERROR_INVALID_CONTEXT on a thread where none was made current. */
 #include <dlfcn.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -18,16 +21,19 @@ typedef uint64_t CUdeviceptr;
 #define SUCCESS 0
 #define INVALID_VALUE 1
 #define OUT_OF_MEMORY 2
+#define INVALID_CONTEXT 201
 #define NOT_FOUND 500
 #define NOT_SUPPORTED 801
 
 static int context;
+static _Thread_local void *current;
+#define NEED_CONTEXT if (!current) return INVALID_CONTEXT
 
 CUresult cuInit(unsigned flags) { return SUCCESS; }
 CUresult cuDriverGetVersion(int *version) { *version = 13020; return SUCCESS; }
 
 CUresult cuGetErrorName(CUresult result, const char **name) {
-  *name = result == NOT_SUPPORTED ? "CUDA_ERROR_NOT_SUPPORTED" : result == NOT_FOUND ? "CUDA_ERROR_NOT_FOUND" : result == OUT_OF_MEMORY ? "CUDA_ERROR_OUT_OF_MEMORY" : "CUDA_ERROR_INVALID_VALUE";
+  *name = result == NOT_SUPPORTED ? "CUDA_ERROR_NOT_SUPPORTED" : result == NOT_FOUND ? "CUDA_ERROR_NOT_FOUND" : result == OUT_OF_MEMORY ? "CUDA_ERROR_OUT_OF_MEMORY" : result == INVALID_CONTEXT ? "CUDA_ERROR_INVALID_CONTEXT" : "CUDA_ERROR_INVALID_VALUE";
   return SUCCESS;
 }
 
@@ -59,30 +65,34 @@ CUresult cuDeviceGetAttribute(int *value, int attribute, int device) {
 
 CUresult cuDevicePrimaryCtxRetain(void **ctx, int device) { *ctx = &context; return SUCCESS; }
 CUresult cuDevicePrimaryCtxRelease_v2(int device) { return SUCCESS; }
-CUresult cuCtxSetCurrent(void *ctx) { return SUCCESS; }
-CUresult cuCtxSynchronize(void) { return SUCCESS; }
+CUresult cuCtxSetCurrent(void *ctx) { current = ctx; return SUCCESS; }
+CUresult cuCtxSynchronize(void) { NEED_CONTEXT; return SUCCESS; }
 
 CUresult cuMemAlloc_v2(CUdeviceptr *pointer, size_t bytes) {
+  NEED_CONTEXT;
   void *memory = malloc(bytes);
   if (!memory) return OUT_OF_MEMORY;
   *pointer = (CUdeviceptr)(uintptr_t)memory;
   return SUCCESS;
 }
 
-CUresult cuMemFree_v2(CUdeviceptr pointer) { free((void *)(uintptr_t)pointer); return SUCCESS; }
+CUresult cuMemFree_v2(CUdeviceptr pointer) { NEED_CONTEXT; free((void *)(uintptr_t)pointer); return SUCCESS; }
 
 CUresult cuMemcpyHtoD_v2(CUdeviceptr destination, const void *source, size_t bytes) {
+  NEED_CONTEXT;
   memcpy((void *)(uintptr_t)destination, source, bytes);
   return SUCCESS;
 }
 
 CUresult cuMemcpyDtoH_v2(void *destination, CUdeviceptr source, size_t bytes) {
+  NEED_CONTEXT;
   memcpy(destination, (const void *)(uintptr_t)source, bytes);
   return SUCCESS;
 }
 
 /* Events hold the host's clock when recorded, since kernels run synchronously. */
 CUresult cuEventCreate(void **event, unsigned flags) {
+  NEED_CONTEXT;
   *event = calloc(1, sizeof(double));
   return *event ? SUCCESS : OUT_OF_MEMORY;
 }
@@ -107,6 +117,7 @@ static void *(*find_kernel)(const char *);
 static void (*launch_kernel)(void *, unsigned, unsigned, unsigned, unsigned, unsigned, void **);
 
 CUresult cuModuleLoadData(void **module, const void *image) {
+  NEED_CONTEXT;
   const char *path = getenv("TENSOMITE_CUDA_KERNELS");
   void *library = path ? dlopen(path, RTLD_NOW) : NULL;
   if (!library) return NOT_SUPPORTED;
@@ -120,6 +131,7 @@ CUresult cuModuleLoadData(void **module, const void *image) {
 CUresult cuModuleUnload(void *module) { return SUCCESS; }
 
 CUresult cuModuleGetFunction(void **function, void *module, const char *name) {
+  NEED_CONTEXT;
   *function = find_kernel(name);
   return *function ? SUCCESS : NOT_FOUND;
 }
@@ -127,6 +139,7 @@ CUresult cuModuleGetFunction(void **function, void *module, const char *name) {
 /* Runs grids of up to three dimensions of blocks of up to two. */
 CUresult cuLaunchKernel(void *function, unsigned gx, unsigned gy, unsigned gz, unsigned bx, unsigned by,
                         unsigned bz, unsigned shared, void *stream, void **params, void **extra) {
+  NEED_CONTEXT;
   if (bz != 1) return NOT_SUPPORTED;
   launch_kernel(function, gx, gy, gz, bx, by, params);
   return SUCCESS;

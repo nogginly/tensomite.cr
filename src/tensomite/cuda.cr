@@ -86,8 +86,9 @@ module Tensomite
   # last bits, and so may longer sums and `MatMul`, which add in fixed chunks
   # (Decisions K, S and X), as on Metal.
   #
-  # Work is issued from the thread that created the device, on which its context
-  # is current.
+  # Work may be issued from any thread: Crystal moves a fiber between threads,
+  # as after a file write, and each call makes the device's context current on
+  # the calling thread when it was last used on another.
   class CUDA < HostDevice
     private PRELUDE        = {{ read_file("#{__DIR__}/cuda/prelude.cu") }}
     private SOURCE         = PRELUDE + {{ read_file("#{__DIR__}/cuda/kernels.cu") }}
@@ -922,9 +923,10 @@ module Tensomite
       value
     end
 
-    # A GPU's primary context, current on the calling thread: device memory,
-    # loaded kernels and launches. Everything it does is synchronous except
-    # `#launch`; `#synchronize` waits for launched kernels.
+    # A GPU's primary context: device memory, loaded kernels and launches. Each
+    # call first makes it current on the calling thread, if it was last used on
+    # another. Everything it does is synchronous except `#launch`;
+    # `#synchronize` waits for launched kernels.
     #
     # ```
     # context = CUDA::Context.new(CUDA.gpus.first)
@@ -935,21 +937,33 @@ module Tensomite
     class Context
       getter gpu : GPU
       @context : Void*
+      @thread : Thread? = nil
 
       def initialize(@gpu : GPU)
         CUDA.check LibCUDA.cuDeviceGet(out device, gpu.ordinal), "cuDeviceGet"
         CUDA.check LibCUDA.cuDevicePrimaryCtxRetain(out context, device), "cuDevicePrimaryCtxRetain"
         @context = context
+        bind
+      end
+
+      # Makes this context current on the calling thread, unless the last call
+      # came from the same thread.
+      def bind : Nil
+        thread = Thread.current
+        return if thread.same?(@thread)
         CUDA.check LibCUDA.cuCtxSetCurrent(@context), "cuCtxSetCurrent"
+        @thread = thread
       end
 
       # Returns *bytes* of device memory, uninitialised.
       def alloc(bytes : Int) : LibCUDA::DevicePtr
+        bind
         CUDA.check LibCUDA.cuMemAlloc_v2(out pointer, bytes), "cuMemAlloc"
         pointer
       end
 
       def free(pointer : LibCUDA::DevicePtr) : Nil
+        bind
         CUDA.check LibCUDA.cuMemFree_v2(pointer), "cuMemFree"
       end
 
@@ -961,11 +975,13 @@ module Tensomite
 
       # Copies *bytes* from the host to device memory at *pointer*.
       def upload(pointer : LibCUDA::DevicePtr, bytes : Bytes) : Nil
+        bind
         CUDA.check LibCUDA.cuMemcpyHtoD_v2(pointer, bytes.to_unsafe, bytes.size), "cuMemcpyHtoD"
       end
 
       # Copies device memory at *pointer* into *bytes*, after launched kernels finish.
       def download(pointer : LibCUDA::DevicePtr, bytes : Bytes) : Nil
+        bind
         CUDA.check LibCUDA.cuMemcpyDtoH_v2(bytes.to_unsafe, pointer, bytes.size), "cuMemcpyDtoH"
       end
 
@@ -977,10 +993,11 @@ module Tensomite
       # As `#load`, but returns `nil` when the driver does not support loading
       # modules, as the host stub (`scripts/cuda_stub`) does not.
       def load?(ptx : String) : Kernels?
+        bind
         result = LibCUDA.cuModuleLoadData(out handle, ptx.to_unsafe)
         return if result == NOT_SUPPORTED
         CUDA.check result, "cuModuleLoadData"
-        Kernels.new(handle)
+        Kernels.new(handle, self)
       end
 
       private NOT_SUPPORTED = 801
@@ -1004,28 +1021,33 @@ module Tensomite
       def launch_params(function : Void*, grid : {Int32, Int32, Int32}, block : {Int32, Int32}, params : Array(Void*)) : Nil
         return if grid.any?(&.zero?)
         @launches += 1
+        bind
         CUDA.check LibCUDA.cuLaunchKernel(function, grid[0].to_u32, grid[1].to_u32, grid[2].to_u32,
           block[0].to_u32, block[1].to_u32, 1, 0, Pointer(Void).null, params.to_unsafe, Pointer(Void*).null), "cuLaunchKernel"
       end
 
       # Waits for every launched kernel, and raises any error one of them hit.
       def synchronize : Nil
+        bind
         CUDA.check LibCUDA.cuCtxSynchronize, "cuCtxSynchronize"
       end
 
       # Returns a new event, for timing work on the GPU.
       def event : Void*
+        bind
         CUDA.check LibCUDA.cuEventCreate(out event, 0), "cuEventCreate"
         event
       end
 
       # Queues *event* after the work launched so far.
       def record(event : Void*) : Nil
+        bind
         CUDA.check LibCUDA.cuEventRecord(event, Pointer(Void).null), "cuEventRecord"
       end
 
       # Waits for *stop*, and returns the GPU seconds between *start* and *stop*.
       def elapsed(start : Void*, stop : Void*) : Float64
+        bind
         CUDA.check LibCUDA.cuEventSynchronize(stop), "cuEventSynchronize"
         CUDA.check LibCUDA.cuEventElapsedTime(out milliseconds, start, stop), "cuEventElapsedTime"
         milliseconds / 1000.0
@@ -1036,12 +1058,13 @@ module Tensomite
     class Kernels
       @functions = {} of String => Void*
 
-      def initialize(@handle : Void*)
+      def initialize(@handle : Void*, @context : Context)
       end
 
       # Returns the kernel *name*, declared `extern "C" __global__` in the source.
       def [](name : String) : Void*
         @functions[name] ||= begin
+          @context.bind
           CUDA.check LibCUDA.cuModuleGetFunction(out function, @handle, name), "cuModuleGetFunction(#{name})"
           function
         end
