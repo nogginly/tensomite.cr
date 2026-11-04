@@ -30,7 +30,7 @@ Everything before a PR|all of the above but building                            
 
 All three must be clean before a PR.
 
-Benchmarks live in `bench/` and examples in `examples/`. Both run in release mode, for example `crystal run --release bench/matmul.cr`. CI type-checks, formats and lints them with everything else, but does not run them. Apps live in `apps/`, each with its own specs, which CI runs: `crystal spec apps/server/spec`. Each is a `shards` target in `shard.yml`, so `shards build` builds it into `bin/`; with `ops`, release builds go to `bin/release/` and debug builds to `bin/debug/`.
+Benchmarks live in `bench/` and examples in `examples/`. Both run in release mode, for example `crystal run --release bench/matmul.cr`. CI type-checks, formats and lints them with everything else, but does not run them. `bench/train_gpt2.cr` fine-tunes a pretrained GPT-2 on a text file for a few steps and reports a step's milliseconds, tokens a second and memory, with `--profile N` on Metal or CUDA. Apps live in `apps/`, each with its own specs, which CI runs: `crystal spec apps/server/spec`. Each is a `shards` target in `shard.yml`, so `shards build` builds it into `bin/`; with `ops`, release builds go to `bin/release/` and debug builds to `bin/debug/`.
 
 **Training on Tiny Shakespeare** (the M5 exit):
 

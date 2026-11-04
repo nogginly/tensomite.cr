@@ -26,7 +26,8 @@ devices = {"cpu" => -> { Tensomite::CPU.default.as(Tensomite::Device) }, "blas" 
   devices["cuda"] = -> { Tensomite::CUDA.default.as(Tensomite::Device) }
 {% end %}
 
-model_dir, heads, device_name = "models/gpt2", 12, "blas"
+model_dir, device_name = "models/gpt2", "blas"
+heads = nil.as(Int32?)
 host, port = "127.0.0.1", 8080
 generate = false
 prompt = nil.as(String?)
@@ -36,7 +37,7 @@ stops = [] of String
 OptionParser.parse do |parser|
   parser.banner = "Usage: server [options]\n       server generate [options] PROMPT"
   parser.on("--model DIR", "Directory of model.safetensors, vocab.json and merges.txt (#{model_dir})") { |dir| model_dir = dir }
-  parser.on("--heads N", "Attention heads, 12 for GPT-2 small (#{heads})") { |value| heads = value.to_i }
+  parser.on("--heads N", "Attention heads (n_head in the model's config.json, or 12)") { |value| heads = value.to_i }
   parser.on("--device NAME", "#{devices.keys.join(", ")} (#{device_name})") { |name| device_name = name }
   parser.on("--host HOST", "Address to listen on (#{host})") { |value| host = value }
   parser.on("--port PORT", "Port to listen on (#{port})") { |value| port = value.to_i }

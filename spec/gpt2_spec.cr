@@ -70,6 +70,12 @@ describe "GPT-2 on the tiny reference model" do
       end
 
       if device.shape_invariant?
+        it "gives a batch's logits, row by row, as each sequence's own prefill" do
+          first, second = expected.prompt_ids.first(10), expected.prompt_ids.last(10)
+          batched = model.call(Tensor.from(first + second, [2, 10], device)).to_a(Float32)
+          batched.should eq model.forward(first, model.new_cache).to_a(Float32) + model.forward(second, model.new_cache).to_a(Float32)
+        end
+
         it "gives bit-identical logits in prefill and in one-by-one decode" do
           prefill = model.forward(expected.prompt_ids, model.new_cache).to_a(Float32)
           decode_one_by_one(model, expected.prompt_ids).should eq prefill
@@ -92,8 +98,18 @@ describe "GPT-2 on the tiny reference model" do
     text.should contain %(["h ×2<br/>)
   end
 
+  it "trains: the batched loss's gradient reaches every parameter" do
+    model = GPT2.load("#{dir}/model.safetensors", heads: 4)
+    ids = expected.prompt_ids.first(9)
+    loss = model.call(Tensor.from(ids[0, 8], [1, 8])).cross_entropy(Tensor.from(ids[1, 8], [8]))
+    grads = Tensomite.grad(loss, model.params.map(&.value))
+    grads.size.should eq model.params.size
+    grads.each { |grad| grad.to_a(Float32).any? { |value| value != 0 }.should be_true }
+  end
+
   it "raises when positions exceed the context" do
     model = GPT2.load("#{dir}/model.safetensors", heads: 4)
+    expect_raises(ShapeError, /exceed the context/) { model.call(Tensor.from(Array.new(65, 0), [1, 65])) }
     expect_raises(ShapeError, /exceed the context/) { model.forward(Array.new(65, 0), model.new_cache) }
     expect_raises(ShapeError) { model.forward([] of Int32, model.new_cache) }
   end
