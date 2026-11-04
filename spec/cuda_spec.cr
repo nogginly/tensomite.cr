@@ -74,6 +74,15 @@ require "./spec_helper"
         cuda.map(Tensor.from(f32(1, 2), [2], cuda).node.buffer!).should be_nil
       end
 
+      # Crystal moves a fiber between threads, as after a file write, and a CUDA
+      # context is current on one thread at a time.
+      it "works from a thread other than the one that created it" do
+        t = Tensor.from(f32(1, 2, 3), [3], cuda)
+        sums = [] of Float32
+        Thread.new { sums = (t + Tensor.from(f32(1, 1, 1), [3], cuda)).softmax(0).to_a(Float32) }.join
+        sums.should eq (t + 1).softmax(0).to_a(Float32)
+      end
+
       it "runs ops without CUDA kernels on the host, moving data through counted transfers" do
         uploads, downloads = cuda.uploads, cuda.downloads
         t = Tensor.from(f32(1, 2, 3), [3], cuda)
