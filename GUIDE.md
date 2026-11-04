@@ -189,6 +189,8 @@ Optimizer|Constructor
 `SGD`    |`SGD.new(lr: 0.01, momentum: 0.0)`                                            
 `AdamW`  |`AdamW.new(lr: 1e-3, beta1: 0.9, beta2: 0.999, eps: 1e-8, weight_decay: 0.01)`
 
+An optimizer's state, such as AdamW's running averages `m` and `v`, lasts the whole run. To save a run and resume it, write `optimizer.state` with `SafeTensors.write` beside the model's weights, and keep `optimizer.steps`; later, `optimizer.restore(SafeTensors.open(path), steps: steps)` on an optimizer made with the same settings and parameters takes the step an uninterrupted run would have taken. `apps/finetune` does this in its checkpoints.
+
 Here is a whole training loop, fitting `y = w · x` to points on `y = 3x`:
 
 ```crystal
@@ -418,7 +420,7 @@ loss = optimizer.step(model.call(inputs).cross_entropy(targets))   # inputs [8, 
 model.save("models/gpt2-tuned/model.safetensors")
 ```
 
-`bench/train_gpt2.cr` fine-tunes GPT-2 small on a text file for a few steps and reports the cost of a step. Fine-tuning keeps a gradient and AdamW's `m` and `v` beside every weight, so GPT-2 small needs about 2 GB for them in F32, before activations.
+`bench/train_gpt2.cr` fine-tunes GPT-2 small on a text file for a few steps and reports the cost of a step; `apps/finetune` runs a whole fine-tune, with checkpoints, validation and early stopping, and exports a model `apps/server` serves. Fine-tuning keeps a gradient and AdamW's `m` and `v` beside every weight, so GPT-2 small needs about 2 GB for them in F32, before activations.
 
 For other weights in safetensors files, `SafeTensors.open(path)` lists them (`names`) and loads each as a tensor (`file["name", device]`). `SafeTensors.write(path, {"name" => tensor, ...})` writes tensors to a new file.
 

@@ -63,8 +63,8 @@ jobs:
           TENSOMITE_GPT2_DIR: models/gpt2
         run: crystal spec --release
 
-      - name: Run the server app's specs
-        run: crystal spec apps/server/spec
+      - name: Run the apps' specs
+        run: crystal spec apps/server/spec apps/finetune/spec
 
       - name: Type-check benchmarks and examples
         run: |
@@ -72,8 +72,8 @@ jobs:
             case "$f" in *cuda*) flags=-Dcuda ;; *) flags= ;; esac
             crystal build --no-codegen $flags "$f"
           done
-          for f in bench/gpt2.cr bench/gpt2_digest.cr apps/server/server.cr; do crystal build --no-codegen -Dcuda "$f"; done
-          crystal build --no-codegen apps/server/server.cr
+          for f in bench/gpt2.cr bench/gpt2_digest.cr apps/server/server.cr apps/finetune/finetune.cr; do crystal build --no-codegen -Dcuda "$f"; done
+          for f in apps/server/server.cr apps/finetune/finetune.cr; do crystal build --no-codegen "$f"; done
 
       # NVRTC needs no GPU, and the stand-in libcuda gives the CUDA device a GPU
       # in host memory that runs its kernels compiled as host C++: NVRTC compiles

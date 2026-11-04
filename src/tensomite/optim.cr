@@ -67,6 +67,42 @@ module Tensomite
     # next step goes through `#keep`.
     protected abstract def update(index : Int32, param : Tensor, grad : Tensor) : Tensor
 
+    # Returns the state the optimizer carries from step to step, such as AdamW's
+    # `m` and `v`, as realised tensors named `"m.0"`, `"v.0"` and so on by param
+    # index: the form `SafeTensors.write` saves and `#restore` takes back. Its
+    # step count is `#steps`, saved separately.
+    #
+    # ```
+    # SafeTensors.write("optimizer.safetensors", optimizer.state)
+    # # later, with an optimizer made with the same settings and params:
+    # optimizer.restore(SafeTensors.open("optimizer.safetensors"), steps: saved_steps)
+    # ```
+    def state : Hash(String, Tensor)
+      result = {} of String => Tensor
+      tables.each { |name, table| table.each { |index, tensor| result["#{name}.#{index}"] = tensor } }
+      result
+    end
+
+    # Replaces the optimizer's state with *file*'s, as `#state` named it, and its
+    # step count with *steps*, so that its next step is the one an uninterrupted
+    # run would take. Each tensor goes to its param's device when the optimizer
+    # has params, and to *device* otherwise. Raises `Error` for a name it does
+    # not keep.
+    def restore(file : SafeTensors, steps : Int32, device : Device = CPU.default) : self
+      tables.each_value(&.clear)
+      file.names.each do |name|
+        table_name, _, index = name.rpartition('.')
+        table = tables[table_name]? || raise Error.new("#{self.class} keeps no state named #{name}")
+        at = (slots = @slots) ? slots[index.to_i].value.device : device
+        table[index.to_i] = file[name, at]
+      end
+      @steps = steps
+      self
+    end
+
+    # The tables of state the optimizer keeps per param index, by name.
+    protected abstract def tables : Hash(String, Hash(Int32, Tensor))
+
     # Returns whether weight decay applies to param *index*: its `Parameter`'s
     # flag when the optimizer has parameters, and always otherwise.
     protected def decays?(index : Int32) : Bool
@@ -88,6 +124,10 @@ module Tensomite
     # Creates an optimizer for *params*, for `#step(loss)`.
     def initialize(params : Array(Parameter), @lr : Float64, @momentum : Float64 = 0.0)
       @slots = params
+    end
+
+    protected def tables : Hash(String, Hash(Int32, Tensor))
+      {"velocity" => @velocity}
     end
 
     protected def update(index : Int32, param : Tensor, grad : Tensor) : Tensor
@@ -124,6 +164,10 @@ module Tensomite
     def initialize(params : Array(Parameter), @lr : Float64 = 1e-3, @beta1 : Float64 = 0.9, @beta2 : Float64 = 0.999,
                    @eps : Float64 = 1e-8, @weight_decay : Float64 = 0.01)
       @slots = params
+    end
+
+    protected def tables : Hash(String, Hash(Int32, Tensor))
+      {"m" => @m, "v" => @v}
     end
 
     # Each step after the first runs three fused kernels per parameter, for `m`,

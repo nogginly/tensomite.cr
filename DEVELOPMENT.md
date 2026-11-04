@@ -20,7 +20,7 @@ A guide for maintaining tensomite, fixing bugs and adding features. `DESIGN.md` 
 Task                  |Command                                                   |With `ops`                                              
 ----------------------|----------------------------------------------------------|--------------------------------------------------------
 Run specs             |`crystal spec`                                            |`ops test_specs`                                        
-Run the apps' specs   |`crystal spec apps/server/spec`                           |`ops test_apps`                                         
+Run the apps' specs   |`crystal spec apps/server/spec apps/finetune/spec`        |`ops test_apps`                                         
 Lint                  |`bin/ameba src/ spec/ bench/ examples/ apps/`             |`ops lint` (all but `bench/`)                           
 Check formatting      |`crystal tool format --check src spec bench examples apps`|                                                        
 Fix formatting        |`crystal tool format src spec bench examples apps`        |                                                        
@@ -30,7 +30,7 @@ Everything before a PR|all of the above but building                            
 
 All three must be clean before a PR.
 
-Benchmarks live in `bench/` and examples in `examples/`. Both run in release mode, for example `crystal run --release bench/matmul.cr`. CI type-checks, formats and lints them with everything else, but does not run them. `bench/train_gpt2.cr` fine-tunes a pretrained GPT-2 on a text file for a few steps and reports a step's milliseconds, tokens a second and memory, with `--profile N` on Metal or CUDA. Apps live in `apps/`, each with its own specs, which CI runs: `crystal spec apps/server/spec`. Each is a `shards` target in `shard.yml`, so `shards build` builds it into `bin/`; with `ops`, release builds go to `bin/release/` and debug builds to `bin/debug/`.
+Benchmarks live in `bench/` and examples in `examples/`. Both run in release mode, for example `crystal run --release bench/matmul.cr`. CI type-checks, formats and lints them with everything else, but does not run them. `bench/train_gpt2.cr` fine-tunes a pretrained GPT-2 on a text file for a few steps and reports a step's milliseconds, tokens a second and memory, with `--profile N` on Metal or CUDA. Apps live in `apps/`, each with its own specs, which CI runs: `crystal spec apps/server/spec apps/finetune/spec`. Each is a `shards` target in `shard.yml`, so `shards build` builds it into `bin/`; with `ops`, release builds go to `bin/release/` and debug builds to `bin/debug/`.
 
 **Training on Tiny Shakespeare** (the M5 exit):
 
@@ -98,6 +98,7 @@ scripts/                    fixture generation, model download, document checks,
 bench/                      benchmarks, run with --release
 examples/                   programs using the library, such as training on Shakespeare and TUTORIAL.md's multiply.cr
 apps/server/                an inference server and CLI on the library, with its own specs (apps/server/README.md)
+apps/finetune/              fine-tunes a pretrained GPT-2 on a text file, with checkpoints to resume (apps/finetune/README.md)
 models/, data/              downloaded weights and datasets (git-ignored)
 ```
 

@@ -88,6 +88,40 @@ describe AdamW do
   end
 end
 
+describe "Optimizer state" do
+  it "restores AdamW's m, v and step count, so the next step has the same bits" do
+    run = ->(optimizer : AdamW, p : Array(Tensor), step : Int32) do
+      g = [Tensor.from(random_values(6, 30 + step), [2, 3]), Tensor.from(random_values(3, 40 + step), [3])]
+      optimizer.step(p, g)
+    end
+    start = [Tensor.from(random_values(6, 1), [2, 3]), Tensor.from(random_values(3, 2), [3])]
+    straight = AdamW.new(lr: 0.01)
+    p = start
+    3.times { |i| p = run.call(straight, p, i) }
+
+    first = AdamW.new(lr: 0.01)
+    q = start
+    2.times { |i| q = run.call(first, q, i) }
+    path = File.tempname("optimizer", ".safetensors")
+    SafeTensors.write(path, first.state)
+    first.state.keys.sort!.should eq ["m.0", "m.1", "v.0", "v.1"]
+    resumed = AdamW.new(lr: 0.01).restore(SafeTensors.open(path), steps: first.steps)
+    resumed.steps.should eq 2
+    q = run.call(resumed, q, 2)
+    q.map(&.to_a(Float32)).should eq p.map(&.to_a(Float32))
+  ensure
+    File.delete(path) if path && File.exists?(path)
+  end
+
+  it "rejects state it does not keep" do
+    path = File.tempname("optimizer", ".safetensors")
+    SafeTensors.write(path, {"velocity.0" => Tensor.from(f32(1), [1])})
+    expect_raises(Error, /no state named velocity.0/) { AdamW.new.restore(SafeTensors.open(path), steps: 1) }
+  ensure
+    File.delete(path) if path && File.exists?(path)
+  end
+end
+
 describe Optimizer do
   it "waits for the device once per step, with the loss, state and updates" do
     device = CountingCPU.new
