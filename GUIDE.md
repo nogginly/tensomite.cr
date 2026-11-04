@@ -420,6 +420,14 @@ loss = optimizer.step(model.call(inputs).cross_entropy(targets))   # inputs [8, 
 model.save("models/gpt2-tuned/model.safetensors")
 ```
 
+Fine-tuning on a small text overfits quickly: the model starts to memorise the text, and its loss on text it has not seen rises. Dropout, which zeroes a random tenth of the activations at each step, keeps the model from relying on any one of them. Pass a `Dropout` to apply it, a new one each step with its own seed; without one, nothing is dropped, as in inference:
+
+```crystal
+loss = model.call(inputs, dropout: Dropout.new(0.1, seed: step.to_u64)).cross_entropy(targets)
+```
+
+`x.dropout(0.1, seed: 42_u64)` applies it to any `F32` tensor. The same seed gives the same mask on every device, and gradients flow through the same mask.
+
 `bench/train_gpt2.cr` fine-tunes GPT-2 small on a text file for a few steps and reports the cost of a step; `apps/finetune` runs a whole fine-tune, with checkpoints, validation and early stopping, and exports a model `apps/server` serves. Fine-tuning keeps a gradient and AdamW's `m` and `v` beside every weight, so GPT-2 small needs about 2 GB for them in F32, before activations.
 
 For other weights in safetensors files, `SafeTensors.open(path)` lists them (`names`) and loads each as a tensor (`file["name", device]`). `SafeTensors.write(path, {"name" => tensor, ...})` writes tensors to a new file.

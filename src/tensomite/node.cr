@@ -63,10 +63,34 @@ module Tensomite
     # `ĝ = g · weight`; with source x alone, the normalised input
     # `x̂ = (x - mean) / σ`.
     LayerNormGrad
+    # Source 0 with each element kept, times `Node#scale`, or zeroed, by
+    # `Node#dropout`'s mask (see `Tensor#dropout`).
+    Dropout
     # Source 1 copied into the region `Node#source_view` of source 0, in place:
     # the node's buffer is source 0's, and every other element keeps its value.
     # See `Tensor#write`.
     Write
+  end
+
+  # Which elements a `Dropout` node keeps: element *i* is kept when
+  # `Tensomite.dropout_hash(seed, stream, i)` is at least *threshold*, so the
+  # mask depends on these numbers and the position alone, the same on every
+  # device.
+  record DropoutMask, seed : UInt32, stream : UInt32, threshold : UInt32
+
+  # Returns a 32-bit hash of logical element *index* under *seed* and *stream*:
+  # two rounds of Chris Wellons' `lowbias32`, in wrapping integer arithmetic
+  # that every device computes identically.
+  def self.dropout_hash(seed : UInt32, stream : UInt32, index : UInt32) : UInt32
+    lowbias32(lowbias32(index &+ seed) ^ stream)
+  end
+
+  private def self.lowbias32(x : UInt32) : UInt32
+    x ^= x >> 16
+    x &*= 0x7feb352d_u32
+    x ^= x >> 15
+    x &*= 0x846ca68b_u32
+    x ^ (x >> 16)
   end
 
   # A vertex of the compute graph, producing one contiguous array of `shape`.
@@ -89,13 +113,15 @@ module Tensomite
     # The factor a `Softmax` node multiplies its input by, or a `SoftmaxGrad` node
     # its result by.
     getter scale : Float32?
+    # The mask a `Dropout` node applies.
+    getter dropout : DropoutMask?
     getter buffer : Buffer?
     # The scope the node was built in (see `Tensomite.scope`).
     getter scope : Scope? = Scope.current
     # A name for diagrams, usually given to leaves such as a model's weights.
     property name : String?
 
-    def initialize(@op : Op, @srcs : Array(Tensor), @shape, @dtype, @device, @axis = nil, @source_view = nil, @kernel = nil, @epsilon = nil, @scale = nil)
+    def initialize(@op : Op, @srcs : Array(Tensor), @shape, @dtype, @device, @axis = nil, @source_view = nil, @kernel = nil, @epsilon = nil, @scale = nil, @dropout = nil)
     end
 
     # Returns the options of a `Softmax` or `SoftmaxGrad` node as the GPU kernels

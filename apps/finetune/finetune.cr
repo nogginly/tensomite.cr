@@ -28,6 +28,7 @@ devices = {"cpu" => -> { Tensomite::CPU.default.as(Tensomite::Device) }, "blas" 
 {% end %}
 
 settings = Finetune::Settings.new
+settings.dropout = 0.1
 run, device_name, checkpoint_every = nil.as(String?), "blas", 100
 OptionParser.parse do |parser|
   parser.banner = "Usage: finetune --out RUN [options]"
@@ -45,6 +46,7 @@ OptionParser.parse do |parser|
   parser.on("--min-lr X", "Final learning rate (#{settings.min_lr})") { |value| settings.min_lr = value.to_f }
   parser.on("--warmup N", "Warm-up steps (#{settings.warmup})") { |value| settings.warmup = value.to_i }
   parser.on("--weight-decay X", "AdamW's weight decay (#{settings.weight_decay})") { |value| settings.weight_decay = value.to_f }
+  parser.on("--dropout X", "Share of activations zeroed in training, 0 for none (#{settings.dropout})") { |value| settings.dropout = value.to_f }
   parser.on("--seed N", "Random seed (#{settings.seed})") { |value| settings.seed = value.to_i }
   parser.on("--eval-every N", "Steps between validations (#{settings.eval_every})") { |value| settings.eval_every = value.to_i }
   parser.on("--eval-batches N", "Batches per validation (#{settings.eval_batches})") { |value| settings.eval_batches = value.to_i }
@@ -64,7 +66,7 @@ trainer = Finetune::Trainer.new(dir, settings, device)
 s = trainer.settings
 start = trainer.progress.step
 say.call(start == 0 ? "new run in #{dir} on #{device_name}" : "resuming #{dir} at step #{start} on #{device_name}")
-say.call("#{s.model} on #{s.data}: batch #{s.batch} × #{s.context}, #{s.steps} steps, lr #{s.lr} to #{s.min_lr}")
+say.call("#{s.model} on #{s.data}: batch #{s.batch} × #{s.context}, #{s.steps} steps, lr #{s.lr} to #{s.min_lr}, dropout #{s.dropout}")
 
 # The training steps' own time since the last report, leaving out validations,
 # samples and checkpoints.

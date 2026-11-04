@@ -141,6 +141,9 @@ module Tensomite
         # dx = y · (g - Σ g·y) · scale, per row; the mask's gradient lacks the scale.
         grads = [softmax_grad(g, result, node.scale)] of Tensor?
         srcs.size > 1 ? grads << (node.scale ? softmax_grad(g, result, nil) : grads.first) : grads
+      in Op::Dropout
+        # The same mask and scale, on the gradient.
+        [Tensor.lazy(Node.new(Op::Dropout, [g], g.shape, g.dtype, g.device, scale: node.scale, dropout: node.dropout))] of Tensor?
       in Op::SoftmaxGrad, Op::LayerNormGrad
         raise Error.new("#{node.op} has no gradient")
       in Op::LogSoftmax

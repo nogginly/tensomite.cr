@@ -43,21 +43,22 @@ File or directory         |What it is
 
 ## Resuming exactly
 
-A checkpoint holds the weights, AdamW's `m` and `v`, and the step. The rest of what decides the next step is already fixed. The batch of step *n* comes from a generator seeded with the run's seed and *n*, so no generator state needs saving. The learning rate is a function of the step and the settings. The text is the saved `tokens.bin`, not the text file, which may since have changed. So on one device, a run resumed from a checkpoint takes the same steps, to the bit, as one that never stopped; the specs check this. Each checkpoint is written to `checkpoint.new/` and then swapped in, so an interruption leaves one whole checkpoint.
+A checkpoint holds the weights, AdamW's `m` and `v`, and the step. The rest of what decides the next step is already fixed. The batch of step *n* comes from a generator seeded with the run's seed and *n*, and so does its dropout, so no generator state needs saving. The learning rate is a function of the step and the settings. The text is the saved `tokens.bin`, not the text file, which may since have changed. So on one device, a run resumed from a checkpoint takes the same steps, to the bit, as one that never stopped; the specs check this. Each checkpoint is written to `checkpoint.new/` and then swapped in, so an interruption leaves one whole checkpoint.
 
 ## Settings
 
-Option                          |Default         |Meaning                                                            
---------------------------------|----------------|-------------------------------------------------------------------
-`--model`                       |`models/gpt2`   |the pretrained GPT-2; its heads come from its `config.json`        
-`--data`                        |Tiny Shakespeare|the text to fine-tune on                                           
-`--batch`, `--context`          |8, 256          |sequences per step, and tokens per sequence                        
-`--steps`                       |1000            |training steps                                                     
-`--lr`, `--min-lr`, `--warmup`  |1e-4, 1e-5, 50  |a linear warm-up to the peak, then a cosine decay to the minimum   
-`--weight-decay`                |0.01            |AdamW's pull of the weights towards zero                           
-`--eval-every`, `--eval-batches`|100, 8          |steps between validations, and batches in each                     
-`--patience`                    |0               |validations without a new best before stopping; 0 never stops early
-`--prompt`                      |a newline       |what each validation's sample continues                            
+Option                          |Default         |Meaning                                                                                
+--------------------------------|----------------|---------------------------------------------------------------------------------------
+`--model`                       |`models/gpt2`   |the pretrained GPT-2; its heads come from its `config.json`                            
+`--data`                        |Tiny Shakespeare|the text to fine-tune on                                                               
+`--batch`, `--context`          |8, 256          |sequences per step, and tokens per sequence                                            
+`--steps`                       |1000            |training steps                                                                         
+`--lr`, `--min-lr`, `--warmup`  |1e-4, 1e-5, 50  |a linear warm-up to the peak, then a cosine decay to the minimum                       
+`--weight-decay`                |0.01            |AdamW's pull of the weights towards zero                                               
+`--dropout`                     |0.1             |the share of activations zeroed at each training step, as GPT-2 was trained; 0 for none
+`--eval-every`, `--eval-batches`|100, 8          |steps between validations, and batches in each                                         
+`--patience`                    |0               |validations without a new best before stopping; 0 never stops early                    
+`--prompt`                      |a newline       |what each validation's sample continues                                                
 
 **How long a run takes.** GPT-2 small at batch 8 × 256 trains at about 5,000 tokens/s on a GB10 and 2,700 on an M5 Pro, so a night is roughly 150M and 75M tokens. A small text is seen many times over: Tiny Shakespeare's 300K tokens would pass about 1,200 times in a night on the GB10. Set `--patience` so the run stops when validation stops improving, rather than memorising the text.
 

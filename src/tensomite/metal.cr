@@ -62,7 +62,7 @@ module Tensomite
       Op::Exp => "exp_f32", Op::Log => "log_f32", Op::Tanh => "tanh_f32", Op::Sqrt => "sqrt_f32",
       Op::Copy => "copy_f32",
     }
-    private OTHER          = %w[copy_into_f32 sum_f32 max_f32 sum_short_f32 max_short_f32 gather_f32 fill_zero_f32 scatter_add_f32 scatter_add_column_f32 unview_f32 matmul_f32 matmul_split_f32 matmul_tiled_chunks_64x64_f32 matmul_chunk_sums_f32 matmul_tiled_32x32_f32 matmul_tiled_64x64_f32 matmul_tiled_32x64_f32 softmax_f32 softmax_scaled_f32 softmax_grad_f32 log_softmax_f32 layernorm_f32 layernorm_grad_f32]
+    private OTHER          = %w[copy_into_f32 sum_f32 max_f32 sum_short_f32 max_short_f32 gather_f32 fill_zero_f32 scatter_add_f32 scatter_add_column_f32 unview_f32 matmul_f32 matmul_split_f32 matmul_tiled_chunks_64x64_f32 matmul_chunk_sums_f32 matmul_tiled_32x32_f32 matmul_tiled_64x64_f32 matmul_tiled_32x64_f32 dropout_f32 softmax_f32 softmax_scaled_f32 softmax_grad_f32 log_softmax_f32 layernorm_f32 layernorm_grad_f32]
     private OPTIONAL       = %w[matmul_atomic_f32]
     private COLS           =  32
     private SLICES         =   8
@@ -364,6 +364,7 @@ module Tensomite
       when Op::Unview                                                                     then return encode_unview(node, output)
       when Op::MatMul                                                                     then encode_matmul(node, output)
       when Op::Kernel                                                                     then encode_kernel(node, output)
+      when Op::Dropout                                                                    then encode_dropout(node, output)
       when Op::Softmax, Op::SoftmaxGrad, Op::LogSoftmax, Op::LayerNorm, Op::LayerNormGrad then encode_row_op(node, output)
       else                                                                                     return encode_elementwise(node, output)
       end
@@ -640,6 +641,15 @@ module Tensomite
       dispatch_groups(name, {rows, 1}, {threads, 1}, [mtl(src), mtl(other), output.mtl],
         [view_args(src.view), view_args(other.view), u32(node.shape.last), Slice[node.scale || 1f32].to_unsafe_bytes,
          Slice[node.softmax_flags].to_unsafe_bytes])
+    end
+
+    # Dropout: one thread per element, hashing its position (see `Tensor#dropout`).
+    private def encode_dropout(node : Node, output : MetalBuffer) : Nil
+      mask = node.dropout || raise Error.new("dropout without a mask")
+      src = node.srcs.first
+      dispatch("dropout_f32", node.size, [mtl(src), output.mtl],
+        [elementwise_view_args(src.view), u32(node.size), Slice[mask.seed, mask.stream, mask.threshold].to_unsafe_bytes,
+         Slice[node.scale || 1f32].to_unsafe_bytes])
     end
 
     # Kernel: one thread per element, running the kernel's generated MSL, which is

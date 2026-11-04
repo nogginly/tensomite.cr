@@ -142,7 +142,10 @@ module Tensomite
     # 3. Scores queries against keys, scaled by 1/√(head width), masked, and
     #    normalised with softmax; the weights then average the values.
     # 4. Rejoins the heads and projects back to the width.
-    def forward(x : Tensor, mask : Tensor, cache : Cache? = nil) : Tensor
+    #
+    # With *dropout*, as in training, it applies to the attention weights and to
+    # the projected output, as GPT-2's does.
+    def forward(x : Tensor, mask : Tensor, cache : Cache? = nil, dropout : Dropout? = nil) : Tensor
       rows, width = x.shape
       length = mask.shape[0]
       batch, head_width = rows // length, width // heads
@@ -153,8 +156,10 @@ module Tensomite
       end
       k, v = cache.append(k, v) if cache
       weights = q.matmul(k.transpose).softmax(scale: 1 / Math.sqrt(head_width), mask: mask)
+      weights = dropout.call(weights) if dropout
       attended = weights.matmul(v).permute([0, 2, 1, 3]).reshape([batch * length, width])
-      c_proj.call(attended)
+      output = c_proj.call(attended)
+      dropout ? dropout.call(output) : output
     end
   end
 
