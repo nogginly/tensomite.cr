@@ -62,6 +62,29 @@ Option                          |Default         |Meaning
 
 **How long a run takes.** GPT-2 small at batch 8 × 256 trains at about 5,000 tokens/s on a GB10 and 2,700 on an M5 Pro, so a night is roughly 150M and 75M tokens. A small text is seen many times over: Tiny Shakespeare's 300K tokens would pass about 1,200 times in a night on the GB10. Set `--patience` so the run stops when validation stops improving, rather than memorising the text. On Tiny Shakespeare with GPT-2 small, the best validation loss came at step 200 without dropout and at step 500 with 0.1, which also kept validation loss nearly level for hundreds of steps after its best.
 
+## Fine-tuning on code
+
+`scripts/make_code_corpus.sh` writes the Crystal standard library's source, by default from the installed compiler, as one text: 1,646 files and 9.1 MB, or 4.1M GPT-2 tokens. Each file follows a `# File: path` line, in an order shuffled by a checksum of its path, so the validation tenth is whole files from every part of the library. `bench/code_eval.cr` then compares models on methods from those held-out files.
+
+```sh
+scripts/make_code_corpus.sh                              # data/crystal/input.txt
+bin/release/finetune --out runs/crystal --data data/crystal/input.txt --device cuda \
+  --batch 4 --context 512 --steps 6000 --eval-every 250 --patience 4 --prompt "  def "
+crystal run --release -Dcuda bench/code_eval.cr -- --run runs/crystal --device cuda --verbose
+```
+
+The run uses the same 2,048 tokens a step as the default, but in windows of 512, since the evaluation's prompts and bodies run to 512 positions. 6,000 steps is about 3.3 passes over the training text.
+
+For each method, the evaluation shows a model the file up to the `def` line, at most 320 tokens of it, and asks for a greedy completion of at most 192 tokens. It reports five things:
+
+- **body loss:** the loss of the real body;
+- **closes:** whether the completion reached an `end` at the `def`'s indent;
+- **parses:** whether the file, with the completion in place, is valid Crystal according to `crystal tool format`;
+- **first line:** whether the completion's first line matches the real one;
+- **exact:** whether the whole completion matches the real body.
+
+It doesn't check types: the compiler checks only the methods a program calls, so a type check of the file would pass any body. On 8 methods, GPT-2 small closes 1 and parses 1, with a body loss of 2.19; most of its completions repeat a comment until they run out of tokens.
+
 ## Specs
 
 ```sh
