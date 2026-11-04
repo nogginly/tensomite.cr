@@ -1,8 +1,8 @@
 # Serves a GPT-2 model over HTTP, or runs one completion in the terminal.
 #
-#     crystal build --release apps/server/server.cr -o server
-#     ./server --model models/gpt2                              # the HTTP server
-#     ./server generate --model models/gpt2 "Once upon a time"  # one completion
+#     ops br server                       # builds bin/release/server
+#     bin/release/server --model models/gpt2                              # the HTTP server
+#     bin/release/server generate --model models/gpt2 "Once upon a time"  # one completion
 #
 # The model directory holds `model.safetensors`, `vocab.json` and `merges.txt`,
 # as `scripts/fetch_gpt2.sh` downloads them or as tensomite saves a fine-tuned
