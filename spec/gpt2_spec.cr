@@ -45,6 +45,12 @@ describe "GPT-2 on the tiny reference model" do
     expected.corpus.each { |text| bpe.decode(bpe.encode(text)).should eq text }
   end
 
+  it "decodes to the corpus's bytes, and finds tokens by name" do
+    expected.corpus.each { |text| bpe.decode_bytes(bpe.encode(text)).should eq text.to_slice }
+    bpe.id?("<|endoftext|>").should be_nil
+    bpe.id?("The").should eq bpe.encode("The").first
+  end
+
   (DEVICES + GPUS).each do |device|
     describe "on #{device.class}" do
       model = GPT2.load("#{dir}/model.safetensors", heads: 4, device: device)

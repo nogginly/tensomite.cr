@@ -68,12 +68,24 @@ module Tensomite
     # Returns the text of *ids*. Byte sequences that are not valid UTF-8, such as a
     # character cut between tokens, become U+FFFD.
     def decode(ids : Enumerable(Int32)) : String
+      String.new(decode_bytes(ids)).scrub
+    end
+
+    # Returns the bytes of *ids*, which may end partway through a character, as
+    # when text is streamed a token at a time.
+    def decode_bytes(ids : Enumerable(Int32)) : Bytes
       bytes = IO::Memory.new
       ids.each do |id|
         token = @tokens[id]? || raise Error.new("token id #{id} is not in the vocabulary")
         token.each_char { |char| bytes.write_byte(CHAR_TO_BYTE[char]) }
       end
-      String.new(bytes.to_slice).scrub
+      bytes.to_slice
+    end
+
+    # Returns the id of *token*, such as GPT-2's `<|endoftext|>`, or `nil` when the
+    # vocabulary lacks it.
+    def id?(token : String) : Int32?
+      @ids[token]?
     end
 
     private def encode_word(word : String) : Array(Int32)

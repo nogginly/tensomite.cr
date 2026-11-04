@@ -17,17 +17,20 @@ A guide for maintaining tensomite, fixing bugs and adding features. `DESIGN.md` 
 
 ## Everyday commands
 
-Task                  |Command                                              |With `ops`                 
-----------------------|-----------------------------------------------------|---------------------------
-Run specs             |`crystal spec`                                       |`ops test_specs`           
-Lint                  |`bin/ameba src/ spec/ bench/ examples/`              |`ops lint` (`src/` only)   
-Check formatting      |`crystal tool format --check src spec bench examples`|                           
-Fix formatting        |`crystal tool format src spec bench examples`        |                           
-Everything before a PR|all three of the above                               |`ops test` (specs and lint)
+Task                  |Command                                                   |With `ops`                                              
+----------------------|----------------------------------------------------------|--------------------------------------------------------
+Run specs             |`crystal spec`                                            |`ops test_specs`                                        
+Run the apps' specs   |`crystal spec apps/server/spec`                           |`ops test_apps`                                         
+Lint                  |`bin/ameba src/ spec/ bench/ examples/ apps/`             |`ops lint` (all but `bench/`)                           
+Check formatting      |`crystal tool format --check src spec bench examples apps`|                                                        
+Fix formatting        |`crystal tool format src spec bench examples apps`        |                                                        
+Build the apps        |`shards build --release`, into `bin/`                     |`ops br` into `bin/release/`, `ops bd` into `bin/debug/`
+Run the server app    |`bin/release/server …`                                    |`ops run-server …` builds, then runs it                 
+Everything before a PR|all of the above but building                             |`ops test` (specs, apps' specs and lint)                
 
 All three must be clean before a PR.
 
-Benchmarks live in `bench/` and examples in `examples/`. Both run in release mode, for example `crystal run --release bench/matmul.cr`. CI type-checks, formats and lints them with everything else, but does not run them.
+Benchmarks live in `bench/` and examples in `examples/`. Both run in release mode, for example `crystal run --release bench/matmul.cr`. CI type-checks, formats and lints them with everything else, but does not run them. Apps live in `apps/`, each with its own specs, which CI runs: `crystal spec apps/server/spec`. Each is a `shards` target in `shard.yml`, so `shards build` builds it into `bin/`; with `ops`, release builds go to `bin/release/` and debug builds to `bin/debug/`.
 
 **Training on Tiny Shakespeare** (the M5 exit):
 
@@ -94,6 +97,7 @@ spec/fixtures/              reference outputs and small reference files (see bel
 scripts/                    fixture generation, model download, document checks, emulate_metal/ (Metal kernels on the CPU) and cuda_stub/ (CUDA builds without a driver)
 bench/                      benchmarks, run with --release
 examples/                   programs using the library, such as training on Shakespeare and TUTORIAL.md's multiply.cr
+apps/server/                an inference server and CLI on the library, with its own specs (apps/server/README.md)
 models/, data/              downloaded weights and datasets (git-ignored)
 ```
 
