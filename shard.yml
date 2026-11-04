@@ -16,3 +16,5 @@ development_dependencies:
 targets:
   server:
     main: apps/server/server.cr
+  finetune:
+    main: apps/finetune/finetune.cr

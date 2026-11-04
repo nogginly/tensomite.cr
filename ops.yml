@@ -28,7 +28,7 @@ actions:
     command: bin/ameba src/ spec/ examples/ apps/
     description: Run Crystal source linter (ameba)
   test_apps:
-    command: crystal spec --order random apps/server/spec
+    command: crystal spec --order random apps/server/spec apps/finetune/spec
   test_specs:
     command: crystal spec --order random
     description: Run all test specs
@@ -39,3 +39,7 @@ actions:
     command: ops br server && bin/release/server
   run-debug-server:
     command: ops bd server && bin/debug/server
+  run-finetune:
+    command: ops br finetune && bin/release/finetune
+  run-debug-finetune:
+    command: ops bd finetune && bin/debug/finetune
