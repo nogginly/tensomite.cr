@@ -60,7 +60,7 @@ module Tensomite
 
     # Gives the host copy to the device's host pool and the device memory to the
     # device, which reuses or frees it.
-    def finalize
+    protected def give_back : Nil
       @copy.try { |copy| cuda.recycle(copy) }
       cuda.retire(pointer, bytesize)
     end

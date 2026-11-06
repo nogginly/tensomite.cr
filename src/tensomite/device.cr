@@ -1,11 +1,35 @@
 module Tensomite
   # An allocation owned by a device. Only its device can read or write it.
+  #
+  # Its memory goes back to the device when the buffer is collected, or earlier
+  # through `#release`.
   abstract class Buffer
     getter device : Device
     getter bytesize : Int32
+    @released = false
 
     def initialize(@device, @bytesize)
     end
+
+    # Returns whether `#release` has given the memory back.
+    def released? : Bool
+      @released
+    end
+
+    # Gives the memory back to the device now, rather than when the buffer is
+    # collected. The buffer must not be read or written afterwards.
+    def release : Nil
+      return if @released
+      @released = true
+      give_back
+    end
+
+    def finalize
+      give_back unless @released
+    end
+
+    # Returns the memory to the device, which reuses or frees it.
+    protected abstract def give_back : Nil
   end
 
   # A place where buffers live and kernels run.

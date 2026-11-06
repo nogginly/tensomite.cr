@@ -495,6 +495,14 @@ A graph built anew every step, as in training or decoding, would allocate a fres
 
 Reuse lags by one collection: memory comes back only when the collector runs. A training loop that collects once per step (`examples/shakespeare.cr`) gets most of its buffers back before the next step; on the Linux container, that took a step from 744 to 470 ms, with identical losses.
 
+**Releasing within a realize (Decision CD).** The collector cannot see device memory, and it is conservative: a stale pointer to any collection that holds a step's nodes, such as the scheduler's list or autograd's table of gradients, keeps every buffer of the step. On GPT-2 large that is about 60 GB, and the GB10 killed runs that held two steps at once. So `Tensor.realize(tensors, release: true)`, which `Optimizer#step(loss)` uses, does not leave intermediates to the collector:
+
+1. Before running, it counts how many nodes of the realize read each node.
+2. After each node runs, it counts down its sources, and releases each with no readers left: `Buffer#release` gives the memory back now, and finalizers skip a released buffer.
+3. Roots keep their buffers, as do `Write` nodes and the buffers they write into. A released node raises `Error` when read or computed, rather than reading memory reused since.
+
+Memory released mid-step goes back through the same path as a finalizer's, so later nodes of the step can reuse it: the forward pass's activations are reused as the backward pass finishes with them. That is safe because each device runs work in the order it is submitted, one CUDA stream and one Metal queue, so a buffer still being read by a queued kernel is only overwritten by work queued after it. A second stream would break this. Metal moves retired buffers into its pool only when the GPU is idle, so there the release happens within the step but reuse waits for its end. Measured on BLAS, three training steps of GPT-2 small at batch 2 × 128: the peak fell from 5.5 to 3.2 GB, and memory held after a step from 4.2 to 2.3 GB. On the GB10, GPT-2 large at batch 4 × 512 takes 2,395 ms a step, from 2,624, with the same losses to the last digit printed.
+
 **Batched commits on Metal.** The device commits its command buffer every `commit_every` dispatches (64), without waiting, and starts a new one. The GPU therefore starts work while the host is still building and encoding the rest. A queue runs its command buffers in order, with Metal tracking each buffer's readers and writers across them, so results are unchanged.
 
 ## Kernel macros

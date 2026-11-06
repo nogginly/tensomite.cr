@@ -23,11 +23,15 @@ module Tensomite
     # Differentiates *loss* with respect to the parameters given at creation,
     # replaces each one's value with its update, and returns the loss's value.
     # Raises `Error` for an optimizer created without parameters.
+    #
+    # The step's intermediate tensors, from the forward pass that made *loss* to
+    # the gradients, give their memory back as soon as the step no longer needs
+    # them, and cannot be read afterwards; *loss* can.
     def step(loss : Tensor) : Float32
       slots = @slots || raise Error.new("step(loss) needs an optimizer created with parameters")
       values = slots.map(&.value)
       grads = Tensomite.grad(loss, values)
-      slots.zip(apply(values, grads, [loss])) { |slot, updated| slot.value = updated }
+      slots.zip(apply(values, grads, [loss], release: true)) { |slot, updated| slot.value = updated }
       loss.to_a(Float32).first
     end
 
@@ -38,15 +42,17 @@ module Tensomite
     end
 
     # Computes every update, the optimizer's new state and *also* in one
-    # realisation, so that the device is waited for once per step.
-    private def apply(params : Array(Tensor), grads : Array(Tensor), also = [] of Tensor) : Array(Tensor)
+    # realisation, so that the device is waited for once per step; with
+    # *release*, giving back intermediates' memory as it goes (see
+    # `Tensor.realize`).
+    private def apply(params : Array(Tensor), grads : Array(Tensor), also = [] of Tensor, release : Bool = false) : Array(Tensor)
       raise ShapeError.new("#{grads.size} gradients for #{params.size} params") unless grads.size == params.size
       params.zip(grads).each do |(param, grad)|
         raise ShapeError.new("gradient #{grad.shape} for param #{param.shape}") unless param.shape == grad.shape
       end
       @steps += 1
       updated = params.map_with_index { |param, i| update(i, param, grads[i]) }
-      Tensor.realize(updated + @kept.map { |(state, i)| state[i] } + also)
+      Tensor.realize(updated + @kept.map { |(state, i)| state[i] } + also, release: release)
       @kept.each { |(state, i)| state[i] = state[i].detach }
       @kept.clear
       updated.map(&.detach)

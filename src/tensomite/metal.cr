@@ -24,7 +24,7 @@ module Tensomite
     end
 
     # Gives the `MTLBuffer` back to its device, which pools or releases it.
-    def finalize
+    protected def give_back : Nil
       if metal = device.as?(Metal)
         metal.retire(@mtl, bytesize)
       else
