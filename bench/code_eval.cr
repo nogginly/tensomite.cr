@@ -191,7 +191,11 @@ scores = models.map do |path|
   config = File.join(path, "config.json")
   heads = File.exists?(config) ? JSON.parse(File.read(config))["n_head"].as_i : 12
   model = GPT2.load(File.join(path, "model.safetensors"), heads, device)
-  methods.map { |method| CodeEval.score(model, bpe, method, context, max_tokens) }
+  methods.map do |method|
+    score = CodeEval.score(model, bpe, method, context, max_tokens)
+    GC.collect
+    score
+  end
 end
 
 if verbose
