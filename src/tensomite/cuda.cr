@@ -209,6 +209,14 @@ module Tensomite
     # Returns the number of uploads since creation.
     getter uploads = 0
 
+    @device_bytes = Atomic(Int64).new(0)
+
+    # Returns the bytes of device memory allocated from the driver and not yet
+    # freed: in live buffers and in `#buffer_pool`.
+    def device_bytes : Int64
+      @device_bytes.get
+    end
+
     # Returns the number of downloads since creation.
     getter downloads = 0
 
@@ -319,7 +327,10 @@ module Tensomite
       start = Time.instant
       recycle_retired
       pooled = buffer_pool.take(bytesize)
-      pointer = pooled || context.alloc(Math.max(bytesize, 4))
+      pointer = pooled || begin
+        @device_bytes.add(Math.max(bytesize, 4).to_i64)
+        context.alloc(Math.max(bytesize, 4))
+      end
       @profile.try do |profile|
         profile.alloc += (Time.instant - start).total_seconds
         profile.allocations += 1
@@ -415,6 +426,7 @@ module Tensomite
     protected def retire(pointer : LibCUDA::DevicePtr, bytesize : Int32) : Nil
       return if @retired.push(pointer, bytesize)
       context.free_from_any_thread(pointer)
+      @device_bytes.sub(Math.max(bytesize, 4).to_i64)
       @profile.try { |profile| profile.frees += 1 }
     end
 
@@ -423,6 +435,7 @@ module Tensomite
       @retired.drain do |pointer, bytesize|
         next if buffer_pool.give(pointer, bytesize)
         context.free(pointer)
+        @device_bytes.sub(Math.max(bytesize, 4).to_i64)
         @profile.try { |profile| profile.frees += 1 }
       end
     end

@@ -83,6 +83,14 @@ require "./spec_helper"
         sums.should eq (t + 1).softmax(0).to_a(Float32)
       end
 
+      it "counts the device memory it holds, pooled or not" do
+        before = cuda.device_bytes
+        t = Tensor.from(Array.new(12_345) { 1.0_f32 }, [12_345], cuda)
+        (cuda.device_bytes - before).should eq 12_345 * 4
+        cuda.device_bytes.should be >= cuda.buffer_pool.held
+        t.size.should eq 12_345
+      end
+
       it "runs ops without CUDA kernels on the host, moving data through counted transfers" do
         uploads, downloads = cuda.uploads, cuda.downloads
         t = Tensor.from(f32(1, 2, 3), [3], cuda)

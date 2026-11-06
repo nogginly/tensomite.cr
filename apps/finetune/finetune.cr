@@ -68,6 +68,28 @@ start = trainer.progress.step
 say.call(start == 0 ? "new run in #{dir} on #{device_name}" : "resuming #{dir} at step #{start} on #{device_name}")
 say.call("#{s.model} on #{s.data}: batch #{s.batch} × #{s.context}, #{s.steps} steps, lr #{s.lr} to #{s.min_lr}, dropout #{s.dropout}")
 
+# Returns *bytes* in gigabytes, for the progress lines.
+gb = ->(bytes : Int64) { "#{(bytes / 1e9).round(1)} GB" }
+
+# Returns the memory in use: the system's, where `/proc/meminfo` gives it; on
+# CUDA, the device memory tensomite holds and how much of it is pooled; and the
+# collector's heap.
+memory = -> do
+  parts = [] of String
+  if File.exists?("/proc/meminfo")
+    info = File.read("/proc/meminfo")
+    total, available = info[/MemTotal:\s+(\d+)/, 1].to_i64, info[/MemAvailable:\s+(\d+)/, 1].to_i64
+    parts << "system #{gb.call((total - available) * 1024)}"
+  end
+  {% if flag?(:cuda) %}
+    if cuda = device.as?(Tensomite::CUDA)
+      parts << "device #{gb.call(cuda.device_bytes)} (pool #{gb.call(cuda.buffer_pool.held)})"
+    end
+  {% end %}
+  parts << "heap #{gb.call(GC.stats.heap_size.to_i64)}"
+  parts.join(", ")
+end
+
 # The training steps' own time since the last report, leaving out validations,
 # samples and checkpoints.
 stepping, stepped = Time::Span.zero, 0
@@ -79,7 +101,7 @@ until trainer.done?
   step = trainer.progress.step
   if step % 10 == 0 || trainer.done?
     ms = stepping.total_milliseconds / stepped
-    say.call("step #{step}: loss #{loss.round(4)}, lr #{s.lr_at(step - 1).round(7)}, #{ms.round(0)} ms/step")
+    say.call("step #{step}: loss #{loss.round(4)}, lr #{s.lr_at(step - 1).round(7)}, #{ms.round(0)} ms/step; memory: #{memory.call}")
     stepping, stepped = Time::Span.zero, 0
   end
   stop = false
@@ -87,7 +109,7 @@ until trainer.done?
     validation = trainer.validation_loss
     stop = trainer.record(validation)
     best = trainer.progress.best.try(&.round(4))
-    say.call("step #{step}: validation loss #{validation.round(4)}, best #{best}")
+    say.call("step #{step}: validation loss #{validation.round(4)}, best #{best}; memory: #{memory.call}")
     say.call("step #{step}: sample #{trainer.sample.inspect}")
   end
   trainer.checkpoint if step % checkpoint_every == 0 || trainer.done? || stop
