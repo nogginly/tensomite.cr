@@ -140,8 +140,13 @@ module Tensomite
     # ```
     # Tensor.realize([loss, *updated_params])
     # ```
-    def self.realize(tensors : Array(Tensor)) : Array(Tensor)
-      Scheduler.realize(tensors.map(&.node))
+    #
+    # With *release*, the intermediate tensors computed on the way give their
+    # memory back as soon as nothing more in this call reads them, and can no
+    # longer be read: use it when only *tensors* are wanted, as in a training
+    # step (see `Scheduler.realize`).
+    def self.realize(tensors : Array(Tensor), release : Bool = false) : Array(Tensor)
+      Scheduler.realize(tensors.map(&.node), release)
       tensors
     end
 

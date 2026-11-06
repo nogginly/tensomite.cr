@@ -97,6 +97,8 @@ module Tensomite
   #
   # A leaf node has no op and is created realised. Any other node holds an op and its
   # sources until the scheduler realises it, after which it holds only its buffer.
+  # A `Scheduler.realize` that releases intermediates may then give that buffer
+  # back (`#release`); the node is then neither realised nor computable.
   class Node
     getter op : Op?
     getter srcs : Array(Tensor)
@@ -149,11 +151,23 @@ module Tensomite
 
     # Returns the buffer of a realised node; raises `Error` otherwise.
     def buffer! : Buffer
-      @buffer || raise Error.new("node is not realised")
+      @buffer || raise Error.new(released? ? "node's buffer was released after the realize that computed it" : "node is not realised")
     end
 
     def realized? : Bool
       !@buffer.nil?
+    end
+
+    # Returns whether `#release` gave this node's buffer back.
+    getter? released = false
+
+    # Gives the buffer back to its device, leaving a node that can no longer be
+    # read or computed. Leaves keep their buffers.
+    def release : Nil
+      return if op.nil?
+      @buffer.try(&.release)
+      @buffer = nil
+      @released = true
     end
 
     # Records the computed *buffer* and drops the sources so they can be collected.

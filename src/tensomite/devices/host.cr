@@ -27,7 +27,7 @@ module Tensomite
     end
 
     # Gives the memory back to the device's pool, unless it belongs to a file mapping.
-    def finalize
+    protected def give_back : Nil
       return if @owner
       device.as?(HostDevice).try(&.recycle(@bytes))
     end
