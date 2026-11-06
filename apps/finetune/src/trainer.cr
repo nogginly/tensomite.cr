@@ -140,7 +140,8 @@ module Finetune
     end
 
     # Returns the mean loss over the validation text's `eval_batches` fixed
-    # batches, evenly spaced through it.
+    # batches, evenly spaced through it. Collects after each batch, as `#step`
+    # does, so that one batch's device memory is free before the next.
     def validation_loss : Float64
       span = @corpus.size - @split - settings.context - 1
       raise Tensomite::Error.new("the validation text is shorter than one window") if span <= 0
@@ -149,7 +150,9 @@ module Finetune
         windows = Array.new(settings.batch) { |i| @corpus.window(@split + span * (b * settings.batch + i) // count, settings.context + 1) }
         inputs = Tensomite::Tensor.from(windows.flat_map(&.[0, settings.context]), [settings.batch, settings.context], @device)
         targets = Tensomite::Tensor.from(windows.flat_map(&.[1, settings.context]), [settings.batch * settings.context], @device)
-        model.call(inputs).cross_entropy(targets).to_a(Float32)[0].to_f64
+        loss = model.call(inputs).cross_entropy(targets).to_a(Float32)[0].to_f64
+        GC.collect
+        loss
       end
       total / settings.eval_batches
     end
@@ -171,6 +174,7 @@ module Finetune
     def sample : String
       prompt = tokenizer.encode(settings.sample_prompt)
       ids = model.generate(prompt, settings.sample_length, Tensomite::Sampler.new(temperature: 0.8, top_k: 40, seed: settings.seed))
+      GC.collect
       tokenizer.decode(ids)
     end
 
