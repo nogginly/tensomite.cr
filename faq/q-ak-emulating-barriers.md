@@ -1,6 +1,6 @@
 # Q-AK: Why can the emulator run some kernels' threads in a loop but not others?
 
-*[GPU runtime and lifetimes](README.md#gpu-runtime-and-lifetimes) · previous: [Q-AI](q-ai-asynchronous-errors.md) · last in the theme*
+*[GPU runtime and lifetimes](README.md#gpu-runtime-and-lifetimes) · previous: [Q-AI](q-ai-asynchronous-errors.md) · next: [Q-BG](q-bg-which-validation-fails.md)*
 
 ## The question
 

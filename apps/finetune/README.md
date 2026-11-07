@@ -83,14 +83,25 @@ For each method, the evaluation shows a model the file up to the `def` line, at 
 - **first line:** whether the completion's first line matches the real one;
 - **exact:** whether the whole completion matches the real body.
 
-It doesn't check types: the compiler checks only the methods a program calls, so a type check of the file would pass any body. Measured on 40 methods after the run above:
+It doesn't check types: the compiler checks only the methods a program calls, so a type check of the file would pass any body.
 
-Model              |Body loss|Closes|Parses|First line|Exact
--------------------|---------|------|------|----------|-----
-GPT-2 small        |2.03     |6/40  |6/40  |1/40      |0/40 
-fine-tuned, `best/`|1.09     |30/40 |29/40 |8/40      |0/40 
+GPT-2 large fine-tunes the same way, from `scripts/fetch_gpt2.sh large`, with a schedule that ends near where its validation loss peaks:
 
-GPT-2 small mostly repeats comments or writes other languages; the fine-tuned model writes Crystal's grammar, often with the wrong logic, and most of its misses are loops such as `builder.builder.builder…`.
+```sh
+bin/release/finetune --out runs/crystal-large --model models/gpt2-large --data data/crystal/input.txt --device cuda \
+  --batch 4 --context 512 --steps 3500 --lr 4e-5 --min-lr 4e-6 --eval-every 250 --patience 6 --checkpoint-every 500 --prompt "  def"
+```
+
+A step takes 2.7 s on the GB10, with about 34 GB of device memory. Measured on 200 methods, with `--methods 200`:
+
+Model                                                   |Body loss|Closes|Parses|First line|Exact
+--------------------------------------------------------|---------|------|------|----------|-----
+GPT-2 small                                             |1.879    |26    |26    |2         |0    
+small, fine-tuned 6,000 steps                           |0.934    |161   |159   |23        |2    
+large, fine-tuned, 9,000-step schedule, stopped at 4,750|0.807    |174   |170   |14        |1    
+large, fine-tuned 3,500 steps                           |0.786    |168   |165   |16        |2    
+
+GPT-2 small mostly repeats comments or writes other languages. The fine-tuned models write Crystal's grammar, often with the wrong logic, and most of their misses are loops such as `builder.builder.builder…`. Large closes and parses more often and has the lower loss, but small matches more first lines: where only one matched, small copied the opening of a neighbouring method in the prompt more often than large, which writes plausible code of its own. `scripts/compare_first_lines.py EVAL.txt MODEL_A MODEL_B` lists those methods from the `--verbose` output.
 
 Leave the trailing space off `--prompt`: GPT-2 attaches a space to the word after it, so a prompt ending in a lone space looks like indentation, and samples come out as spaces.
 
