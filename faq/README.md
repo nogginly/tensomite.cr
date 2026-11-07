@@ -17,6 +17,9 @@ flowchart LR
     runtime --> gpuspeed
     gpuspeed --> training["Fusion in training"]
     fusion --> training
+    decode --> serving["Serving"]
+    training --> finetune["Fine-tuning"]
+    finetune --> evaluate["Evaluating code"]
     style order stroke:#1971c2,stroke-width:3px
 ```
 
@@ -101,15 +104,19 @@ Question                               |In one line
 
 ## GPU runtime and lifetimes
 
-Two running examples: the bias `b`'s buffer on its way back to the pool, and CUDA's first probe, which squares a million floats.
+Two running examples: the bias `b`'s buffer on its way back to the pool, and CUDA's first probe, which squares a million floats. From Q-BG, a third: the GPT-2 fine-tune on the GB10 that failed at its validation at step 750.
 
-Question                             |In one line                                                                                                              
--------------------------------------|-------------------------------------------------------------------------------------------------------------------------
-[Q-U](q-u-finalizer-and-lock.md)     |Why can't a finalizer wait for a lock? The thread holding it may be its own, two frames up.                              
-[Q-V](q-v-encoded-is-not-executed.md)|When is reusing a buffer unsafe on Metal but not the CPU? When its consumer is encoded but not yet run.                  
-[Q-AH](q-ah-v2-symbols.md)           |Why does `libcuda` export both `cuMemAlloc` and `cuMemAlloc_v2`? Old binaries keep their old names; new code wants `_v2`.
-[Q-AI](q-ai-asynchronous-errors.md)  |Why did a bad launch fail at the copy? A launch only queues; the next wait reports the fault.                            
-[Q-AK](q-ak-emulating-barriers.md)   |Why can't the emulator loop over every kernel's threads? Threads that share memory across a barrier must run together.   
+Question                                |In one line                                                                                                                      
+----------------------------------------|---------------------------------------------------------------------------------------------------------------------------------
+[Q-U](q-u-finalizer-and-lock.md)        |Why can't a finalizer wait for a lock? The thread holding it may be its own, two frames up.                                      
+[Q-V](q-v-encoded-is-not-executed.md)   |When is reusing a buffer unsafe on Metal but not the CPU? When its consumer is encoded but not yet run.                          
+[Q-AH](q-ah-v2-symbols.md)              |Why does `libcuda` export both `cuMemAlloc` and `cuMemAlloc_v2`? Old binaries keep their old names; new code wants `_v2`.        
+[Q-AI](q-ai-asynchronous-errors.md)     |Why did a bad launch fail at the copy? A launch only queues; the next wait reports the fault.                                    
+[Q-AK](q-ak-emulating-barriers.md)      |Why can't the emulator loop over every kernel's threads? Threads that share memory across a barrier must run together.           
+[Q-BG](q-bg-which-validation-fails.md)  |Why did the fine-tune fail at the third validation? Long file writes moved the fiber between threads; the count of moves decided.
+[Q-BH](q-bh-isolated-and-finalizers.md) |Why can't `Isolated` alone make finalizers safe? Finalizers run on the collector's thread, not the pinned one.                   
+[Q-BK](q-bk-per-fiber-not-per-thread.md)|Why must per-task state follow the fiber? A fiber changes threads; state kept on the thread stays behind.                        
+[Q-BL](q-bl-buffers-a-write-fills.md)   |Why is a buffer a `Write` fills never released mid-step? Its readers come in a later realize: it is the KV cache.                
 
 ## GPU speed
 
@@ -137,6 +144,38 @@ Question                                        |In one line
 [Q-AX](q-ax-launches-not-bytes.md)              |Which GPU gains more from fusing layer norm's backward? Neither: the cost was launches, not bytes.                                       
 [Q-AY](q-ay-same-kernel-different-share.md)     |Why is `MatMul` a larger share of a step on the M5 Pro? Arithmetic, not bandwidth: its matmuls run 2.3× slower, its memory as fast.      
 [Q-AZ](q-az-bigger-patches.md)                  |Why did bigger patches per thread make the matmul slower? Registers: a thread holding ~144 floats leaves too few threads to hide latency.
+
+## Fine-tuning
+
+The running example: GPT-2 small fine-tuned on Tiny Shakespeare, then GPT-2 small and large on Crystal's standard library, all on the GB10.
+
+Question                                        |In one line                                                                                                                       
+------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------
+[Q-BB](q-bb-memory-of-a-training-step.md)       |How much memory does fine-tuning GPT-2 small take before activations? 16 bytes a parameter: about 2 GB.                           
+[Q-BC](q-bc-what-a-checkpoint-holds.md)         |What must a checkpoint hold to resume exactly? The step and early-stopping state; batches and dropout come from the seed and step.
+[Q-BE](q-be-why-dropout-helps.md)               |Why does dropout help on unseen text? Patterns that hang on a few activations keep failing; shared ones survive.                  
+[Q-BI](q-bi-when-validation-follows-training.md)|Why did validation follow training on code? Held-out code shares the training code's patterns; Shakespeare's other scenes do not. 
+[Q-BD](q-bd-testing-for-memorised-passages.md)  |How could you test for a memorised passage? Swap two words: recitation shows as a spike of loss, then near zero.                  
+[Q-BM](q-bm-what-patience-costs.md)             |Why did early stopping run 1,500 steps past the best? Patience 6 × 250 steps; less risks stopping at noise.                       
+
+## Evaluating code
+
+The running example: 200 methods from the standard library's held-out files, completed by GPT-2 small, fine-tuned small and fine-tuned large.
+
+Question                            |In one line                                                                                                                  
+------------------------------------|-----------------------------------------------------------------------------------------------------------------------------
+[Q-BF](q-bf-where-code-fails.md)    |Where does fine-tuned code fail most? Least at parsing, most at doing the right thing; types cannot be checked this way.     
+[Q-BJ](q-bj-why-greedy.md)          |Why evaluate greedily, loops and all? The same table every run, so differences are the models'.                              
+[Q-BN](q-bn-loss-and-first-lines.md)|How can lower loss come with fewer matching first lines? One is graded on the real text, the other on the model's top choice.
+[Q-BO](q-bo-copying-or-coherence.md)|Copying the file, or code that holds together? Both matter; neither model has both yet.                                      
+
+## Serving
+
+The running example: two requests to GPT-2 small at once, on the GB10.
+
+Question                            |In one line                                                                                                   
+------------------------------------|--------------------------------------------------------------------------------------------------------------
+[Q-BA](q-ba-two-requests-at-once.md)|One request after the other, or step by step? Step by step, batched: two tokens share one read of the weights.
 
 ## Decoding and the KV cache
 
