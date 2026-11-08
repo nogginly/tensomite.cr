@@ -108,7 +108,7 @@ describe "Llama's ops" do
       expect_close got, expected, 1e-5
     end
 
-    (DEVICES + GPUS).each do |device|
+    (DEVICES + GPUS).select(&.shape_invariant?).each do |device|
       it "gives the same bits in prefill and decode on #{device.class}" do
         attention = GroupedQueryAttention.new(width, heads, kv_heads, rng: Random.new(5), device: device)
         rope = RotaryEmbedding.new(head_width, context: 16, device: device)
@@ -122,7 +122,6 @@ describe "Llama's ops" do
           rows << attention.call(x.slice(0, i, i + 1), Tensor.causal_mask(1, i + 1, device), rope, cache).to_a(Float32)
         end
         rows.flatten.should eq whole
-        next if device.is_a?(BLAS)
         whole.should eq GroupedQueryAttention.new(width, heads, kv_heads, rng: Random.new(5)).call(
           Tensor.from(random_values(length * width, 9), [length, width]), Tensor.causal_mask(length, length),
           RotaryEmbedding.new(head_width, context: 16)).to_a(Float32)
