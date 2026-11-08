@@ -448,6 +448,27 @@ loss = model.call(inputs, dropout: Dropout.new(0.1, seed: step.to_u64)).cross_en
 
 For other weights in safetensors files, `SafeTensors.open(path)` lists them (`names`) and loads each as a tensor (`file["name", device]`). `SafeTensors.write(path, {"name" => tensor, ...})` writes tensors to a new file.
 
+## Pretrained models: Llama family
+
+`Llama` loads Llama-family models, such as SmolLM2, from a Hugging Face model directory: its `config.json` gives the sizes and its `model.safetensors` the weights. `scripts/fetch_smollm2.sh` downloads SmolLM2-135M-Instruct into `models/smollm2-135m-instruct`. Its weights ship as `BF16` and are widened to `F32` as they load. Compared with GPT-2, the parts are different but play the same roles:
+
+GPT-2                                |Llama                                    |What it changes                                                                         
+-------------------------------------|-----------------------------------------|----------------------------------------------------------------------------------------
+learned position embeddings          |rotary embeddings (`RotaryEmbedding`)    |positions rotate queries and keys, so attention depends on how far apart two tokens are 
+`LayerNorm`                          |`RMSNorm`                                |no mean subtracted and no bias                                                          
+GELU MLP                             |SwiGLU MLP (`SwiGLU`)                    |a gate, `silu(gate) · up`, chooses what passes                                          
+one key and value head per query head|grouped queries (`GroupedQueryAttention`)|SmolLM2's 9 query heads share 3 key and value heads, so the cache is a third of the size
+
+```crystal
+model = Llama.load("models/smollm2-135m-instruct", BLAS.default)
+bpe = BPE.from_json("models/smollm2-135m-instruct/tokenizer.json")
+prompt = bpe.encode("<|im_start|>user\nWhat is the capital of France?<|im_end|>\n<|im_start|>assistant\n")
+puts bpe.decode(model.generate(prompt, 64, stop: [bpe.specials["<|im_end|>"]]))
+# => The capital of France is Paris. ... <|im_end|>
+```
+
+An instruct model expects its chat template, ChatML for SmolLM2, as above. `generate` stops after a token in `stop:`, which it returns as the last token. `Llama` is a `Module` named as Hugging Face's file is (`model.embed_tokens`, `model.layers.0.self_attn.q_proj`, `model.norm`, and `lm_head` when the head does not share the embeddings). PyTorch stores each `Linear`'s weight as `[outputs, inputs]`, so `Module#load(path, transposed: regex)` copies the matching weights into tensomite's `[inputs, outputs]` as they load.
+
 ## Errors
 
 Error           |When                        |For example                                                             

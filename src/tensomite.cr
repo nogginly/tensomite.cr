@@ -28,6 +28,7 @@ require "./tensomite/bpe"
 require "./tensomite/sampler"
 require "./tensomite/profile_report"
 require "./tensomite/models/gpt2"
+require "./tensomite/models/llama"
 
 module Tensomite
   # :nodoc:

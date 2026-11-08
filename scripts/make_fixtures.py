@@ -4,12 +4,15 @@
     python scripts/make_fixtures.py gpt2 GPT2_DIR       # spec/fixtures/gpt2/
     python scripts/make_fixtures.py tokenizer           # spec/fixtures/tokenizer/
     python scripts/make_fixtures.py smollm2 SMOLLM2_DIR # spec/fixtures/smollm2/
+    python scripts/make_fixtures.py tiny_llama          # spec/fixtures/tiny_llama/
 
 `tokenizer` needs only `tokenizers`: it trains a small byte-level BPE with
 SmolLM2's pre-tokeniser (digits split, then GPT-2's pattern) and ChatML's
 special tokens, saves it as tokenizer.json, and records the ids it gives.
-`smollm2` records the ids SMOLLM2_DIR's tokenizer.json gives; the file itself
-is not committed.
+`smollm2` records the ids SMOLLM2_DIR's tokenizer.json gives, and the logits
+and greedy continuation of a ChatML prompt; the model is not committed.
+`tiny_llama` builds a randomly initialised 2-layer Llama, with grouped queries
+and an untied head, over `tokenizer`'s vocabulary, and records its logits.
 
 `tiny` needs only PyPI packages (torch, transformers, tokenizers, safetensors):
 it trains a small byte-level BPE vocabulary and builds a randomly initialised
@@ -172,10 +175,67 @@ def tokenizer():
     write_token_ids(out, tok)
 
 
+CHAT_PROMPT = "<|im_start|>user\nWhat is the capital of France?<|im_end|>\n<|im_start|>assistant\n"
+
+
+def write_llama_logits(out: pathlib.Path, tok, model, prompt: str, logits_rows, greedy_count: int, eos: int):
+    """Records *model*'s logits for *prompt* at *logits_rows* and its greedy continuation."""
+    import torch
+
+    prompt_ids = tok.encode(prompt).ids
+    with torch.no_grad():
+        logits = model(torch.tensor([prompt_ids])).logits[0]
+        greedy = model.generate(
+            torch.tensor([prompt_ids]), max_new_tokens=greedy_count, min_new_tokens=greedy_count,
+            do_sample=False, pad_token_id=eos, eos_token_id=None,
+            attention_mask=torch.ones(1, len(prompt_ids), dtype=torch.long),
+        )[0][len(prompt_ids):]
+    rows = logits_rows(len(prompt_ids))
+    expected = {
+        "prompt": prompt,
+        "prompt_ids": prompt_ids,
+        "logit_rows": rows,
+        "logits": [logits[row].tolist() for row in rows],
+        "greedy": greedy.tolist(),
+    }
+    (out / "logits.json").write_text(json.dumps(expected, ensure_ascii=False))
+
+
 def smollm2(directory: str):
+    import torch
+    from transformers import LlamaForCausalLM
+
+    source = pathlib.Path(directory)
     out = FIXTURES / "smollm2"
     out.mkdir(parents=True, exist_ok=True)
-    write_token_ids(out, Tokenizer.from_file(str(pathlib.Path(directory) / "tokenizer.json")))
+    tok = Tokenizer.from_file(str(source / "tokenizer.json"))
+    write_token_ids(out, tok)
+    model = LlamaForCausalLM.from_pretrained(str(source), torch_dtype=torch.float32).eval()
+    write_llama_logits(out, tok, model, CHAT_PROMPT, lambda count: [0, count - 1], 32, 2)
+
+
+def tiny_llama():
+    import torch
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    out = FIXTURES / "tiny_llama"
+    out.mkdir(parents=True, exist_ok=True)
+    tok = Tokenizer.from_file(str(FIXTURES / "tokenizer" / "tokenizer.json"))
+    torch.manual_seed(0)
+    config = LlamaConfig(
+        vocab_size=tok.get_vocab_size(), hidden_size=32, intermediate_size=64, num_hidden_layers=2,
+        num_attention_heads=4, num_key_value_heads=2, max_position_embeddings=64, rope_theta=10000.0,
+        rms_norm_eps=1e-5, tie_word_embeddings=False, initializer_range=0.3,
+        bos_token_id=1, eos_token_id=2, pad_token_id=2,
+    )
+    model = LlamaForCausalLM(config).eval()
+    with torch.no_grad():
+        for name, param in model.named_parameters():
+            if name.endswith("norm.weight"):
+                param.uniform_(0.5, 1.5)
+    model.save_pretrained(str(out), safe_serialization=True)
+    (out / "generation_config.json").unlink(missing_ok=True)
+    write_llama_logits(out, tok, model, CHAT_PROMPT, lambda count: list(range(count)), 20, 2)
 
 
 if __name__ == "__main__":
@@ -187,5 +247,7 @@ if __name__ == "__main__":
         tokenizer()
     elif sys.argv[1:2] == ["smollm2"] and len(sys.argv) == 3:
         smollm2(sys.argv[2])
+    elif sys.argv[1:2] == ["tiny_llama"]:
+        tiny_llama()
     else:
         sys.exit(__doc__)
