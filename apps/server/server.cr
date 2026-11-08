@@ -40,7 +40,7 @@ stops = [] of String
 
 OptionParser.parse do |parser|
   parser.banner = "Usage: server [options]\n       server generate [options] PROMPT"
-  parser.on("--model DIR", "Directory of a GPT-2 or Llama-family model (#{model_dir})") { |dir| model_dir = dir }
+  parser.on("--model PATH", "Directory of a GPT-2 or Llama-family model, or a Llama GGUF file (#{model_dir})") { |dir| model_dir = dir }
   parser.on("--system TEXT", "System message for chats without one (the chat template's, if any)") { |value| system = value }
   parser.on("--heads N", "Attention heads (n_head in the model's config.json, or 12)") { |value| heads = value.to_i }
   parser.on("--device NAME", "#{devices.keys.join(", ")} (#{device_name})") { |name| device_name = name }
@@ -70,7 +70,11 @@ OptionParser.parse do |parser|
 end
 
 device = devices[device_name]?.try(&.call) || abort "unknown device #{device_name}; this build has #{devices.keys.join(", ")}"
-engine = Server::Engine.load(model_dir, heads, device)
+engine = begin
+  Server::Engine.load(model_dir, heads, device)
+rescue ex : Tensomite::Error | File::Error
+  abort "cannot load #{model_dir}: #{ex.message}"
+end
 engine.system = system if system
 
 if chat

@@ -97,6 +97,29 @@ module Tensomite
       new(vocab.merge(specials), merges, specials, digits: digits, prefix_space: prefix_space)
     end
 
+    # Returns the tokeniser in a GGUF file's metadata: a `gpt2` (byte-level BPE)
+    # model, its tokens and merges, its control and user-defined tokens as
+    # special tokens, and a pre-tokeniser llama.cpp names `gpt2`, `default` or
+    # `smollm` (which splits every digit off). Raises `Error` for others.
+    def self.from_gguf(file : GGUF) : BPE
+      meta = file.metadata
+      model = meta["tokenizer.ggml.model"]?.try(&.as_s) || raise Error.new("#{file.path} holds no tokeniser")
+      raise Error.new("#{file.path}: tokeniser model #{model} is not supported") unless model == "gpt2"
+      pre = meta["tokenizer.ggml.pre"]?.try(&.as_s) || "default"
+      raise Error.new("#{file.path}: pre-tokeniser #{pre} is not supported") unless pre.in?("gpt2", "default", "smollm")
+      tokens = meta["tokenizer.ggml.tokens"].as_a.map(&.as_s)
+      types = meta["tokenizer.ggml.token_type"]?.try(&.as_a.map(&.as_i)) || [] of Int32
+      merges = meta["tokenizer.ggml.merges"].as_a.map do |merge|
+        a, b = merge.as_s.split(' ', 2)
+        {a, b}
+      end
+      ids = tokens.each_with_index.to_h { |token, id| {token, id} }
+      specials = {} of String => Int32
+      types.each_with_index { |type, id| specials[tokens[id]] = id if type.in?(3, 4) }
+      new(ids, merges, specials, digits: pre == "smollm",
+        prefix_space: meta["tokenizer.ggml.add_space_prefix"]?.try(&.as_bool) || false)
+    end
+
     # Returns whether the pre-tokeniser *json* splits digits and adds a leading
     # space, raising for one this tokeniser does not implement.
     private def self.pre_tokenizer(json : JSON::Any, path : String) : {Bool, Bool}

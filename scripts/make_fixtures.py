@@ -5,12 +5,15 @@
     python scripts/make_fixtures.py tokenizer           # spec/fixtures/tokenizer/
     python scripts/make_fixtures.py smollm2 SMOLLM2_DIR # spec/fixtures/smollm2/
     python scripts/make_fixtures.py tiny_llama          # spec/fixtures/tiny_llama/
+    python scripts/make_fixtures.py tiny_gguf           # spec/fixtures/tiny_llama/*.gguf
 
 `tokenizer` needs only `tokenizers`: it trains a small byte-level BPE with
 SmolLM2's pre-tokeniser (digits split, then GPT-2's pattern) and ChatML's
 special tokens, saves it as tokenizer.json, and records the ids it gives.
 `smollm2` records the ids SMOLLM2_DIR's tokenizer.json gives, and the logits
 and greedy continuation of a ChatML prompt; the model is not committed.
+`tiny_gguf` writes `tiny_llama` and `tokenizer` as GGUF files, at F32 and F16,
+as llama.cpp's converter does, with each head's query and key rows reordered.
 `tiny_llama` builds a randomly initialised 2-layer Llama, with grouped queries
 and an untied head, over `tokenizer`'s vocabulary, and records its logits.
 
@@ -238,6 +241,68 @@ def tiny_llama():
     write_llama_logits(out, tok, model, CHAT_PROMPT, lambda count: list(range(count)), 20, 2)
 
 
+def gguf_permute(weights, heads: int):
+    """Reorders each head's rows so that rotary pairs are adjacent, as
+    llama.cpp's convert_hf_to_gguf.py does to q_proj and k_proj."""
+    return weights.reshape(heads, 2, weights.shape[0] // heads // 2, *weights.shape[1:]).swapaxes(1, 2).reshape(weights.shape)
+
+
+def tiny_gguf():
+    import gguf
+    import numpy as np
+    from safetensors.numpy import load_file
+
+    source = FIXTURES / "tiny_llama"
+    config = json.loads((source / "config.json").read_text())
+    weights = load_file(str(source / "model.safetensors"))
+    tok = json.loads((FIXTURES / "tokenizer" / "tokenizer.json").read_text())
+    vocab = sorted(tok["model"]["vocab"].items(), key=lambda item: item[1])
+    added = {token["id"] for token in tok["added_tokens"]}
+    names = {
+        "input_layernorm": "attn_norm", "post_attention_layernorm": "ffn_norm",
+        "self_attn.q_proj": "attn_q", "self_attn.k_proj": "attn_k", "self_attn.v_proj": "attn_v",
+        "self_attn.o_proj": "attn_output", "mlp.gate_proj": "ffn_gate", "mlp.up_proj": "ffn_up",
+        "mlp.down_proj": "ffn_down",
+    }
+    for suffix, kind in (("", np.float32), ("-f16", np.float16)):
+        writer = gguf.GGUFWriter(str(source / f"model{suffix}.gguf"), "llama")
+        writer.add_name("tiny llama")
+        writer.add_block_count(config["num_hidden_layers"])
+        writer.add_context_length(config["max_position_embeddings"])
+        writer.add_embedding_length(config["hidden_size"])
+        writer.add_feed_forward_length(config["intermediate_size"])
+        writer.add_head_count(config["num_attention_heads"])
+        writer.add_head_count_kv(config["num_key_value_heads"])
+        writer.add_rope_freq_base(config["rope_parameters"]["rope_theta"])
+        writer.add_layer_norm_rms_eps(config["rms_norm_eps"])
+        writer.add_vocab_size(config["vocab_size"])
+        writer.add_rope_dimension_count(config["head_dim"])
+        writer.add_tokenizer_model("gpt2")
+        writer.add_tokenizer_pre("smollm")
+        writer.add_token_list([token for token, _ in vocab])
+        writer.add_token_types([3 if id in added else 1 for _, id in vocab])
+        writer.add_token_merges([merge if isinstance(merge, str) else " ".join(merge) for merge in tok["model"]["merges"]])
+        writer.add_bos_token_id(1)
+        writer.add_eos_token_id(2)
+        for name, tensor in weights.items():
+            if name.startswith("model.layers."):
+                _, _, layer, rest = name.split(".", 3)
+                part, last = rest.rsplit(".", 1)
+                key = f"blk.{layer}.{names[part]}.{last}"
+                if part == "self_attn.q_proj":
+                    tensor = gguf_permute(tensor, config["num_attention_heads"])
+                elif part == "self_attn.k_proj":
+                    tensor = gguf_permute(tensor, config["num_key_value_heads"])
+            else:
+                key = {"model.embed_tokens.weight": "token_embd.weight", "model.norm.weight": "output_norm.weight",
+                       "lm_head.weight": "output.weight"}[name]
+            writer.add_tensor(key, tensor.astype(np.float32 if tensor.ndim == 1 else kind))
+        writer.write_header_to_file()
+        writer.write_kv_data_to_file()
+        writer.write_tensors_to_file()
+        writer.close()
+
+
 if __name__ == "__main__":
     if sys.argv[1:2] == ["tiny"]:
         tiny()
@@ -249,5 +314,7 @@ if __name__ == "__main__":
         smollm2(sys.argv[2])
     elif sys.argv[1:2] == ["tiny_llama"]:
         tiny_llama()
+    elif sys.argv[1:2] == ["tiny_gguf"]:
+        tiny_gguf()
     else:
         sys.exit(__doc__)

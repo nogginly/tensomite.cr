@@ -2,10 +2,11 @@ require "json"
 
 module Tensomite
   # A Llama-family decoder, such as SmolLM2, loaded from a Hugging Face model
-  # directory: its `config.json` and `model.safetensors`.
+  # directory (its `config.json` and `model.safetensors`) or from a GGUF file.
   #
   # ```
   # model = Llama.load("models/smollm2-135m-instruct")
+  # model = Llama.load("models/smollm2-135m-instruct-f16.gguf")
   # cache = model.new_cache
   # logits = model.forward(ids, cache)       # [ids.size, vocab]
   # logits = model.forward([next_id], cache) # one more position, reusing the cache
@@ -48,6 +49,54 @@ module Tensomite
           rope_theta: rope["rope_theta"]?.try { |theta| theta.as_f? || theta.as_i.to_f } || 10_000.0,
           eps: config["rms_norm_eps"]?.try { |eps| eps.as_f? || eps.as_i.to_f } || 1e-5,
           tied: config["tie_word_embeddings"]?.try(&.as_bool) || false)
+      end
+    end
+
+    # Returns the configuration in a GGUF file's `llama.*` metadata. The head
+    # is tied unless the file holds `output.weight`.
+    def self.config(file : GGUF) : Config
+      meta = file.metadata
+      unless (arch = meta["general.architecture"]?.try(&.as_s)) == "llama"
+        raise Error.new("#{file.path} holds a #{arch} model, not a Llama")
+      end
+      key = ->(name : String) { meta["llama.#{name}"]? || raise Error.new("#{file.path} lacks llama.#{name}") }
+      if meta.has_key?("llama.rope.scaling.type") && meta["llama.rope.scaling.type"].as_s != "none"
+        raise Error.new("#{file.path}: rope scaling #{meta["llama.rope.scaling.type"]} is not supported")
+      end
+      width, heads = key.call("embedding_length").as_i, key.call("attention.head_count").as_i
+      Config.new(
+        layers: key.call("block_count").as_i, heads: heads,
+        kv_heads: meta["llama.attention.head_count_kv"]?.try(&.as_i) || heads,
+        width: width, hidden: key.call("feed_forward_length").as_i,
+        head_width: meta["llama.rope.dimension_count"]?.try(&.as_i) || width // heads,
+        context: key.call("context_length").as_i,
+        vocab: meta["llama.vocab_size"]?.try(&.as_i) || file.entries["token_embd.weight"].shape[0],
+        rope_theta: meta["llama.rope.freq_base"]?.try(&.as_f) || 10_000.0,
+        eps: key.call("attention.layer_norm_rms_epsilon").as_f,
+        tied: !file.has_key?("output.weight"))
+    end
+
+    # The names of GGUF's tensors, by the names of this model's parameters,
+    # within each block and outside them.
+    GGUF_BLOCK = {
+      "input_layernorm.weight"          => "attn_norm.weight",
+      "post_attention_layernorm.weight" => "ffn_norm.weight",
+      "self_attn.q_proj.weight"         => "attn_q.weight",
+      "self_attn.k_proj.weight"         => "attn_k.weight",
+      "self_attn.v_proj.weight"         => "attn_v.weight",
+      "self_attn.o_proj.weight"         => "attn_output.weight",
+      "mlp.gate_proj.weight"            => "ffn_gate.weight",
+      "mlp.up_proj.weight"              => "ffn_up.weight",
+      "mlp.down_proj.weight"            => "ffn_down.weight",
+    }
+    GGUF_TOP = {"model.embed_tokens.weight" => "token_embd.weight", "model.norm.weight" => "output_norm.weight", "lm_head.weight" => "output.weight"}
+
+    # Returns the GGUF name of parameter *name*.
+    def self.gguf_name(name : String) : String
+      if match = name.match(/^model\.layers\.(\d+)\.(.+)$/)
+        "blk.#{match[1]}.#{GGUF_BLOCK[match[2]]}"
+      else
+        GGUF_TOP[name]
       end
     end
 
@@ -106,13 +155,50 @@ module Tensomite
     @model : Body
     @lm_head : Linear?
 
-    # Returns the model in the Hugging Face directory *path*, from its
-    # `config.json` and `model.safetensors`, with its weights on *device*.
-    # `BF16` weights are widened to `F32`.
+    # Returns the model at *path*, with its weights on *device*: a GGUF file
+    # when *path* ends in `.gguf`, else a Hugging Face directory, from its
+    # `config.json` and `model.safetensors`. `BF16` and `F16` weights are
+    # widened to `F32`.
     def self.load(path : String, device : Device = CPU.default) : Llama
+      return load(GGUF.open(path), device) if path.ends_with?(".gguf")
       config = Config.from_json(File.read(File.join(path, "config.json")))
       new(config, Builder.new(device: device, init: Init.placeholder))
         .load(File.join(path, "model.safetensors"), transposed: TRANSPOSED)
+    end
+
+    # Returns the model in *file*, a GGUF file, with its weights on *device*.
+    #
+    # 1. Reads the configuration from the metadata.
+    # 2. Reads each parameter's tensor by its GGUF name, raising for a missing
+    #    one or for any tensor left over.
+    # 3. Undoes llama.cpp's reordering of each head's query and key rows,
+    #    which pairs features `(2i, 2i + 1)` for its own rotary embeddings,
+    #    back to Hugging Face's `(i, i + width/2)`.
+    # 4. Transposes each `Linear`'s weight, stored `[outputs, inputs]`, into
+    #    tensomite's `[inputs, outputs]`.
+    def self.load(file : GGUF, device : Device = CPU.default) : Llama
+      config = config(file)
+      model = new(config, Builder.new(device: device, init: Init.placeholder))
+      used = Set(String).new
+      model.named_params.each do |name, param|
+        key = gguf_name(name)
+        raise Error.new("#{file.path} lacks #{key}") unless file.has_key?(key)
+        used << key
+        value = file[key, device]
+        if TRANSPOSED.matches?(name)
+          heads = name.ends_with?("q_proj.weight") ? config.heads : name.ends_with?("k_proj.weight") ? config.kv_heads : nil
+          if heads
+            rows, inputs = value.shape
+            value = value.reshape([heads, rows // heads // 2, 2, inputs]).permute([0, 2, 1, 3]).reshape([rows, inputs])
+          end
+          value = value.transpose.contiguous.detach
+        end
+        raise ShapeError.new("#{key}: #{file.path} holds #{value.shape}, the model #{param.shape}") unless value.shape == param.shape
+        param.value = value
+      end
+      extra = file.names.reject { |key| used.includes?(key) }
+      raise Error.new("#{file.path} has #{extra.join(", ")}, which the model lacks") unless extra.empty?
+      model
     end
 
     # Returns a model of *config*'s sizes, its parts made by *build*.

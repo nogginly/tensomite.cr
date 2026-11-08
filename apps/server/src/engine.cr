@@ -90,6 +90,7 @@ module Server
     # GPT-2, with `model.safetensors`, `vocab.json` and `merges.txt`, whose
     # attention *heads* are, unless given, `n_head` in `config.json`, or 12.
     def self.load(dir : String, heads : Int32?, device : Tensomite::Device) : Engine
+      return load_gguf(dir, device) if dir.ends_with?(".gguf")
       name = File.basename(File.expand_path(dir))
       if Server.model_type(dir) == "llama"
         tokenizer = Tensomite::BPE.from_json(File.join(dir, "tokenizer.json"))
@@ -102,6 +103,18 @@ module Server
       model = Tensomite::GPT2.load(File.join(dir, "model.safetensors"), heads: heads, device: device)
       tokenizer = Tensomite::BPE.from_files(File.join(dir, "vocab.json"), File.join(dir, "merges.txt"))
       new(model, tokenizer, name)
+    end
+
+    # Returns an engine for the Llama-family model in the GGUF file at *path*,
+    # named after the file, with the tokeniser, end token and chat template
+    # its metadata holds.
+    def self.load_gguf(path : String, device : Tensomite::Device) : Engine
+      file = Tensomite::GGUF.open(path)
+      tokenizer = Tensomite::BPE.from_gguf(file)
+      ends = ["<|endoftext|>", "<|im_end|>"].compact_map { |token| tokenizer.id?(token) }
+      file.metadata["tokenizer.ggml.eos_token_id"]?.try { |eos| ends |= [eos.as_i] }
+      system = file.metadata["tokenizer.chat_template"]?.try { |template| Server.template_system(template.as_s) }
+      new(Tensomite::Llama.load(file, device), tokenizer, File.basename(path, ".gguf"), ends, system)
     end
 
     # Returns true when the tokeniser has ChatML's tokens, so the engine can chat.
@@ -214,6 +227,11 @@ module Server
     path = File.join(dir, "tokenizer_config.json")
     return unless File.exists?(path)
     template = JSON.parse(File.read(path))["chat_template"]?.try(&.as_s?) || return
+    template_system(template)
+  end
+
+  # Returns the system message a chat template adds to a chat without one, or `nil`.
+  def self.template_system(template : String) : String?
     template.match(/'<\|im_start\|>system\n(.*?)<\|im_end\|>/m).try(&.[1])
   end
 

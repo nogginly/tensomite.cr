@@ -77,9 +77,15 @@ describe SafeTensors do
     end
   end
 
+  it "widens F16 tensors to F32" do
+    bits = [F16.new(1.5_f32).bits, F16.new(-0.25_f32).bits]
+    file = SafeTensors.open(write_safetensors({"h" => {"F16", [2], Slice.new(bits.to_unsafe, 2).to_unsafe_bytes.dup}}))
+    file["h"].to_a(Float32).should eq [1.5_f32, -0.25_f32]
+  end
+
   it "rejects unsupported dtypes" do
-    bad = write_safetensors({"h" => {"F16", [2], Bytes.new(4)}})
-    expect_raises(DTypeError, /F16/) { SafeTensors.open(bad) }
+    bad = write_safetensors({"h" => {"F64", [2], Bytes.new(16)}})
+    expect_raises(DTypeError, /F64/) { SafeTensors.open(bad) }
   end
 
   it "rejects byte ranges that do not match the shape" do
