@@ -8,7 +8,8 @@ module Tensomite
   # copied or read until used. Other tensors are copied into a new buffer: older
   # writers do not pad the header, which leaves every tensor unaligned.
   #
-  # `BF16` tensors are widened to `F32` when read, so they are always copies.
+  # `BF16` and `F16` tensors are widened to `F32` when read, so they are always
+  # copies.
   #
   # ```
   # weights = SafeTensors.open("model.safetensors")
@@ -28,7 +29,7 @@ module Tensomite
 
     # The bytes per element of each dtype stored in a different one, by name,
     # and the dtype it is read as.
-    WIDENED = {"BF16" => {2, DType::F32}}
+    WIDENED = {"BF16" => {2, DType::F32}, "F16" => {2, DType::F32}}
 
     getter path : String
     @mapping : MappedFile
@@ -128,7 +129,7 @@ module Tensomite
       buffer =
         if entry.widened?
           values = Slice(Float32).new(entry.shape.product(1))
-          BF16.widen(bytes, values)
+          entry.stored == "F16" ? F16.widen(bytes, values) : BF16.widen(bytes, values)
           device.alloc(values.bytesize).tap { |buf| device.upload(buf, values.to_unsafe_bytes) }
         elsif device.is_a?(HostDevice) && bytes.to_unsafe.address % 4 == 0
           device.adopt(bytes, @mapping)

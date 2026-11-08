@@ -469,6 +469,17 @@ puts bpe.decode(model.generate(prompt, 64, stop: [bpe.specials["<|im_end|>"]]))
 
 An instruct model expects its chat template, ChatML for SmolLM2, as above. `generate` stops after a token in `stop:`, which it returns as the last token. `Llama` is a `Module` named as Hugging Face's file is (`model.embed_tokens`, `model.layers.0.self_attn.q_proj`, `model.norm`, and `lm_head` when the head does not share the embeddings). PyTorch stores each `Linear`'s weight as `[outputs, inputs]`, so `Module#load(path, transposed: regex)` copies the matching weights into tensomite's `[inputs, outputs]` as they load.
 
+**GGUF files.** llama.cpp's format holds a model's weights, configuration, tokeniser and chat template in one file. `Llama.load` reads one when the path ends in `.gguf`, and `BPE.from_gguf` reads its tokeniser. `scripts/fetch_smollm2_gguf.sh` downloads SmolLM2-135M-Instruct at F16, Q8_0 and Q4_0. F32, F16 and BF16 tensors load as `F32`. Quantised tensors (Q8_0, Q4_0, Q4_1) raise `DTypeError` until M10's block types arrive.
+
+```crystal
+file = GGUF.open("models/smollm2-135m-instruct-gguf/SmolLM2-135M-Instruct-f16.gguf")
+model = Llama.load(file, BLAS.default)
+bpe = BPE.from_gguf(file)
+file.metadata["llama.attention.head_count_kv"].as_i   # => 3
+```
+
+llama.cpp's converter reorders each head's query and key rows, so that its rotary embeddings rotate adjacent features, `(2i, 2i + 1)`. `Llama.load` reorders them back to Hugging Face's halves, `(i, i + width/2)`, so a GGUF at F32 gives exactly the logits of the safetensors model it came from.
+
 ## Errors
 
 Error           |When                        |For example                                                             

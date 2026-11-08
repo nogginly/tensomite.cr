@@ -105,6 +105,19 @@ describe "Server::Engine chatting" do
   end
 end
 
+describe "Server::Engine from GGUF" do
+  it "loads the model, tokeniser and end token from one file, and chats" do
+    engine = Server::Engine.load("#{LLAMA_FIXTURE}/model.gguf", nil, CPU.default)
+    engine.name.should eq "model"
+    engine.chat?.should be_true
+    from_dir = Server::Engine.load(llama_dir, nil, CPU.default)
+    from_dir.system = nil
+    question = [Server::Message.new("user", "What is 12 + 345?")]
+    request = Server::Request.new("", max_tokens: 8, temperature: 0.0, messages: question)
+    engine.complete(request).text.should eq from_dir.complete(request).text
+  end
+end
+
 describe "Server.configured_eos" do
   it "reads one id or several" do
     dir = File.tempname("server-eos")
