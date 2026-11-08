@@ -127,7 +127,7 @@ describe "Llama's ops" do
         on_cpu = GroupedQueryAttention.new(width, heads, kv_heads, rng: Random.new(5)).call(
           Tensor.from(random_values(length * width, 9), [length, width]), Tensor.causal_mask(length, length),
           RotaryEmbedding.new(head_width, context: 16)).to_a(Float32)
-        if device.is_a?(HostDevice)
+        if DEVICES.includes?(device)
           whole.should eq on_cpu
         else
           whole.zip(on_cpu) { |a, e| a.should be_close(e, 1e-5 * Math.max(1f32, e.abs)) }
