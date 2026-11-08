@@ -97,10 +97,10 @@ module Tensomite
       @ln_f = build.layernorm(config.width)
     end
 
-    # Returns an empty cache for this model, holding up to its context of
-    # positions in place.
-    def new_cache : Cache
-      Cache.new(config.layers, config.context)
+    # Returns an empty cache for this model, holding up to *capacity* positions
+    # in place, by default its context.
+    def new_cache(capacity : Int32 = config.context) : Cache
+      Cache.new(config.layers, capacity)
     end
 
     # Runs *ids* at the positions following those in *cache*, appends their keys and

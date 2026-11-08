@@ -136,7 +136,7 @@ Met (25 Oct 2026, the Linux container and the M5 Pro):
    - `tokenizer.json`: the byte-level BPE GPT-2 uses, read from Hugging Face's format, with its special tokens.
    - A chat template (ChatML) and a chat endpoint in `apps/server`, so the first instruct model, SmolLM2-135M-Instruct, can be served.
    - Exit: SmolLM2-135M-Instruct runs on every device and matches reference fixtures from PyTorch, prefill and decode logits are bit-identical on each device, and `apps/server` serves it.
-   - Parts 1 to 4 of Decision CJ, in the container: SmolLM2-135M-Instruct's logits are within 2e-3 of PyTorch's, and its 32-token greedy answer matches, on CPU, SimDiscrete and BLAS; a tiny random Llama matches within 1e-4 on those and on the CUDA stub. Prefill equals decode bit for bit wherever the device is shape-invariant. Left: Metal and CUDA hardware, and the chat endpoint (part 5).
+   - Parts 1 to 4 of Decision CJ, in the container: SmolLM2-135M-Instruct's logits are within 2e-3 of PyTorch's, and its 32-token greedy answer matches, on CPU, SimDiscrete and BLAS; a tiny random Llama matches within 1e-4 on those and on the CUDA stub. Prefill equals decode bit for bit wherever the device is shape-invariant. Part 5: `apps/server` serves Llama-family models, chats in ChatML over `/v1/chat/completions` and in the terminal, and keeps SmolLM2's context across turns. Left: the exit's run on Metal and CUDA hardware.
 10. **Quantisation.** Add `F16`, block dtypes, a GGUF loader, and Q8_0/Q4_0 matmul kernels for CPU, Metal and CUDA.
     - `F16` is tensomite's own `UInt16`-backed struct with conversions to and from `Float32`, as `BF16` is from M9, because Crystal has no half-precision float. GGUF block scales are `F16`, so M10 needs them at the latest.
     - Host kernels read blocks as `Slice` of a block struct (`BlockQ4_0` is 18 bytes: an `F16` scale and 16 bytes of packed weights).
@@ -154,10 +154,10 @@ Met (25 Oct 2026, the Linux container and the M5 Pro):
 
 **Apps (Decisions BT to CF).** Not a milestone: apps under `apps/` that use tensomite as a library on real work, and find what the library still lacks. Two so far.
 
-- `apps/server` serves GPT-2 models over HTTP (`/v1/completions`, streamed) and in the terminal (`generate`), one request at a time (Decisions BT and BU).
+- `apps/server` serves GPT-2 and Llama-family models over HTTP (`/v1/completions` and `/v1/chat/completions`, streamed) and in the terminal (`generate` and `chat`), one request at a time (Decisions BT, BU and CJ).
 - `apps/finetune` fine-tunes GPT-2 on a text, with checkpoints that resume bit for bit, dropout, a warm-up and cosine schedule, and early stopping, and exports models the server serves (Decisions BV and BY). It has fine-tuned GPT-2 small and large on Crystal's standard library, measured on held-out methods by `bench/code_eval.cr` (Decisions BZ, CB, CE and CF).
 
-Next, in order: a GPT-2 XL fine-tune on the GB10, then a chat endpoint for M9's instruct model, then requests batched step by step (Q-BA).
+Next: requests batched step by step (Q-BA).
 
 ## Decisions
 

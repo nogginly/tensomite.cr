@@ -9,7 +9,9 @@ module Server
   # - `POST /v1/completions`: a JSON request with `prompt` and, optionally,
   #   `max_tokens`, `temperature`, `top_k`, `stop` (a string or up to four),
   #   `seed` and `stream`. Without `stream` it answers with the whole completion;
-  #   with it, with server-sent events, one per piece of text, then `[DONE]`.
+  #   with it, with server-sent events, one per piece of text, then `[DONE]`;
+  # - `POST /v1/chat/completions`: the same, with `messages` (each a `role` and
+  #   `content`) in place of `prompt`, for a model that chats in ChatML.
   #
   # A malformed request gets status 400, and an unknown path 404, each with an
   # `{"error": {"message": …}}` body.
@@ -27,28 +29,40 @@ module Server
       when {"GET", "/health"}
         json(context.response, 200) { |io| {status: "ok", model: @engine.name}.to_json(io) }
       when {"POST", "/v1/completions"}
-        completions(context)
+        completions(context, chat: false)
+      when {"POST", "/v1/chat/completions"}
+        completions(context, chat: true)
       else
         error(context.response, 404, "no route for #{request.method} #{request.path}")
       end
     end
 
-    private def completions(context : HTTP::Server::Context) : Nil
+    private def completions(context : HTTP::Server::Context, chat : Bool) : Nil
       body = JSON.parse(context.request.body.try(&.gets_to_end) || "")
-      request, stream = Server.parse_request(body)
+      request, stream = chat ? Server.parse_chat_request(body) : Server.parse_request(body)
+      raise RequestError.new("this model's tokeniser has no ChatML tokens, so it cannot chat") if chat && !@engine.chat?
       @count += 1
-      id, created = "cmpl-#{@count}", Time.utc.to_unix
-      stream ? stream(context.response, request, id, created) : whole(context.response, request, id, created)
+      id, created = "#{chat ? "chatcmpl" : "cmpl"}-#{@count}", Time.utc.to_unix
+      if stream
+        stream(context.response, request, chat, id, created)
+      else
+        whole(context.response, request, chat, id, created)
+      end
     rescue ex : JSON::ParseException | RequestError
       error(context.response, 400, ex.message || "bad request")
     end
 
-    private def whole(response : HTTP::Server::Response, request : Request, id : String, created : Int64) : Nil
+    private def whole(response : HTTP::Server::Response, request : Request, chat : Bool, id : String, created : Int64) : Nil
       completion = @engine.complete(request)
       json(response, 200) do |io|
+        choice = if chat
+                   {index: 0, message: {role: "assistant", content: completion.text}, finish_reason: completion.finish_reason}
+                 else
+                   {text: completion.text, index: 0, finish_reason: completion.finish_reason}
+                 end
         {
-          id: id, object: "text_completion", created: created, model: @engine.name,
-          choices: [{text: completion.text, index: 0, finish_reason: completion.finish_reason}],
+          id: id, object: chat ? "chat.completion" : "text_completion", created: created, model: @engine.name,
+          choices: [choice],
           usage: {
             prompt_tokens:     completion.prompt_tokens,
             completion_tokens: completion.completion_tokens,
@@ -59,16 +73,26 @@ module Server
     end
 
     # Sends each piece of text as an event once it is ready, then one with the
-    # finish reason, then `[DONE]`. A client that disconnects ends the completion
-    # at its next piece.
-    private def stream(response : HTTP::Server::Response, request : Request, id : String, created : Int64) : Nil
+    # finish reason, then `[DONE]`. A chat's pieces are deltas, the first naming
+    # the assistant's role and the last empty. A client that disconnects ends
+    # the completion at its next piece.
+    private def stream(response : HTTP::Server::Response, request : Request, chat : Bool, id : String, created : Int64) : Nil
       response.status_code = 200
       response.content_type = "text/event-stream"
       response.headers["Cache-Control"] = "no-cache"
+      first = true
       event = ->(text : String, reason : String?) do
+        choice = if chat
+                   delta = first ? {role: "assistant", content: text} : {content: text}
+                   delta = {} of String => String if reason
+                   {index: 0, delta: delta, finish_reason: reason}
+                 else
+                   {text: text, index: 0, finish_reason: reason}
+                 end
+        first = false
         chunk = {
-          id: id, object: "text_completion", created: created, model: @engine.name,
-          choices: [{text: text, index: 0, finish_reason: reason}],
+          id: id, object: chat ? "chat.completion.chunk" : "text_completion", created: created, model: @engine.name,
+          choices: [choice],
         }
         response << "data: " << chunk.to_json << "\n\n"
         response.flush
@@ -96,7 +120,30 @@ module Server
   def self.parse_request(body : JSON::Any) : {Request, Bool}
     fields = body.as_h? || raise RequestError.new("the body must be a JSON object")
     prompt = fields["prompt"]?.try(&.as_s?) || raise RequestError.new("`prompt` must be a string")
-    max_tokens = integer(fields, "max_tokens", 16)
+    options(fields, prompt, nil, 16)
+  end
+
+  # Returns the `Request` a chat body asks for, and whether it asks to be
+  # streamed: `messages`, each with a `role` of `system`, `user` or `assistant`
+  # and a string `content`, and the options of `parse_request`, with
+  # `max_tokens` 512 unless given.
+  def self.parse_chat_request(body : JSON::Any) : {Request, Bool}
+    fields = body.as_h? || raise RequestError.new("the body must be a JSON object")
+    list = fields["messages"]?.try(&.as_a?) || raise RequestError.new("`messages` must be an array")
+    messages = list.map do |item|
+      role = item.as_h?.try(&.["role"]?).try(&.as_s?)
+      content = item.as_h?.try(&.["content"]?).try(&.as_s?)
+      unless role.in?("system", "user", "assistant") && content
+        raise RequestError.new("each message needs a `role` of system, user or assistant, and a string `content`")
+      end
+      Message.new(role.as(String), content)
+    end
+    raise RequestError.new("`messages` is empty") if messages.empty?
+    options(fields, "", messages, 512)
+  end
+
+  private def self.options(fields : Hash(String, JSON::Any), prompt : String, messages : Array(Message)?, max_default : Int32) : {Request, Bool}
+    max_tokens = integer(fields, "max_tokens", max_default)
     raise RequestError.new("`max_tokens` must be at least 1") if max_tokens < 1
     temperature = number(fields, "temperature", 1.0)
     raise RequestError.new("`temperature` must not be negative") if temperature < 0
@@ -104,7 +151,7 @@ module Server
     raise RequestError.new("`top_k` must not be negative") if top_k < 0
     stop = strings(fields, "stop")
     raise RequestError.new("`stop` may hold at most 4 strings") if stop.size > 4
-    {Request.new(prompt, max_tokens, temperature, top_k, stop, integer(fields, "seed", 0)), boolean(fields, "stream", false)}
+    {Request.new(prompt, max_tokens, temperature, top_k, stop, integer(fields, "seed", 0), messages), boolean(fields, "stream", false)}
   end
 
   # Each returns field *name* of *fields*, or *default* when it is absent or
