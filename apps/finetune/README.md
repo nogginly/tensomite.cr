@@ -100,6 +100,7 @@ GPT-2 small                                             |1.879    |26    |26    
 small, fine-tuned 6,000 steps                           |0.934    |161   |159   |23        |2    
 large, fine-tuned, 9,000-step schedule, stopped at 4,750|0.807    |174   |170   |14        |1    
 large, fine-tuned 3,500 steps                           |0.786    |168   |165   |16        |2    
+XL, fine-tuned 3,000 steps                              |0.764    |167   |165   |20        |5    
 
 GPT-2 small mostly repeats comments or writes other languages. The fine-tuned models write Crystal's grammar, often with the wrong logic, and most of their misses are loops such as `builder.builder.builder…`. Large closes and parses more often and has the lower loss, but small matches more first lines: where only one matched, small copied the opening of a neighbouring method in the prompt more often than large, which writes plausible code of its own. `scripts/compare_first_lines.py EVAL.txt MODEL_A MODEL_B` lists those methods from the `--verbose` output.
 
