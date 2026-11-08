@@ -1,5 +1,6 @@
 require "./tensomite/errors"
 require "./tensomite/dtype"
+require "./tensomite/bf16"
 require "./tensomite/view"
 require "./tensomite/device"
 require "./tensomite/buffer_pool"

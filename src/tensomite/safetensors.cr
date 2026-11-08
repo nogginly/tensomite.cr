@@ -8,6 +8,8 @@ module Tensomite
   # copied or read until used. Other tensors are copied into a new buffer: older
   # writers do not pad the header, which leaves every tensor unaligned.
   #
+  # `BF16` tensors are widened to `F32` when read, so they are always copies.
+  #
   # ```
   # weights = SafeTensors.open("model.safetensors")
   # weights.names               # => ["wte.weight", ...]
@@ -15,7 +17,18 @@ module Tensomite
   # ```
   class SafeTensors
     # The dtype, shape and byte range, within the data section, of one tensor.
-    record Entry, dtype : DType, shape : Array(Int32), start : Int64, stop : Int64
+    # *stored* is the file's name for its dtype, such as `BF16`, and *dtype* the
+    # dtype it is read as.
+    record Entry, dtype : DType, shape : Array(Int32), start : Int64, stop : Int64, stored : String do
+      # Returns true when the values are widened as they are read.
+      def widened? : Bool
+        stored != dtype.to_s
+      end
+    end
+
+    # The bytes per element of each dtype stored in a different one, by name,
+    # and the dtype it is read as.
+    WIDENED = {"BF16" => {2, DType::F32}}
 
     getter path : String
     @mapping : MappedFile
@@ -109,10 +122,15 @@ module Tensomite
     def [](name : String, device : Device = CPU.default) : Tensor
       entry = entries[name]
       length = entry.stop - entry.start
-      raise Error.new("#{name}: #{length} bytes is over the 2 GiB limit for one tensor") if length > Int32::MAX
+      loaded = entry.widened? ? entry.shape.product(1_i64) * 4 : length
+      raise Error.new("#{name}: #{loaded} bytes is over the 2 GiB limit for one tensor") if loaded > Int32::MAX
       bytes = @mapping.bytes(@data_start + entry.start, length.to_i32)
       buffer =
-        if device.is_a?(HostDevice) && bytes.to_unsafe.address % 4 == 0
+        if entry.widened?
+          values = Slice(Float32).new(entry.shape.product(1))
+          BF16.widen(bytes, values)
+          device.alloc(values.bytesize).tap { |buf| device.upload(buf, values.to_unsafe_bytes) }
+        elsif device.is_a?(HostDevice) && bytes.to_unsafe.address % 4 == 0
           device.adopt(bytes, @mapping)
         else
           device.alloc(bytes.size).tap { |buf| device.upload(buf, bytes) }
@@ -122,25 +140,29 @@ module Tensomite
 
     # Parses the JSON header and checks every entry against the file.
     #
-    # 1. Maps each safetensors dtype name onto a `DType`.
-    # 2. Checks that each byte range fits the data section, holds exactly the bytes
-    #    its shape needs.
+    # 1. Maps each safetensors dtype name onto the `DType` it is read as.
+    # 2. Checks that each byte range fits the data section and holds exactly the
+    #    bytes its shape needs.
     private def parse_header(json : String) : Hash(String, Entry)
       data_size = @mapping.size - @data_start
       result = {} of String => Entry
       JSON.parse(json).as_h.each do |name, info|
         next if name == "__metadata__"
-        dtype = case code = info["dtype"].as_s
-                when "F32" then DType::F32
-                when "I32" then DType::I32
-                else            raise DTypeError.new("#{name}: safetensors dtype #{code} is not supported yet")
-                end
+        code = info["dtype"].as_s
         shape = info["shape"].as_a.map(&.as_i)
+        count = shape.product(1)
+        dtype, size = case code
+                      when "F32" then {DType::F32, DType::F32.bytes_for(count)}
+                      when "I32" then {DType::I32, DType::I32.bytes_for(count)}
+                      else
+                        width, wide = WIDENED[code]? || raise DTypeError.new("#{name}: safetensors dtype #{code} is not supported yet")
+                        {wide, width * count}
+                      end
         start, stop = info["data_offsets"].as_a.map(&.as_i64)
-        unless 0 <= start <= stop <= data_size && stop - start == dtype.bytes_for(shape.product(1)).to_i64
-          raise Error.new("#{name}: byte range #{start}...#{stop} does not hold #{dtype} #{shape}")
+        unless 0 <= start <= stop <= data_size && stop - start == size.to_i64
+          raise Error.new("#{name}: byte range #{start}...#{stop} does not hold #{code} #{shape}")
         end
-        result[name] = Entry.new(dtype, shape, start, stop)
+        result[name] = Entry.new(dtype, shape, start, stop, code)
       end
       result
     end

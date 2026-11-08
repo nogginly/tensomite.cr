@@ -66,6 +66,17 @@ describe SafeTensors do
     expect_raises(KeyError) { weights["missing"] }
   end
 
+  it "widens BF16 tensors to F32 on every device" do
+    values = [1.0_f32, -2.5_f32, 3.140625_f32, 0.0_f32, Float32::INFINITY, -1.0e-38_f32]
+    bits = values.map { |value| BF16.new(value).bits }
+    file = SafeTensors.open(write_safetensors({"w" => {"BF16", [2, 3], Slice.new(bits.to_unsafe, bits.size).to_unsafe_bytes.dup}}))
+    file.entries["w"].dtype.should eq DType::F32
+    file.entries["w"].stored.should eq "BF16"
+    DEVICES.each do |device|
+      file["w", device].to_a(Float32).should eq values.map { |value| BF16.new(value).to_f32 }
+    end
+  end
+
   it "rejects unsupported dtypes" do
     bad = write_safetensors({"h" => {"F16", [2], Bytes.new(4)}})
     expect_raises(DTypeError, /F16/) { SafeTensors.open(bad) }
