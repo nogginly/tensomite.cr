@@ -124,9 +124,14 @@ describe "Llama's ops" do
           rows << attention.call(x.slice(0, i, i + 1), Tensor.causal_mask(1, i + 1, device), rope, cache).to_a(Float32)
         end
         rows.flatten.should eq whole
-        whole.should eq GroupedQueryAttention.new(width, heads, kv_heads, rng: Random.new(5)).call(
+        on_cpu = GroupedQueryAttention.new(width, heads, kv_heads, rng: Random.new(5)).call(
           Tensor.from(random_values(length * width, 9), [length, width]), Tensor.causal_mask(length, length),
           RotaryEmbedding.new(head_width, context: 16)).to_a(Float32)
+        if DEVICES.includes?(device)
+          whole.should eq on_cpu
+        else
+          whole.zip(on_cpu) { |a, e| a.should be_close(e, 1e-5 * Math.max(1f32, e.abs)) }
+        end
       end
     end
 

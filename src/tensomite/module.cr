@@ -161,32 +161,41 @@ module Tensomite
     # or dtype differs from its parameter's. When *strict*, also raises `Error`
     # for a parameter the file lacks or a tensor the model lacks; otherwise those
     # are skipped, so a model can load part of a larger file.
-    def load(path : String, strict : Bool = true, prefix : String = "", ignore : Regex? = nil) : self
-      load(SafeTensors.open(path), strict, prefix, ignore)
+    #
+    # Tensors whose names match *transposed* hold their parameter's transpose, as
+    # PyTorch stores a `Linear`'s weight, `[outputs, inputs]`; each is copied into
+    # the parameter's layout as it loads.
+    def load(path : String, strict : Bool = true, prefix : String = "", ignore : Regex? = nil, transposed : Regex? = nil) : self
+      load(SafeTensors.open(path), strict, prefix, ignore, transposed)
     end
 
     # :ditto:
-    def load(file : SafeTensors, strict : Bool = true, prefix : String = "", ignore : Regex? = nil) : self
+    def load(file : SafeTensors, strict : Bool = true, prefix : String = "", ignore : Regex? = nil, transposed : Regex? = nil) : self
       params = named_params
-      if strict
-        missing = params.keys.reject { |name| file.has_key?(prefix + name) }
-        raise Error.new("#{file.path} lacks #{missing.map { |name| prefix + name }.join(", ")}") unless missing.empty?
-        extra = file.names.reject do |name|
-          (ignore && ignore.matches?(name)) || (name.starts_with?(prefix) && params.has_key?(name[prefix.size..]))
-        end
-        raise Error.new("#{file.path} has #{extra.join(", ")}, which the model lacks") unless extra.empty?
-      end
+      check_names(file, params, prefix, ignore) if strict
       params.each do |name, param|
         next unless entry = file.entries[prefix + name]?
-        unless entry.shape == param.shape
-          raise ShapeError.new("#{name}: #{file.path} holds #{entry.shape}, the model #{param.shape}")
+        flip = transposed.try(&.matches?(prefix + name)) && entry.shape.size == 2
+        unless (flip ? entry.shape.reverse : entry.shape) == param.shape
+          raise ShapeError.new("#{name}: #{file.path} holds #{entry.shape}#{" transposed" if flip}, the model #{param.shape}")
         end
         unless entry.dtype == param.value.dtype
           raise DTypeError.new("#{name}: #{file.path} holds #{entry.dtype}, the model #{param.value.dtype}")
         end
-        param.value = file[prefix + name, param.value.device]
+        value = file[prefix + name, param.value.device]
+        param.value = flip ? value.transpose.contiguous.detach : value
       end
       self
+    end
+
+    # Raises unless *file* holds exactly *params*, apart from names matching *ignore*.
+    private def check_names(file : SafeTensors, params : Hash(String, Parameter), prefix : String, ignore : Regex?) : Nil
+      missing = params.keys.reject { |name| file.has_key?(prefix + name) }
+      raise Error.new("#{file.path} lacks #{missing.map { |name| prefix + name }.join(", ")}") unless missing.empty?
+      extra = file.names.reject do |name|
+        (ignore && ignore.matches?(name)) || (name.starts_with?(prefix) && params.has_key?(name[prefix.size..]))
+      end
+      raise Error.new("#{file.path} has #{extra.join(", ")}, which the model lacks") unless extra.empty?
     end
 
     # Moves every parameter to *device*, and returns `self`.
