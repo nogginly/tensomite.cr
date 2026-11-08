@@ -10,3 +10,9 @@ Tensomite.kernel(:adamw_second_moment) { |moment, grad, beta, rest| moment * bet
 Tensomite.kernel(:adamw_update) do |param, moment, second, decay, m_scale, v_scale, eps, rate|
   param * decay - moment / m_scale / ((second / v_scale).sqrt + eps) * rate
 end
+
+# SiLU, `x · sigmoid(x)`, as `Tensor#silu`.
+Tensomite.kernel(:silu) { |x| x / ((-x).exp + 1) }
+
+# SwiGLU's gate, `silu(gate) · up`, as `Tensor#swiglu`.
+Tensomite.kernel(:swiglu) { |gate, value| gate / ((-gate).exp + 1) * value }

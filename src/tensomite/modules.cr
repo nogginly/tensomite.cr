@@ -163,6 +163,139 @@ module Tensomite
     end
   end
 
+  # Root-mean-square normalisation of the last axis (see `Tensor#rmsnorm`), with
+  # a weight starting at one and not decayed, as in Llama.
+  class RMSNorm < Layer
+    getter weight : Parameter
+    getter eps : Float64
+
+    def initialize(width : Int32, @eps : Float64 = 1e-5, device : Device = CPU.default)
+      @weight = Parameter.new(Tensor.full([width], 1, device: device), decay: false)
+    end
+
+    def forward(x : Tensor) : Tensor
+      x.rmsnorm(weight.value, eps)
+    end
+  end
+
+  # Rotary position embeddings, as in Llama: each head's features are taken as
+  # pairs `(i, i + width/2)`, and the pair at position `p` is rotated by the
+  # angle `p · θ^(-2i/width)`.
+  #
+  # The cosines and sines of every position up to *context* are computed once,
+  # in `Float32` as PyTorch computes them, and kept on *device*.
+  #
+  # ```
+  # rope = RotaryEmbedding.new(64, context: 2048, theta: 10_000.0)
+  # q = rope.call(q, start: past) # q is [batch, heads, length, 64]
+  # ```
+  class RotaryEmbedding
+    getter width : Int32
+    getter context : Int32
+    getter theta : Float64
+    @cos : Tensor
+    @sin : Tensor
+
+    def initialize(@width : Int32, @context : Int32, @theta : Float64 = 10_000.0, device : Device = CPU.default)
+      raise ShapeError.new("rotary embeddings need an even width, not #{width}") unless width.even?
+      half = width // 2
+      frequencies = Array(Float32).new(half) { |i| 1.0_f32 / (theta.to_f32 ** ((2 * i).to_f32 / width)) }
+      cos = Array(Float32).new(context * width) { |idx| p, i = idx.divmod(width); Math.cos(p.to_f32 * frequencies[i % half]) }
+      sin = Array(Float32).new(context * width) { |idx| p, i = idx.divmod(width); Math.sin(p.to_f32 * frequencies[i % half]) }
+      @cos = Tensor.from(cos, [context, width], device).named("rope cos")
+      @sin = Tensor.from(sin, [context, width], device).named("rope sin")
+    end
+
+    # Returns *x*, `[..., length, width]`, its rows rotated as positions
+    # `start...start + length`: `x · cos + rotate_half(x) · sin`.
+    def call(x : Tensor, start : Int32 = 0) : Tensor
+      length = x.shape[-2]
+      unless x.shape[-1] == width && start + length <= context
+        raise ShapeError.new("rotary embeddings of width #{width} and context #{context} cannot rotate #{x.shape} from #{start}")
+      end
+      x * @cos.slice(0, start, start + length) + x.rotate_half * @sin.slice(0, start, start + length)
+    end
+  end
+
+  # Causal self-attention with grouped queries and rotary embeddings, as in
+  # Llama: *heads* query heads share *kv_heads* key and value heads, each shared
+  # by `heads / kv_heads` consecutive query heads.
+  #
+  # Its parts are named as in Hugging Face's Llama (`q_proj`, `k_proj`,
+  # `v_proj`, `o_proj`). The keys and values held in a
+  # `CausalSelfAttention::Cache` have *kv_heads* heads.
+  class GroupedQueryAttention < Module
+    getter heads : Int32
+    getter kv_heads : Int32
+    getter q_proj : Linear
+    getter k_proj : Linear
+    getter v_proj : Linear
+    getter o_proj : Linear
+
+    def initialize(width : Int32, @heads : Int32, @kv_heads : Int32, head_width : Int32 = width // heads,
+                   bias : Bool = false, init : Init = Init.normal(0.02),
+                   rng : Random = Tensomite.rng, device : Device = CPU.default)
+      raise ShapeError.new("#{heads} query heads do not group into #{kv_heads} key and value heads") unless kv_heads > 0 && heads % kv_heads == 0
+      @q_proj = Linear.new(width, heads * head_width, bias: bias, init: init, rng: rng, device: device)
+      @k_proj = Linear.new(width, kv_heads * head_width, bias: bias, init: init, rng: rng, device: device)
+      @v_proj = Linear.new(width, kv_heads * head_width, bias: bias, init: init, rng: rng, device: device)
+      @o_proj = Linear.new(heads * head_width, width, bias: bias, init: init, rng: rng, device: device)
+    end
+
+    # Returns the attention of *x*, `[batch * length, width]`, under *mask*,
+    # `[length, positions]`, with *rope* rotating queries and keys from the
+    # first position not yet in *cache*.
+    #
+    # 1. Projects *x* to queries `[batch, heads, length, head width]`, and keys
+    #    and values `[batch, kv_heads, length, head width]`.
+    # 2. Rotates queries and keys by position.
+    # 3. Appends the keys and values to *cache*, if given.
+    # 4. Stacks each group's query heads as rows, `[batch, kv_heads, group *
+    #    length, head width]`, so that one batched matmul scores them all
+    #    against their shared keys, with *mask* repeated for each head.
+    # 5. Normalises the scores with softmax, averages the values, and
+    #    projects the heads' joined outputs back to the width.
+    def forward(x : Tensor, mask : Tensor, rope : RotaryEmbedding, cache : CausalSelfAttention::Cache? = nil) : Tensor
+      rows = x.shape[0]
+      length = mask.shape[0]
+      batch, head_width, group = rows // length, rope.width, heads // kv_heads
+      start = cache ? cache.length : 0
+      q = split(q_proj.call(x), batch, length, heads, head_width)
+      k = split(k_proj.call(x), batch, length, kv_heads, head_width)
+      v = split(v_proj.call(x), batch, length, kv_heads, head_width)
+      q, k = rope.call(q, start), rope.call(k, start)
+      k, v = cache.append(k, v) if cache
+      grouped = q.reshape([batch, kv_heads, group * length, head_width])
+      masks = group == 1 ? mask : mask.expand([group] + mask.shape).reshape([group * length, mask.shape[1]])
+      weights = grouped.matmul(k.transpose).softmax(scale: 1 / Math.sqrt(head_width), mask: masks)
+      attended = weights.matmul(v).reshape([batch, heads, length, head_width])
+      o_proj.call(attended.permute([0, 2, 1, 3]).reshape([rows, heads * head_width]))
+    end
+
+    private def split(x : Tensor, batch : Int32, length : Int32, count : Int32, head_width : Int32) : Tensor
+      x.reshape([batch, length, count, head_width]).permute([0, 2, 1, 3])
+    end
+  end
+
+  # Llama's MLP: `down_proj(silu(gate_proj(x)) · up_proj(x))`, without biases,
+  # its parts named as in Hugging Face's weights.
+  class SwiGLU < Layer
+    getter gate_proj : Linear
+    getter up_proj : Linear
+    getter down_proj : Linear
+
+    def initialize(width : Int32, hidden : Int32, init : Init = Init.normal(0.02),
+                   rng : Random = Tensomite.rng, device : Device = CPU.default)
+      @gate_proj = Linear.new(width, hidden, bias: false, init: init, rng: rng, device: device)
+      @up_proj = Linear.new(width, hidden, bias: false, init: init, rng: rng, device: device)
+      @down_proj = Linear.new(hidden, width, bias: false, init: init, rng: rng, device: device)
+    end
+
+    def forward(x : Tensor) : Tensor
+      down_proj.call(gate_proj.call(x).swiglu(up_proj.call(x)))
+    end
+  end
+
   # An elementwise function with no parameters, as a layer, so that `Sequential`
   # can hold it.
   class Activation < Layer
