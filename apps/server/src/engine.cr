@@ -7,14 +7,19 @@ module Server
   class RequestError < Exception
   end
 
-  # What a completion asks for, with OpenAI's defaults where it has them.
+  # One message of a chat: who wrote it (`system`, `user` or `assistant`) and its text.
+  record Message, role : String, content : String
+
+  # What a completion asks for, with OpenAI's defaults where it has them. With
+  # *messages*, it is a chat, and *prompt* is ignored.
   record Request,
     prompt : String,
     max_tokens : Int32 = 16,
     temperature : Float64 = 1.0,
     top_k : Int32 = 0,
     stop : Array(String) = [] of String,
-    seed : Int32 = 0
+    seed : Int32 = 0,
+    messages : Array(Message)? = nil
 
   # A finished completion: its text, the tokens it read and wrote, and why it
   # ended, `"stop"` for the end-of-text token or a stop string and `"length"` for
@@ -25,7 +30,34 @@ module Server
     completion_tokens : Int32,
     finish_reason : String
 
-  # Runs completions on one GPT-2 model, one request at a time.
+  # A model as the engine runs it: its context, and sessions that each run one
+  # sequence through a cache of their own.
+  abstract class Decoder
+    abstract def context : Int32
+
+    # Returns a function that runs the next ids of a new sequence, with room for
+    # *capacity* positions, and returns their logits.
+    abstract def session(capacity : Int32) : Proc(Array(Int32), Tensomite::Tensor)
+  end
+
+  # A `Decoder` for a model with `config.context`, `new_cache(capacity)` and
+  # `forward(ids, cache)`, as `GPT2` and `Llama` have.
+  class ModelDecoder(M) < Decoder
+    def initialize(@model : M)
+    end
+
+    def context : Int32
+      @model.config.context
+    end
+
+    def session(capacity : Int32) : Proc(Array(Int32), Tensomite::Tensor)
+      cache = @model.new_cache(capacity)
+      ->(ids : Array(Int32)) { @model.forward(ids, cache) }
+    end
+  end
+
+  # Runs completions on one GPT-2 or Llama-family model, one request at a time,
+  # and chats in ChatML with a model whose tokeniser has its tokens.
   #
   # ```
   # engine = Server::Engine.load("models/gpt2", heads: 12, device: Tensomite::CPU.default)
@@ -35,20 +67,66 @@ module Server
     # The model's name, as completions report it.
     getter name : String
 
-    def initialize(@model : Tensomite::GPT2, @tokenizer : Tensomite::BPE, @name : String)
-      @end_of_text = tokenizer.id?("<|endoftext|>")
+    # The system message a chat starts with when it has none of its own.
+    property system : String?
+
+    @end_tokens : Array(Int32)
+
+    # Returns an engine running *model*. Generation ends at any of *end_tokens*,
+    # by default whichever of `<|endoftext|>` and `<|im_end|>` the tokeniser has.
+    def initialize(model : M, @tokenizer : Tensomite::BPE, @name : String,
+                   end_tokens : Array(Int32)? = nil, @system : String? = nil) forall M
+      @decoder = ModelDecoder(M).new(model).as(Decoder)
+      @end_tokens = end_tokens || ["<|endoftext|>", "<|im_end|>"].compact_map { |token| tokenizer.id?(token) }
       @lock = Mutex.new
     end
 
-    # Returns an engine for the model in *dir*: `model.safetensors`, `vocab.json`
-    # and `merges.txt`, as Hugging Face's GPT-2 repositories hold them, named after
-    # the directory. Its attention *heads* are, unless given, `n_head` in the
-    # directory's `config.json`, or 12, as in GPT-2 small, without one.
+    # Returns an engine for the model in *dir*, named after the directory.
+    #
+    # A directory whose `config.json` has `model_type` `llama` holds a Llama-family
+    # model, with `model.safetensors` and `tokenizer.json`; generation also ends
+    # at its `eos_token_id`, and a chat's default system message is the one
+    # `tokenizer_config.json`'s chat template adds, if any. Otherwise it holds a
+    # GPT-2, with `model.safetensors`, `vocab.json` and `merges.txt`, whose
+    # attention *heads* are, unless given, `n_head` in `config.json`, or 12.
     def self.load(dir : String, heads : Int32?, device : Tensomite::Device) : Engine
+      name = File.basename(File.expand_path(dir))
+      if Server.model_type(dir) == "llama"
+        tokenizer = Tensomite::BPE.from_json(File.join(dir, "tokenizer.json"))
+        model = Tensomite::Llama.load(dir, device)
+        ends = ["<|endoftext|>", "<|im_end|>"].compact_map { |token| tokenizer.id?(token) }
+        ends |= Server.configured_eos(dir)
+        return new(model, tokenizer, name, ends, Server.default_system(dir))
+      end
       heads ||= Server.configured_heads(dir) || 12
       model = Tensomite::GPT2.load(File.join(dir, "model.safetensors"), heads: heads, device: device)
       tokenizer = Tensomite::BPE.from_files(File.join(dir, "vocab.json"), File.join(dir, "merges.txt"))
-      new(model, tokenizer, File.basename(File.expand_path(dir)))
+      new(model, tokenizer, name)
+    end
+
+    # Returns true when the tokeniser has ChatML's tokens, so the engine can chat.
+    def chat? : Bool
+      !@tokenizer.id?("<|im_start|>").nil? && !@tokenizer.id?("<|im_end|>").nil?
+    end
+
+    # Returns the token ids of *messages* in ChatML, with the default system
+    # message first when they have none, then the start of the assistant's turn.
+    #
+    # Each message is `<|im_start|>role\ncontent<|im_end|>\n`, its role and
+    # content encoded as plain text, so text that looks like a special token
+    # cannot end a message early.
+    def chat_ids(messages : Array(Message)) : Array(Int32)
+      raise RequestError.new("this model's tokeniser has no ChatML tokens, so it cannot chat") unless chat?
+      raise RequestError.new("`messages` is empty") if messages.empty?
+      start, stop = @tokenizer.specials["<|im_start|>"], @tokenizer.specials["<|im_end|>"]
+      if (system = @system) && messages.first.role != "system"
+        messages = [Message.new("system", system)] + messages
+      end
+      newline = @tokenizer.encode("\n", special: false)
+      ids = messages.flat_map do |message|
+        [start] + @tokenizer.encode("#{message.role}\n#{message.content}", special: false) + [stop] + newline
+      end
+      ids + [start] + @tokenizer.encode("assistant\n", special: false)
     end
 
     # Runs *request* and returns its completion, yielding its text as it is
@@ -74,22 +152,22 @@ module Server
     # 3. Yields the text not yet yielded, less the tail that could begin a stop
     #    string.
     private def run(request : Request, & : String ->) : Completion
-      prompt = @tokenizer.encode(request.prompt)
+      prompt = request.messages.try { |messages| chat_ids(messages) } || @tokenizer.encode(request.prompt)
       raise RequestError.new("the prompt is empty") if prompt.empty?
-      context = @model.config.context
+      context = @decoder.context
       if prompt.size >= context
         raise RequestError.new("the prompt's #{prompt.size} tokens leave no room in the context of #{context}")
       end
       limit = Math.min(request.max_tokens, context - prompt.size)
       sampler = Tensomite::Sampler.new(temperature: request.temperature, top_k: request.top_k, seed: request.seed)
       held = request.stop.max_of?(&.size).try { |size| size - 1 } || 0
-      cache = @model.new_cache
-      logits = @model.forward(prompt, cache)
+      forward = @decoder.session(prompt.size + limit)
+      logits = forward.call(prompt)
       bytes = IO::Memory.new
       text, sent, count, reason, cut_at_stop = "", 0, 0, "length", false
       while count < limit
         token = sampler.pick(logits.slice(0, logits.shape[0] - 1, logits.shape[0]).to_a(Float32))
-        if token == @end_of_text
+        if @end_tokens.includes?(token)
           reason = "stop"
           break
         end
@@ -103,7 +181,7 @@ module Server
         ready = Math.max(sent, text.size - held)
         yield text[sent...ready] if ready > sent
         sent = ready
-        logits = @model.forward([token], cache) if count < limit
+        logits = forward.call([token]) if count < limit
       end
       # A character cut by the end of the completion becomes U+FFFD.
       text = String.new(bytes.to_slice).scrub unless cut_at_stop
@@ -114,9 +192,34 @@ module Server
 
   # Returns `n_head` from *dir*'s `config.json`, or `nil` when it has none.
   def self.configured_heads(dir : String) : Int32?
-    path = File.join(dir, "config.json")
+    config(dir).try(&.["n_head"]?).try(&.as_i?)
+  end
+
+  # Returns `model_type` from *dir*'s `config.json`, or `nil` when it has none.
+  def self.model_type(dir : String) : String?
+    config(dir).try(&.["model_type"]?).try(&.as_s?)
+  end
+
+  # Returns the ids of `eos_token_id` in *dir*'s `config.json`, one or several.
+  def self.configured_eos(dir : String) : Array(Int32)
+    case eos = config(dir).try(&.["eos_token_id"]?)
+    when Nil then [] of Int32
+    else          eos.as_a?.try(&.map(&.as_i)) || eos.as_i?.try { |id| [id] } || [] of Int32
+    end
+  end
+
+  # Returns the system message the chat template in *dir*'s
+  # `tokenizer_config.json` adds to a chat without one, or `nil`.
+  def self.default_system(dir : String) : String?
+    path = File.join(dir, "tokenizer_config.json")
     return unless File.exists?(path)
-    JSON.parse(File.read(path))["n_head"]?.try(&.as_i?)
+    template = JSON.parse(File.read(path))["chat_template"]?.try(&.as_s?) || return
+    template.match(/'<\|im_start\|>system\n(.*?)<\|im_end\|>/m).try(&.[1])
+  end
+
+  private def self.config(dir : String) : JSON::Any?
+    path = File.join(dir, "config.json")
+    JSON.parse(File.read(path)) if File.exists?(path)
   end
 
   # Returns the longest prefix of *bytes* that ends on a whole UTF-8 character, as
