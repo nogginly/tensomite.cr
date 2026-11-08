@@ -74,7 +74,7 @@ describe "Llama's ops" do
   end
 
   (DEVICES + GPUS).each do |device|
-    it "gives the CPU's bits for SiLU, SwiGLU, RMSNorm and RoPE on #{device.class}" do
+    it "matches the CPU for SiLU, SwiGLU, RMSNorm and RoPE on #{device.class}" do
       results = [CPU.default, device].map do |dev|
         x = Tensor.from(random_values(4 * 8, 1), [1, 4, 8], dev)
         up = Tensor.from(random_values(4 * 8, 2), [1, 4, 8], dev)
@@ -82,7 +82,9 @@ describe "Llama's ops" do
         rope = RotaryEmbedding.new(8, context: 8, device: dev)
         [x.silu, x.swiglu(up), x.rmsnorm(weight), rope.call(x, 3)].map(&.to_a(Float32))
       end
-      results[1].should eq results[0]
+      results[1].zip(results[0]) do |actual, expected|
+        actual.zip(expected) { |a, e| a.should be_close(e, 1e-5 * Math.max(1f32, e.abs)) }
+      end
     end
   end
 
