@@ -74,6 +74,18 @@ describe "Fused row ops" do
         Tensomite.grad((plain * w).sum, [x]).first.to_a(Float32).should eq (plain * (w - (w * plain).sum(-1, keepdims: true))).to_a(Float32)
       end
 
+      it "computes log_softmax's gradient exactly as the composite does" do
+        x, w = random(device, [3, 4, 37], 15), random(device, [3, 4, 37], 16)
+        y = x.log_softmax
+        dx = Tensomite.grad((y * w).sum, [x]).first
+        dx.node.op.should eq Op::LogSoftmaxGrad
+        dx.to_a(Float32).should eq (w - y.exp * w.sum(-1, keepdims: true)).to_a(Float32)
+        xt = x.transpose
+        yt = xt.log_softmax
+        wt = w.transpose
+        Tensomite.grad((yt * wt).sum, [xt]).first.to_a(Float32).should eq (wt - yt.exp * wt.sum(-1, keepdims: true)).to_a(Float32)
+      end
+
       it "computes layernorm's gradients exactly as the composite does" do
         x, w, b, g = random(device, [6, 40], 11), random(device, [40], 12), random(device, [40], 13), random(device, [6, 40], 14)
         dx, dw, db = Tensomite.grad((x.layernorm(w, b) * g).sum, [x, w, b])

@@ -145,6 +145,15 @@ describe "GPU devices against the CPU" do
         xt.softmax(scale: 0.35).to_a(Float32).should eq (xt * 0.35).softmax.to_a(Float32)
       end
 
+      it "computes log_softmax's gradient exactly as its composite does, short rows and long" do
+        [{[6, 40], 10}, {[3, 5000], 12}].each do |(shape, seed)|
+          x, w = random(gpu, shape, seed), random(gpu, shape, seed + 1)
+          y = x.log_softmax
+          dx = Tensomite.grad((y * w).sum, [x]).first
+          dx.to_a(Float32).should eq (w - y.exp * w.sum(-1, keepdims: true)).to_a(Float32)
+        end
+      end
+
       it "computes layernorm's gradients exactly as its composite does" do
         x, w, b, g = random(gpu, [6, 40], 6), random(gpu, [40], 7), random(gpu, [40], 8), random(gpu, [6, 40], 9)
         dx, dw = Tensomite.grad((x.layernorm(w, b) * g).sum, [x, w])

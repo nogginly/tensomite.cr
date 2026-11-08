@@ -876,6 +876,33 @@ kernel void softmax_grad_f32(device const float* g [[buffer(0)]],
         dst[base + s] = o;)
 }
 
+// The gradient of a log-softmax's input, per row: the sum of g, in chunk order
+// as sum_f32 adds; then g - exp(y) · sum. `scale` and `flags` are unused, so
+// it is encoded as softmax_grad_f32 is.
+kernel void log_softmax_grad_f32(device const float* g [[buffer(0)]],
+                                 device const float* y [[buffer(1)]],
+                                 device float* dst [[buffer(2)]],
+                                 constant View& vg [[buffer(3)]],
+                                 constant View& vy [[buffer(4)]],
+                                 constant uint& n [[buffer(5)]],
+                                 constant float& scale [[buffer(6)]],
+                                 constant uint& flags [[buffer(7)]],
+                                 uint row [[threadgroup_position_in_grid]],
+                                 uint t [[thread_position_in_threadgroup]],
+                                 uint threads [[threads_per_threadgroup]]) {
+    threadgroup float partial[REDUCE_THREADS];
+    threadgroup float shared;
+    uint base = row * n;
+    int gstart = offset_of(vg, base), gstride = run_stride(vg);
+    int ystart = offset_of(vy, base), ystride = run_stride(vy);
+    float total;
+    ROW_SUM(total, acc = acc + g[gstart + int(s) * gstride];)
+    OWN_ELEMENTS(
+        float e = precise::exp(y[ystart + int(s) * ystride]);
+        float p = e * total;
+        dst[base + s] = g[gstart + int(s) * gstride] - p;)
+}
+
 kernel void log_softmax_f32(device const float* a [[buffer(0)]],
                             device float* dst [[buffer(1)]],
                             constant View& v [[buffer(2)]],
