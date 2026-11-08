@@ -53,6 +53,10 @@ module Tensomite
     SoftmaxGrad
     # Log of the softmax of each row along the last axis, fused.
     LogSoftmax
+    # The gradient of a log-softmax's input, fused, per row along the last axis:
+    # `g - exp(y) · Σ g`, from the gradient (source 0) and the log-softmax's
+    # output (source 1).
+    LogSoftmaxGrad
     # Layer normalisation of each row along the last axis, by `Node#epsilon`, then
     # scaled and offset by sources 1 and 2 (weight and bias, expanded to the
     # output shape), fused.

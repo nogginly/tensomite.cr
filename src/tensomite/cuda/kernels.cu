@@ -770,6 +770,25 @@ extern "C" __global__ void softmax_grad_f32(const float* g, const float* y, floa
         dst[base + s] = o;)
 }
 
+// The gradient of a log-softmax's input, per row: the sum of g, in chunk order
+// as sum_f32 adds; then g - exp(y) · sum. `scale` and `flags` are unused, so
+// it launches as softmax_grad_f32 does.
+extern "C" __global__ void log_softmax_grad_f32(const float* g, const float* y, float* dst, View vg, View vy,
+                                                unsigned int n, float scale, unsigned int flags) {
+    __shared__ float partial[REDUCE_THREADS];
+    __shared__ float shared;
+    unsigned int row = blockIdx.x, t = threadIdx.x, threads = blockDim.x;
+    unsigned int base = row * n;
+    int gstart = offset_of(vg, base), gstride = run_stride(vg);
+    int ystart = offset_of(vy, base), ystride = run_stride(vy);
+    float total;
+    ROW_SUM(total, acc = acc + g[gstart + int(s) * gstride];)
+    OWN_ELEMENTS(
+        float e = expf(y[ystart + int(s) * ystride]);
+        float p = e * total;
+        dst[base + s] = g[gstart + int(s) * gstride] - p;)
+}
+
 extern "C" __global__ void log_softmax_f32(const float* a, float* dst, View v, unsigned int n) {
     __shared__ float partial[REDUCE_THREADS];
     __shared__ float shared;

@@ -144,11 +144,11 @@ module Tensomite
       in Op::Dropout
         # The same mask and scale, on the gradient.
         [Tensor.lazy(Node.new(Op::Dropout, [g], g.shape, g.dtype, g.device, scale: node.scale, dropout: node.dropout))] of Tensor?
-      in Op::SoftmaxGrad, Op::LayerNormGrad
+      in Op::SoftmaxGrad, Op::LogSoftmaxGrad, Op::LayerNormGrad
         raise Error.new("#{node.op} has no gradient")
       in Op::LogSoftmax
-        # dx = g - exp(y) · Σ g, per row.
-        [g - result.exp * g.sum(-1, keepdims: true)] of Tensor?
+        # dx = g - exp(y) · Σ g, per row, as one `LogSoftmaxGrad`.
+        [Tensor.lazy(Node.new(Op::LogSoftmaxGrad, [g, result], result.shape, result.dtype, result.device))] of Tensor?
       in Op::LayerNorm
         layernorm_backward(node, g)
       in Op::Kernel

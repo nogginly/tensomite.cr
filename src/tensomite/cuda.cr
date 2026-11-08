@@ -475,16 +475,16 @@ module Tensomite
     private def launch(kernels : Kernels, node : Node, output : CUDABuffer) : Bool
       return false unless node.dtype.f32? && node.srcs.all? { |src| src.ndim <= MAX_DIMS }
       case node.op
-      when Op::Sum, Op::Max                                                               then launch_reduce(kernels, node, output)
-      when Op::Cat                                                                        then launch_cat(kernels, node, output)
-      when Op::Write                                                                      then launch_write(kernels, node, output)
-      when Op::Gather, Op::ScatterAdd                                                     then launch_rows(kernels, node, output)
-      when Op::Unview                                                                     then return launch_unview(kernels, node, output)
-      when Op::MatMul                                                                     then launch_matmul(kernels, node, output)
-      when Op::Softmax, Op::SoftmaxGrad, Op::LogSoftmax, Op::LayerNorm, Op::LayerNormGrad then launch_row_op(kernels, node, output)
-      when Op::Kernel                                                                     then launch_kernel(node, output)
-      when Op::Dropout                                                                    then launch_dropout(kernels, node, output)
-      else                                                                                     return launch_elementwise(kernels, node, output)
+      when Op::Sum, Op::Max                                                                                   then launch_reduce(kernels, node, output)
+      when Op::Cat                                                                                            then launch_cat(kernels, node, output)
+      when Op::Write                                                                                          then launch_write(kernels, node, output)
+      when Op::Gather, Op::ScatterAdd                                                                         then launch_rows(kernels, node, output)
+      when Op::Unview                                                                                         then return launch_unview(kernels, node, output)
+      when Op::MatMul                                                                                         then launch_matmul(kernels, node, output)
+      when Op::Softmax, Op::SoftmaxGrad, Op::LogSoftmax, Op::LogSoftmaxGrad, Op::LayerNorm, Op::LayerNormGrad then launch_row_op(kernels, node, output)
+      when Op::Kernel                                                                                         then launch_kernel(node, output)
+      when Op::Dropout                                                                                        then launch_dropout(kernels, node, output)
+      else                                                                                                         return launch_elementwise(kernels, node, output)
       end
       true
     end
@@ -669,7 +669,7 @@ module Tensomite
       current.pointer
     end
 
-    # Softmax, SoftmaxGrad, LogSoftmax, LayerNorm and LayerNormGrad: one block per
+    # Softmax, SoftmaxGrad, LogSoftmax, LogSoftmaxGrad, LayerNorm and LayerNormGrad: one block per
     # row along the last axis, with a thread per chunk of the row up to `REDUCE_THREADS`.
     private def launch_row_op(kernels : Kernels, node : Node, output : CUDABuffer) : Nil
       n = node.shape.last
@@ -684,7 +684,7 @@ module Tensomite
           view_args(src.view), view_args(weight.view), view_args(bias.view), n.to_u32, epsilon.to_f32)
       elsif node.op == Op::LayerNormGrad
         launch_layernorm_grad(kernels, node, output, rows, threads)
-      elsif node.op == Op::SoftmaxGrad || node.softmax_flags != 0
+      elsif node.op == Op::SoftmaxGrad || node.op == Op::LogSoftmaxGrad || node.softmax_flags != 0
         launch_softmax_with(kernels, node, output, rows, threads)
       else
         name = node.op == Op::Softmax ? "softmax_f32" : "log_softmax_f32"
@@ -703,13 +703,17 @@ module Tensomite
         view_args(g.view), view_args(x.view), view_args(weight.view), node.shape.last.to_u32, epsilon, (node.srcs.size == 1 ? 0 : 1).to_u32)
     end
 
-    # A softmax with a scale or mask, or a softmax's gradient. The second
-    # source, a mask or the softmax's output, is the first again when there is
-    # none.
+    # A softmax with a scale or mask, or a softmax's or log-softmax's gradient.
+    # The second source, a mask or the forward op's output, is the first again
+    # when there is none.
     private def launch_softmax_with(kernels : Kernels, node : Node, output : CUDABuffer, rows : Int32, threads : Int32) : Nil
       src = node.srcs.first
       other = node.srcs[1]? || src
-      name = node.op == Op::Softmax ? "softmax_scaled_f32" : "softmax_grad_f32"
+      name = case node.op
+             when Op::Softmax        then "softmax_scaled_f32"
+             when Op::LogSoftmaxGrad then "log_softmax_grad_f32"
+             else                         "softmax_grad_f32"
+             end
       context.launch(kernels[name], rows, threads, pointer(src), pointer(other), output.pointer,
         view_args(src.view), view_args(other.view), node.shape.last.to_u32, node.scale || 1f32, node.softmax_flags)
     end

@@ -112,7 +112,7 @@ module Tensomite
       in Op::GreaterEqual then binary(T, node, dst) { |x, y| x >= y ? T.new(1) : T.zero }
       in Op::Unview       then unview(T, node, dst)
       in Op::ScatterAdd   then scatter_add(T, node, dst)
-      in Op::Softmax, Op::SoftmaxGrad, Op::LogSoftmax, Op::LayerNorm, Op::LayerNormGrad
+      in Op::Softmax, Op::SoftmaxGrad, Op::LogSoftmax, Op::LogSoftmaxGrad, Op::LayerNorm, Op::LayerNormGrad
         rows(node, Slice.new(dst.to_unsafe.as(Float32*), dst.size))
       in Op::Dropout then dropout(node, Slice.new(dst.to_unsafe.as(Float32*), dst.size))
       in Op::Kernel
@@ -265,6 +265,7 @@ module Tensomite
     #   times the scale when it has one.
     # - LogSoftmax: `shifted = x - max`; the sum of `exp(shifted)`; then
     #   `shifted - log(sum)`.
+    # - LogSoftmaxGrad: the sum of `g`, folded from zero; then `g - exp(y) · sum`.
     # - LayerNormGrad: `mean = sum(x) / n`, `centred = x - mean`, `σ =
     #   sqrt(sum(centred²) / n + epsilon)`, `x̂ = centred / σ`; then either `x̂`,
     #   or, with `ĝ = g · weight`, `mean(ĝ)` and `mean(ĝ · x̂)` as sums over n,
@@ -302,6 +303,8 @@ module Tensomite
           n.times { |j| row_out[j] = row_out[j] / total }
         when Op::SoftmaxGrad
           softmax_grad_row(node, xs, pos, stride, dst, base, n)
+        when Op::LogSoftmaxGrad
+          log_softmax_grad_row(node, xs, pos, stride, dst, base, n)
         when Op::LayerNormGrad
           layernorm_grad_row(node, dst, base, n)
         when Op::LogSoftmax
@@ -369,6 +372,18 @@ module Tensomite
         value = ys[py + j * sy] * (gs[pg + j * sg] - total)
         row_out[j] = scale ? value * scale : value
       end
+    end
+
+    # Writes `g - exp(y) · Σ g` for the row at *base*, from the gradient *gs*
+    # and the log-softmax's output (source 1).
+    private def log_softmax_grad_row(node : Node, gs : Slice(Float32), pg : Int32, sg : Int32,
+                                     dst : Slice(Float32), base : Int32, n : Int32) : Nil
+      y = node.srcs[1]
+      ys, py, sy = elements(Float32, y), y.view.offset_of(base), y.view.run_stride
+      total = 0f32
+      n.times { |j| total += gs[pg + j * sg] }
+      row_out = dst.to_unsafe + base
+      n.times { |j| row_out[j] = gs[pg + j * sg] - Maths.exp(ys[py + j * sy]) * total }
     end
 
     # Writes the row at *base* of a `LayerNormGrad`: the normalised input, or,
