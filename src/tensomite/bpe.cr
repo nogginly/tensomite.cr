@@ -12,6 +12,15 @@ module Tensomite
   # ids = bpe.encode("Hello world") # => [15496, 995]
   # bpe.decode(ids)                 # => "Hello world"
   # ```
+  #
+  # From a Hugging Face `tokenizer.json`, it also knows the special tokens, such
+  # as ChatML's `<|im_start|>`, each encoded whole wherever it appears in the
+  # text, and the pre-tokeniser that splits every digit into a word of its own:
+  #
+  # ```
+  # bpe = BPE.from_json("tokenizer.json")
+  # bpe.encode("<|im_start|>user") # => [1, 4093]
+  # ```
   class BPE
     # GPT-2's pre-tokeniser: contractions, letter runs, number runs, other
     # symbols, then whitespace, each optionally led by one space.
@@ -41,6 +50,10 @@ module Tensomite
     @tokens : Hash(Int32, String)
     @ranks : Hash({String, String}, Int32)
     @cache = {} of String => Array(Int32)
+    @specials : Hash(String, Int32)
+    @special_pattern : Regex?
+    @digits : Bool
+    @prefix_space : Bool
 
     # Returns a tokeniser from a `vocab.json` (token to id) and a `merges.txt` (one
     # merge per line, best first, after a `#version` line).
@@ -50,9 +63,69 @@ module Tensomite
       new(vocab, merges.map { |line| a, b = line.split(' ', 2); {a, b} })
     end
 
-    def initialize(@ids : Hash(String, Int32), merges : Array({String, String}))
+    # Returns the tokeniser in a Hugging Face `tokenizer.json`: a byte-level BPE
+    # model, its added tokens, and a pre-tokeniser of `ByteLevel`, alone or after
+    # `Digits` with `individual_digits`.
+    #
+    # Raises `Error` for anything else, such as a normaliser, byte fallback or a
+    # SentencePiece model, which this tokeniser would get wrong.
+    def self.from_json(path : String) : BPE
+      json = JSON.parse(File.read(path))
+      model = json["model"]
+      if model["type"].as_s != "BPE" || model["byte_fallback"]?.try(&.as_bool?) ||
+         model["continuing_subword_prefix"]?.try(&.as_s?) || model["end_of_word_suffix"]?.try(&.as_s?)
+        raise Error.new("#{path}: only byte-level BPE models are supported")
+      end
+      raise Error.new("#{path}: normalizers are not supported") unless json["normalizer"]?.try(&.raw).nil?
+      digits, prefix_space = pre_tokenizer(json["pre_tokenizer"], path)
+      vocab = model["vocab"].as_h.transform_values(&.as_i)
+      merges = model["merges"].as_a.map do |merge|
+        if pair = merge.as_a?
+          {pair[0].as_s, pair[1].as_s}
+        else
+          a, b = merge.as_s.split(' ', 2)
+          {a, b}
+        end
+      end
+      specials = {} of String => Int32
+      json["added_tokens"]?.try &.as_a.each do |token|
+        if %w[lstrip rstrip single_word].any? { |flag| token[flag]?.try(&.as_bool) }
+          raise Error.new("#{path}: added token #{token["content"]} strips or matches whole words, which is not supported")
+        end
+        specials[token["content"].as_s] = token["id"].as_i
+      end
+      new(vocab.merge(specials), merges, specials, digits: digits, prefix_space: prefix_space)
+    end
+
+    # Returns whether the pre-tokeniser *json* splits digits and adds a leading
+    # space, raising for one this tokeniser does not implement.
+    private def self.pre_tokenizer(json : JSON::Any, path : String) : {Bool, Bool}
+      steps = json["type"].as_s == "Sequence" ? json["pretokenizers"].as_a : [json]
+      digits = steps.size == 2 && steps[0]["type"].as_s == "Digits" && steps[0]["individual_digits"].as_bool
+      level = steps.last
+      unless (steps.size == 1 || digits) && level["type"].as_s == "ByteLevel" && level["use_regex"]?.try(&.as_bool) != false
+        raise Error.new("#{path}: pre-tokenizer #{json.to_json} is not supported")
+      end
+      {digits, level["add_prefix_space"]?.try(&.as_bool) || false}
+    end
+
+    # Returns a tokeniser of the token ids *ids* and ranked *merges*. Text that
+    # matches one of *specials* encodes to its id whole. With *digits*, each
+    # digit is a word of its own; with *prefix_space*, a space is added before
+    # text that does not start with one.
+    def initialize(@ids : Hash(String, Int32), merges : Array({String, String}),
+                   @specials : Hash(String, Int32) = {} of String => Int32,
+                   @digits : Bool = false, @prefix_space : Bool = false)
       @tokens = @ids.invert
       @ranks = merges.each_with_index.to_h { |pair, rank| {pair, rank} }
+      unless @specials.empty?
+        @special_pattern = Regex.union(@specials.keys.sort_by! { |token| -token.size })
+      end
+    end
+
+    # Returns the special tokens, by text.
+    def specials : Hash(String, Int32)
+      @specials.dup
     end
 
     # Returns the number of tokens in the vocabulary.
@@ -60,9 +133,31 @@ module Tensomite
       @ids.size
     end
 
-    # Returns the token ids of *text*.
-    def encode(text : String) : Array(Int32)
-      text.scan(PATTERN).flat_map { |match| encode_word(match[0]) }
+    # Returns the token ids of *text*. With *special* false, special tokens in
+    # *text* are encoded as ordinary text, as untrusted input should be.
+    def encode(text : String, special : Bool = true) : Array(Int32)
+      pattern = @special_pattern
+      return encode_text(text) unless special && pattern
+      ids = [] of Int32
+      start = 0
+      text.scan(pattern) do |match|
+        ids.concat(encode_text(text.byte_slice(start, match.byte_begin(0) - start))) if match.byte_begin(0) > start
+        ids << @specials[match[0]]
+        start = match.byte_end(0)
+      end
+      ids.concat(encode_text(text.byte_slice(start))) if start < text.bytesize
+      ids
+    end
+
+    # Pre-tokenises *text*, which holds no special tokens, and encodes each word.
+    #
+    # 1. Adds a leading space, with `prefix_space`, unless there is one.
+    # 2. Splits off each digit as a word of its own, with `digits`.
+    # 3. Splits each piece with GPT-2's pattern, and merges each word.
+    private def encode_text(text : String) : Array(Int32)
+      text = " " + text if @prefix_space && !text.starts_with?(' ')
+      pieces = @digits ? text.split(/(\p{N})/).reject(&.empty?) : [text]
+      pieces.flat_map { |piece| piece.scan(PATTERN).flat_map { |match| encode_word(match[0]) } }
     end
 
     # Returns the text of *ids*. Byte sequences that are not valid UTF-8, such as a
@@ -77,7 +172,11 @@ module Tensomite
       bytes = IO::Memory.new
       ids.each do |id|
         token = @tokens[id]? || raise Error.new("token id #{id} is not in the vocabulary")
-        token.each_char { |char| bytes.write_byte(CHAR_TO_BYTE[char]) }
+        if @specials[token]? == id
+          bytes << token
+        else
+          token.each_char { |char| bytes.write_byte(CHAR_TO_BYTE[char]) }
+        end
       end
       bytes.to_slice
     end
