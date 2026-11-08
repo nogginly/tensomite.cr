@@ -248,9 +248,11 @@ module Tensomite
     # order, so the next one may reuse it.
     @scratch : MetalBuffer? = nil
 
-    # Freed `MTLBuffer`s kept for reuse; see `BufferPool`. Holds up to 1 GiB by
-    # default. (`#pool`, inherited, holds host memory, which `Metal` does not use.)
-    getter buffer_pool = BufferPool(Void*).new(1_i64 << 30)
+    # Freed `MTLBuffer`s kept for reuse; see `BufferPool`. Holds up to a quarter
+    # of the GPU's recommended working set, and at least 1 GiB, as on CUDA, so a
+    # training step's buffers fit for the next step. (`#pool`, inherited, holds
+    # host memory, which `Metal` does not use.)
+    getter buffer_pool : BufferPool(Void*)
 
     # How many dispatches go into a command buffer before it is committed, so the
     # GPU starts on them while the host is still encoding the rest.
@@ -265,6 +267,8 @@ module Tensomite
       device = @device
       @name = ObjC.autoreleasepool { String.new(ObjC.send(Pointer(UInt8), ObjC.send(Pointer(Void), device, "name"), "UTF8String")) }
       @queue = ObjC.send(Pointer(Void), @device, "newCommandQueue")
+      working_set = ObjC.send(UInt64, @device, "recommendedMaxWorkingSetSize").to_i64
+      @buffer_pool = BufferPool(Void*).new(Math.max(1_i64 << 30, working_set // 4))
       compile
     end
 
