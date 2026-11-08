@@ -57,6 +57,19 @@ module Tensomite
       CausalSelfAttention.new(width, heads, bias: bias, init: weights, proj_init: proj_init || weights, rng: rng, device: device)
     end
 
+    def rmsnorm(width : Int32, eps : Float64 = 1e-5) : RMSNorm
+      RMSNorm.new(width, eps, device: device)
+    end
+
+    def grouped_attention(width : Int32, heads : Int32, kv_heads : Int32, head_width : Int32 = width // heads,
+                          bias : Bool = @bias, init : Init? = @init) : GroupedQueryAttention
+      GroupedQueryAttention.new(width, heads, kv_heads, head_width, bias: bias, init: init || Init.normal(0.02), rng: rng, device: device)
+    end
+
+    def swiglu(width : Int32, hidden : Int32, init : Init? = @init) : SwiGLU
+      SwiGLU.new(width, hidden, init: init || Init.normal(0.02), rng: rng, device: device)
+    end
+
     # Returns a parameter of *shape* drawn from *init*.
     def parameter(shape : Array(Int32), init : Init? = @init, decay : Bool = true) : Parameter
       Parameter.new((init || Init.normal(0.02)).tensor(shape, rng, device), decay: decay)

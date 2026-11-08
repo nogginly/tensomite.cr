@@ -89,7 +89,7 @@ jobs:
       # Metal code builds only for Apple Silicon; cross-compiling checks it without linking.
       - name: Cross-compile the Metal path (Linux)
         if: ${{ runner.os == 'Linux' }}
-        run: crystal build --cross-compile --target aarch64-apple-darwin spec/gpu_spec.cr spec/metal_spec.cr spec/gpt2_spec.cr -o /tmp/specs_darwin
+        run: crystal build --cross-compile --target aarch64-apple-darwin spec/gpu_spec.cr spec/metal_spec.cr spec/gpt2_spec.cr spec/llama_ops_spec.cr -o /tmp/specs_darwin
 
       - name: Check formatting (Linux)
         if: ${{ runner.os == 'Linux' }}
