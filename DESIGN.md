@@ -491,7 +491,7 @@ A graph built anew every step, as in training or decoding, would allocate a fres
 4. **On Metal and CUDA**, finalizers only queue a buffer in a `RetiredList`. The device's own thread drains it into the pool at the next allocation or sync, or on Metal when no GPU work is pending, because the GPU may still be reading a buffer. A finalizer can run inside another finalizer's allocation on the same thread, so the list never allocates: it fills one of two fixed arrays, of 16,384 entries, and draining swaps them. When the list is busy or full, the finalizer frees the memory at once instead: Metal releases the `MTLBuffer`, which is safe because command buffers retain what they use, and CUDA frees it with `cuMemFree`, which waits for the GPU. The pool holds the `MTLBuffer`s and device pointers themselves.
 
    Until Decision BG, the retired list was a growable array, replaced by an empty one at each drain. Appending to it allocated, the allocation ran the other waiting finalizers inside the first, and each of those found the list held and freed its memory. On CUDA almost every buffer was freed rather than pooled: in a training step on the stub, 416 of 429 allocations missed the pool, and on the GB10 allocating took 17 of the step's 109 ms.
-5. **A limit** bounds what a pool holds: 1 GiB by default, and on CUDA a quarter of the GPU's memory, if that is more.
+5. **A limit** bounds what a pool holds: 1 GiB on host devices, and on CUDA and Metal a quarter of the GPU's memory (on Metal, its recommended working set), if that is more. A training step frees more than 1 GiB on GPT-2 small, so a 1 GiB pool sends most of it back to the driver and the next step allocates it again: With a 1 GiB limit, Metal missed its pool 673 times a step on GPT-2 small, about 22 ms of allocating on the M5 Pro; CUDA, with a quarter of the GB10's memory, missed none. With a quarter of its working set, Metal misses none either: 0 of 1,066 allocations, 0.2 ms.
 
 Reuse lags by one collection: memory comes back only when the collector runs. A training loop that collects once per step (`examples/shakespeare.cr`) gets most of its buffers back before the next step; on the Linux container, that took a step from 744 to 470 ms, with identical losses.
 
@@ -1310,7 +1310,7 @@ Allocation, with `GC_UNMAP_THRESHOLD` unset|3.6 s              |0.9 s, with `GC_
 - **Element counts and offsets are `Int32`,** following Crystal's `Slice` indexing. That caps one buffer at about 2 GB.
 - **Only `F32` and `I32`.** No type promotion: operands must have the same dtype.
 - **BLAS covers `F32` matmul only.** See "Performance baselines" for how far the oracle is behind it.
-- **Model weights load as `F32` only.** `F16` and quantised weights arrive with M9.
+- **Model weights load as `F32` only.** `BF16` weights arrive with M9, widened to `F32`; `F16` and quantised weights with M10.
 - **One device per op.** Moving data needs an explicit `to`, which goes through host memory.
 - **Only what is written as a kernel or a fused row op is fused.** `gelu`, `softmax`, `log_softmax` and `layernorm` are one op each; the attention's scale and mask, residual adds and biases are still separate primitives, until the models move onto kernels (M7 part 6).
 - **Each scalar operand is a new leaf,** uploaded to the device once per use.
