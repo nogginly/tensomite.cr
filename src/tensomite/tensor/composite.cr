@@ -83,6 +83,33 @@ module Tensomite
       Kernels::GELU.call(self)
     end
 
+    # Returns SiLU, `x · sigmoid(x)`, computed as `x / (e^-x + 1)` in one fused
+    # kernel (`Tensomite::Kernels::SILU`).
+    def silu : Tensor
+      Kernels::SILU.call(self)
+    end
+
+    # Returns `silu(self) · up`, the gate of a SwiGLU MLP, in one fused kernel
+    # (`Tensomite::Kernels::SWIGLU`); *up* has this tensor's shape.
+    def swiglu(up : Tensor) : Tensor
+      Kernels::SWIGLU.call(self, up)
+    end
+
+    # Returns root-mean-square normalisation of the last axis, scaled by
+    # *weight*, of shape `[last]`: `x / √(mean(x²) + eps) · weight`, as Llama
+    # normalises.
+    def rmsnorm(weight : Tensor, eps : Number = 1e-5) : Tensor
+      self / ((self * self).mean(-1, keepdims: true) + eps).sqrt * weight
+    end
+
+    # Returns the last axis's two halves swapped, the first negated:
+    # `[x₁, x₂] → [-x₂, x₁]`, as rotary embeddings rotate pairs of features.
+    def rotate_half : Tensor
+      half = shape[-1] // 2
+      raise ShapeError.new("rotate_half needs an even last axis, not #{shape[-1]}") unless shape[-1] == 2 * half
+      Tensor.cat([-slice(-1, half, 2 * half), slice(-1, 0, half)], -1)
+    end
+
     # Returns an `F32` mask of shape `[rows, cols]` to add to attention scores:
     # 0 where query row `i` may attend to key column `j`, and -∞ where `j` lies in
     # its future. The last row sees every column, so with a KV cache holding earlier

@@ -148,15 +148,18 @@ a.matmul(w, Tensor.from([0.5f32, -1f32], [2])).to_a(Float32)   # => [4.5, 4.0, 1
 
 ## Neural-network building blocks
 
-Method                               |Use                                                                     
--------------------------------------|------------------------------------------------------------------------
-`gelu`                               |the GELU activation (tanh approximation), as in GPT-2                   
-`softmax(axis = -1)`                 |turns scores into probabilities that sum to 1                           
-`softmax(scale: s, mask: m)`         |the softmax of `x · s + m`, as attention takes it, in one fused op      
-`log_softmax(axis = -1)`             |the log of `softmax`, computed stably                                   
-`layernorm(weight, bias, eps = 1e-5)`|normalises each row to mean 0 and variance 1, then scales and shifts    
-`cross_entropy(targets)`             |the mean loss of `[n, classes]` scores against `[n]` `I32` class indices
-`Tensor.causal_mask(rows, cols)`     |0 where a position may look, -∞ where it may not, for attention         
+Method                               |Use                                                                                              
+-------------------------------------|-------------------------------------------------------------------------------------------------
+`gelu`                               |the GELU activation (tanh approximation), as in GPT-2                                            
+`softmax(axis = -1)`                 |turns scores into probabilities that sum to 1                                                    
+`softmax(scale: s, mask: m)`         |the softmax of `x · s + m`, as attention takes it, in one fused op                               
+`log_softmax(axis = -1)`             |the log of `softmax`, computed stably                                                            
+`layernorm(weight, bias, eps = 1e-5)`|normalises each row to mean 0 and variance 1, then scales and shifts                             
+`rmsnorm(weight, eps = 1e-5)`        |divides each row by its root mean square, then scales, as in Llama                               
+`silu`, `swiglu(up)`                 |SiLU, `x · sigmoid(x)`, and Llama's gate `silu(x) · up`, each one fused kernel                   
+`rotate_half`                        |swaps the last axis's halves and negates the first, `[x₁, x₂] → [-x₂, x₁]`, for rotary embeddings
+`cross_entropy(targets)`             |the mean loss of `[n, classes]` scores against `[n]` `I32` class indices                         
+`Tensor.causal_mask(rows, cols)`     |0 where a position may look, -∞ where it may not, for attention                                  
 
 ```crystal
 logits = Tensor.from([1, 2, 3].map(&.to_f32), [1, 3])
@@ -245,14 +248,19 @@ model.named_params.keys                  # => ["hidden.weight", "hidden.bias", "
 - **A `Parameter` is a slot** holding a tensor (`param.value`), with a name and a flag for weight decay. Tensors never change; training replaces the tensor in each slot.
 - **Weights are drawn from `Tensomite.rng`,** a generator seeded with 0, so the same program builds the same model on every run. Each built-in module also takes `rng:` and `device:` arguments, which a `Builder` (below) fills in.
 
-Built-in module                                    |Parameters                                            |`forward`                                                                                                                                                                                                                                                                                                   
----------------------------------------------------|------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-`Linear.new(inputs, outputs, bias: true)`          |`weight [inputs, outputs]` (decayed), `bias [outputs]`|`x.matmul(weight) + bias`                                                                                                                                                                                                                                                                                   
-`Embedding.new(count, width)`                      |`weight [count, width]` (decayed)                     |rows of the weight selected by `I32` ids of any shape                                                                                                                                                                                                                                                       
-`LayerNorm.new(width, eps: 1e-5)`                  |`weight`, `bias`                                      |`x.layernorm(weight, bias, eps)`                                                                                                                                                                                                                                                                            
-`Activation.gelu`, `Activation.tanh`               |none                                                  |the function                                                                                                                                                                                                                                                                                                
-`Sequential.new(layer, layer, ...)`                |its steps'                                            |each step in turn                                                                                                                                                                                                                                                                                           
-`CausalSelfAttention.new(width, heads, bias: true)`|`c_attn`, `c_proj` (both `Linear`)                    |`call(x, mask)`: GPT-2's multi-head attention over `[batch × length, width]` rows, under a `Tensor.causal_mask(length, length)`; `call(x, mask, cache)` also attends to the positions in a `CausalSelfAttention::Cache`, which with a `capacity` writes new positions in place rather than copying the cache
+Built-in module                                    |Parameters                                                       |`forward`                                                                                                                                                                                                                                                                                                   
+---------------------------------------------------|-----------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+`Linear.new(inputs, outputs, bias: true)`          |`weight [inputs, outputs]` (decayed), `bias [outputs]`           |`x.matmul(weight) + bias`                                                                                                                                                                                                                                                                                   
+`Embedding.new(count, width)`                      |`weight [count, width]` (decayed)                                |rows of the weight selected by `I32` ids of any shape                                                                                                                                                                                                                                                       
+`LayerNorm.new(width, eps: 1e-5)`                  |`weight`, `bias`                                                 |`x.layernorm(weight, bias, eps)`                                                                                                                                                                                                                                                                            
+`Activation.gelu`, `Activation.tanh`               |none                                                             |the function                                                                                                                                                                                                                                                                                                
+`Sequential.new(layer, layer, ...)`                |its steps'                                                       |each step in turn                                                                                                                                                                                                                                                                                           
+`CausalSelfAttention.new(width, heads, bias: true)`|`c_attn`, `c_proj` (both `Linear`)                               |`call(x, mask)`: GPT-2's multi-head attention over `[batch × length, width]` rows, under a `Tensor.causal_mask(length, length)`; `call(x, mask, cache)` also attends to the positions in a `CausalSelfAttention::Cache`, which with a `capacity` writes new positions in place rather than copying the cache
+`RMSNorm.new(width, eps: 1e-5)`                    |`weight`                                                         |`x.rmsnorm(weight, eps)`                                                                                                                                                                                                                                                                                    
+`SwiGLU.new(width, hidden)`                        |`gate_proj`, `up_proj`, `down_proj` (`Linear`s without biases)   |Llama's MLP, `down_proj(gate_proj(x).swiglu(up_proj(x)))`                                                                                                                                                                                                                                                   
+`GroupedQueryAttention.new(width, heads, kv_heads)`|`q_proj`, `k_proj`, `v_proj`, `o_proj` (`Linear`s without biases)|`call(x, mask, rope)`, or `call(x, mask, rope, cache)`: Llama's attention, in which each key and value head serves `heads / kv_heads` query heads, with queries and keys rotated by a `RotaryEmbedding`; its cache holds `kv_heads` heads                                                                   
+
+A `RotaryEmbedding.new(head_width, context, theta)` has no parameters: it holds the cosines and sines of every position, and `rope.call(x, start)` rotates `[..., length, head_width]` rows as positions `start` onwards.
 
 `Linear` draws its weight uniformly from ±1/√inputs, and `Embedding` from a normal distribution with standard deviation 0.02. Either takes `init:` to change that: `Init.uniform(bound)`, `Init.normal(std)` or `Init.constant(value)`.
 
@@ -263,7 +271,7 @@ mlp.named_params.keys   # => ["steps.0.weight", "steps.0.bias", "steps.2.weight"
 
 `Sequential` holds `Layer`s, modules whose `forward` takes one tensor and returns one. Every built-in module is a `Layer`. A model whose `forward` takes more, such as a transformer block that also takes a mask, inherits from `Module` instead.
 
-**Builders.** A `Builder` holds the settings a model's parts share: the random generator, the device, whether `Linear`s have biases, and how weights are drawn. Its methods `linear`, `embedding`, `layernorm`, `attention` (a `CausalSelfAttention`) and `parameter` take the same arguments as the modules, without those settings. `Sequential.build` makes a `Sequential` from a block in which `linear`, `layernorm`, `gelu` and `tanh` each add a step, and `add` adds any layer:
+**Builders.** A `Builder` holds the settings a model's parts share: the random generator, the device, whether `Linear`s have biases, and how weights are drawn. Its methods `linear`, `embedding`, `layernorm`, `attention` (a `CausalSelfAttention`), `rmsnorm`, `swiglu`, `grouped_attention` (a `GroupedQueryAttention`) and `parameter` take the same arguments as the modules, without those settings. `Sequential.build` makes a `Sequential` from a block in which `linear`, `layernorm`, `gelu` and `tanh` each add a step, and `add` adds any layer:
 
 ```crystal
 class Block < Tensomite::Module
@@ -407,6 +415,14 @@ puts bpe.decode(model.generate(bpe.encode("Once upon a time"), 10, sampler))
 ```
 
 To stream text a token at a time, decode each token's bytes with `bpe.decode_bytes(ids)`, which may end partway through a character, and print only whole characters; `bpe.id?("<|endoftext|>")` gives GPT-2's end-of-text token, 50256, after which the model has finished. `apps/server` does both, serving a model over HTTP.
+
+**Tokenisers in one file.** Newer models publish their tokeniser as a single `tokenizer.json`, which `BPE.from_json` reads. It holds special tokens as well, such as ChatML's `<|im_start|>`, and `encode` gives each one its own id wherever it appears in the text. For text from users, call `encode(text, special: false)`, so that typing `<|im_end|>` cannot end a message early. It reads byte-level BPE tokenisers, GPT-2's kind, with or without SmolLM2's rule that every digit is a token of its own. Anything else, such as a SentencePiece tokeniser or a normaliser, raises rather than encoding wrongly.
+
+```crystal
+bpe = BPE.from_json("models/smollm2-135m-instruct/tokenizer.json")
+bpe.encode("<|im_start|>user\nWhat is 12 + 345?")
+# => [1, 4093, 198, 1780, 314, 216, 33, 34, 1232, 216, 35, 36, 37, 47]: 1 is <|im_start|>; 33 to 37 are the digits 1 to 5
+```
 
 `generate` returns only the new tokens. Without a sampler it picks the likeliest token each time (greedy), so the output is always the same. With a `Sampler` it picks at random, in proportion to each token's probability, among the `top_k` likeliest tokens (all of them when `top_k` is 0, the default). A `temperature` above 1 makes unlikely tokens more likely to be picked, and below 1 less likely. The same seed gives the same text.
 
