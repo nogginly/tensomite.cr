@@ -408,6 +408,14 @@ puts bpe.decode(model.generate(bpe.encode("Once upon a time"), 10, sampler))
 
 To stream text a token at a time, decode each token's bytes with `bpe.decode_bytes(ids)`, which may end partway through a character, and print only whole characters; `bpe.id?("<|endoftext|>")` gives GPT-2's end-of-text token, 50256, after which the model has finished. `apps/server` does both, serving a model over HTTP.
 
+**Tokenisers in one file.** Newer models publish their tokeniser as a single `tokenizer.json`, which `BPE.from_json` reads. It holds special tokens as well, such as ChatML's `<|im_start|>`, and `encode` gives each one its own id wherever it appears in the text. For text from users, call `encode(text, special: false)`, so that typing `<|im_end|>` cannot end a message early. It reads byte-level BPE tokenisers, GPT-2's kind, with or without SmolLM2's rule that every digit is a token of its own. Anything else, such as a SentencePiece tokeniser or a normaliser, raises rather than encoding wrongly.
+
+```crystal
+bpe = BPE.from_json("models/smollm2-135m-instruct/tokenizer.json")
+bpe.encode("<|im_start|>user\nWhat is 12 + 345?")
+# => [1, 4093, 198, 1780, 314, 216, 33, 34, 1232, 216, 35, 36, 37, 47]: 1 is <|im_start|>; 33 to 37 are the digits 1 to 5
+```
+
 `generate` returns only the new tokens. Without a sampler it picks the likeliest token each time (greedy), so the output is always the same. With a `Sampler` it picks at random, in proportion to each token's probability, among the `top_k` likeliest tokens (all of them when `top_k` is 0, the default). A `temperature` above 1 makes unlikely tokens more likely to be picked, and below 1 less likely. The same seed gives the same text.
 
 `GPT2` is a `Module`, and its parts have the names used in Hugging Face's file: `wte` and `wpe` (the token and position embeddings), `h.0` to `h.11` (the blocks, each with `ln_1`, `attn`, `ln_2` and `mlp`), and `ln_f`. So `model.named_params["h.0.attn.c_attn.weight"]` is that weight, and diagrams of the model use the same names.
