@@ -6,12 +6,16 @@
     python scripts/make_fixtures.py smollm2 SMOLLM2_DIR # spec/fixtures/smollm2/
     python scripts/make_fixtures.py tiny_llama          # spec/fixtures/tiny_llama/
     python scripts/make_fixtures.py tiny_gguf           # spec/fixtures/tiny_llama/*.gguf
+    python scripts/make_fixtures.py quant               # spec/fixtures/quant/
 
 `tokenizer` needs only `tokenizers`: it trains a small byte-level BPE with
 SmolLM2's pre-tokeniser (digits split, then GPT-2's pattern) and ChatML's
 special tokens, saves it as tokenizer.json, and records the ids it gives.
 `smollm2` records the ids SMOLLM2_DIR's tokenizer.json gives, and the logits
 and greedy continuation of a ChatML prompt; the model is not committed.
+`quant` records what gguf-py's reference quantisers, which match ggml's
+bit for bit, make of fixed rows: random values, ties, constant and zero
+blocks, as hex bytes and dequantised values for Q8_0, Q4_0 and Q4_1.
 `tiny_gguf` writes `tiny_llama` and `tokenizer` as GGUF files, at F32 and F16,
 as llama.cpp's converter does, with each head's query and key rows reordered.
 `tiny_llama` builds a randomly initialised 2-layer Llama, with grouped queries
@@ -303,6 +307,46 @@ def tiny_gguf():
         writer.close()
 
 
+def quant():
+    import gguf
+    import numpy as np
+
+    out = FIXTURES / "quant"
+    out.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(0)
+    rows = [
+        rng.normal(0, 1, 64),
+        rng.uniform(0.1, 0.5, 32),
+        np.linspace(-1, 1, 32),
+        np.full(32, 0.25),
+        np.zeros(32),
+        np.array([(i - 16) / 2 for i in range(32)]),
+        rng.normal(0, 1e-3, 32),
+    ]
+    rows = [row.astype(np.float32) for row in rows]
+    expected = {"rows": [row.tolist() for row in rows]}
+    for kind in ("Q8_0", "Q4_0", "Q4_1"):
+        qtype = getattr(gguf.GGMLQuantizationType, kind)
+        blocks = [gguf.quants.quantize(row.reshape(1, -1), qtype) for row in rows]
+        expected[kind] = {
+            "bytes": [block.tobytes().hex() for block in blocks],
+            "values": [gguf.quants.dequantize(block, qtype).reshape(-1).tolist() for block in blocks],
+        }
+    table = rng.normal(0, 1, (3, 64)).astype(np.float32)
+    writer = gguf.GGUFWriter(str(out / "blocks.gguf"), "llama")
+    expected["table"] = table.tolist()
+    for kind in ("Q8_0", "Q4_0", "Q4_1"):
+        qtype = getattr(gguf.GGMLQuantizationType, kind)
+        blocks = gguf.quants.quantize(table, qtype)
+        writer.add_tensor(kind.lower(), blocks, raw_dtype=qtype)
+        expected[kind]["table"] = gguf.quants.dequantize(blocks, qtype).tolist()
+    writer.write_header_to_file()
+    writer.write_kv_data_to_file()
+    writer.write_tensors_to_file()
+    writer.close()
+    (out / "expected.json").write_text(json.dumps(expected))
+
+
 if __name__ == "__main__":
     if sys.argv[1:2] == ["tiny"]:
         tiny()
@@ -316,5 +360,7 @@ if __name__ == "__main__":
         tiny_llama()
     elif sys.argv[1:2] == ["tiny_gguf"]:
         tiny_gguf()
+    elif sys.argv[1:2] == ["quant"]:
+        quant()
     else:
         sys.exit(__doc__)

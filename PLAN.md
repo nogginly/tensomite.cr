@@ -144,6 +144,7 @@ Met (25 Oct 2026, the Linux container and the M5 Pro):
     - Block tensors follow the rules of Decision N: leaves only, sliced by whole rows, and consumed only by `MatMul` (as the weight) and `Gather` (as the table).
     - The CPU kernel quantises activations to Q8 per block, takes the Q4 × Q8 dot product in integers, then applies both scales once per block. This is the oracle version, naive and exact within each block.
     - Exit: quantised GPT-2 and M9's model stay within a perplexity budget of their F32 versions (Decision BW).
+    - Parts 1 and 2 of Decision CL: GGUF files load, F32 to the bit and SmolLM2's F16 to PyTorch's greedy answer; Q8_0, Q4_0 and Q4_1 quantise to ggml's reference bytes and dequantise to its values, both on fixed rows and on SmolLM2's published Q4_0 file. Next: the CPU kernels.
 11. **Fast quantised CPU kernels (Decision M).** Add a CPU device whose kernels are built for speed, tested against the oracle.
     - Contiguous fast paths loop directly over `Slice`s, so LLVM can vectorise them.
     - Float reductions use a fixed number of accumulators combined in a fixed order, so they vectorise and stay shape-invariant.

@@ -184,6 +184,9 @@ module Tensomite
         key = gguf_name(name)
         raise Error.new("#{file.path} lacks #{key}") unless file.has_key?(key)
         used << key
+        if (kind = file.entries[key].kind).quantised?
+          raise DTypeError.new("#{key}: Llama cannot run #{kind} weights yet")
+        end
         value = file[key, device]
         if TRANSPOSED.matches?(name)
           heads = name.ends_with?("q_proj.weight") ? config.heads : name.ends_with?("k_proj.weight") ? config.kv_heads : nil

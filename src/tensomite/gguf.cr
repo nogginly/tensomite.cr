@@ -6,9 +6,9 @@ module Tensomite
   # configuration and its tokeniser in one file.
   #
   # The file is memory-mapped once. Its metadata is read whole, each value as
-  # `JSON::Any`. Tensors are read when asked for: `F32` tensors on a
-  # `HostDevice` as realised leaves over the mapping, and `F16` and `BF16`
-  # tensors widened to `F32` copies.
+  # `JSON::Any`. Tensors are read when asked for: `F32` tensors and block
+  # formats (`Q8_0`, `Q4_0`, `Q4_1`) on a `HostDevice` as realised leaves over
+  # the mapping, and `F16` and `BF16` tensors widened to `F32` copies.
   #
   # ```
   # file = GGUF.open("model.gguf")
@@ -49,6 +49,16 @@ module Tensomite
 
       def quantised? : Bool
         q4_0? || q4_1? || q8_0?
+      end
+
+      # Returns the `DType` a tensor of this kind is read as.
+      def dtype : DType
+        case self
+        in Q8_0           then DType::Q8_0
+        in Q4_0           then DType::Q4_0
+        in Q4_1           then DType::Q4_1
+        in F32, F16, BF16 then DType::F32
+        end
       end
     end
 
@@ -94,11 +104,16 @@ module Tensomite
       entries.has_key?(name)
     end
 
-    # Returns tensor *name* as a realised `F32` leaf on *device*; raises
-    # `KeyError` if absent and `DTypeError` for a quantised tensor.
+    # Returns tensor *name* as a realised leaf on *device*, of `F32` or its
+    # block format; raises `KeyError` if absent.
     def [](name : String, device : Device = CPU.default) : Tensor
       entry = entries[name]
-      raise DTypeError.new("#{name}: #{entry.kind} tensors cannot be read as F32") if entry.kind.quantised?
+      if entry.kind.quantised?
+        raise Error.new("#{name}: #{entry.bytesize} bytes is over the 2 GiB limit for one tensor") if entry.bytesize > Int32::MAX
+        bytes = @mapping.bytes(entry.offset, entry.bytesize.to_i32)
+        buffer = device.is_a?(HostDevice) ? device.adopt(bytes, @mapping) : device.alloc(bytes.size).tap { |buf| device.upload(buf, bytes) }
+        return Tensor.new(Node.new(buffer, entry.shape, entry.kind.dtype, device), View.contiguous(entry.shape))
+      end
       count = entry.shape.product(1_i64)
       raise Error.new("#{name}: #{count * 4} bytes is over the 2 GiB limit for one tensor") if count * 4 > Int32::MAX
       bytes = @mapping.bytes(entry.offset, entry.bytesize.to_i32)
