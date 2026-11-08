@@ -678,12 +678,13 @@ __device__ float row_max(const float* a, const View& v, unsigned int base, unsig
         total = shared;                                                        \
     }
 
-// Visits every element of the chunks this thread owns.
-#define OWN_ELEMENTS(body)                                                     \
-    for (unsigned int c = t; c < (n + REDUCE_CHUNK - 1) / REDUCE_CHUNK; c += threads) { \
-        unsigned int stop = min(n, (c + 1) * REDUCE_CHUNK);                    \
-        for (unsigned int s = c * REDUCE_CHUNK; s < stop; s++) { body }        \
-    }
+// Visits every element of the row, thread t taking elements t, t + threads and
+// so on, so that a warp reads and writes neighbouring elements together. Each
+// element's result depends only on its own inputs and the row's totals, so the
+// order changes no bits. It follows a ROW_SUM, whose last barrier makes every
+// thread's writes to the row visible to the others.
+#define OWN_ELEMENTS(body) \
+    for (unsigned int s = t; s < n; s += threads) { body }
 
 extern "C" __global__ void softmax_f32(const float* a, float* dst, View v, unsigned int n) {
     __shared__ float partial[REDUCE_THREADS];
