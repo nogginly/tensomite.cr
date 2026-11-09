@@ -28,6 +28,6 @@ out.write_text(prelude + "\n" + report + "\n" + source[start:end])
 PY
 
 crystal run "$here/blocks_data.cr" -- "$work/data.bin"
-g++ -std=c++20 -O1 -ffp-contract=off -fno-fast-math -Wno-attributes \
+g++ -std=c++20 -O1 -ffp-contract=off -fno-fast-math -pthread -Wno-attributes \
   -I"$here" -I"$work" "$here/blocks.cpp" -o "$work/blocks"
 "$work/blocks" "$work/data.bin"

@@ -96,12 +96,14 @@ module Tensomite
     private REDUCE_THREADS = 256
     private REDUCE_CHUNK   =  16
     private BLOCK          = 256
-    private COLS           =  32
-    private SLICES         =   8
-    private TILE_PATCH     =   4
-    private DECODE_COLS    = 128
-    private DECODE_ROWS    =  16
-    private CHUNK          =  64
+    # Warps in each block of a quantised matmul, one per output.
+    private BLOCK_WARPS =   4
+    private COLS        =  32
+    private SLICES      =   8
+    private TILE_PATCH  =   4
+    private DECODE_COLS = 128
+    private DECODE_ROWS =  16
+    private CHUNK       =  64
 
     # How `MatMul` divides its work; the kernels are Metal's (see `Metal::MatMulMode`).
     enum MatMulMode
@@ -656,7 +658,8 @@ module Tensomite
     # Queues the kernels of an op that reads a block-format tensor and returns
     # true, or returns false for one with none: `BlockMatMul`, as a pass that
     # quantises each block of the activations into scratch memory and then one
-    # thread per output; and `Gather`, one thread per output element.
+    # warp per output, `BLOCK_WARPS` to a block; and `Gather`, one thread per
+    # output element.
     private def launch_blocks(kernels : Kernels, node : Node, output : CUDABuffer) : Bool
       return false unless node.dtype.f32? && node.srcs.all? { |src| src.ndim <= MAX_DIMS }
       case node.op
@@ -670,8 +673,9 @@ module Tensomite
         sums, qs = scales + blocks * 4, scales + blocks * 8
         run(kernels["quantize_rows_q8_f32"], blocks, pointer(x), scales, sums, qs, view_args(x.view), blocks.to_u32)
         kind, bytes, offset = block_args(w)
-        run(kernels["block_matmul_f32"], node.size, pointer(w), scales, sums, qs, output.pointer, bias_pointer(node),
-          kind, bytes, offset, n.to_u32, k.to_u32, node.size.to_u32)
+        groups = (node.size + BLOCK_WARPS - 1) // BLOCK_WARPS
+        context.launch(kernels["block_matmul_f32"], groups, 32 * BLOCK_WARPS, pointer(w), scales, sums, qs, output.pointer,
+          bias_pointer(node), kind, bytes, offset, n.to_u32, k.to_u32, node.size.to_u32) if node.size > 0
       when Op::Gather
         table, ids = node.srcs
         rows, width = table.shape

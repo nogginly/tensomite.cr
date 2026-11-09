@@ -1,10 +1,12 @@
 // Runs the Metal block-format kernels (quantize_rows_q8_f32, block_matmul_f32
-// and gather_blocks_f32) on the CPU, one thread at a time, and checks their
-// results against the host's, bit for bit. Reads the file blocks_data.cr writes.
+// and gather_blocks_f32) on the CPU, and checks their results against the
+// host's, bit for bit: block_matmul_f32 as threadgroups of SIMD groups, the
+// others one thread at a time. Reads the file blocks_data.cr writes.
 #include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <thread>
 #include <vector>
 #include "shim.h"
 typedef unsigned char uchar;
@@ -22,7 +24,39 @@ template <typename T, typename U> T as_type(U value) {
     std::memcpy(&result, &value, sizeof(T));
     return result;
 }
+// A SIMD group's sum: each thread of the threadgroup posts its value, all
+// meet, each adds the values of its group of 32, and all meet again before the
+// slots are reused. Every thread of the threadgroup must call it the same
+// number of times, as block_matmul_f32 ensures.
+static thread_local unsigned int current_thread;
+static int simd_slots[1024];
+static int simd_sum(int value) {
+    simd_slots[current_thread] = value;
+    current_barrier->arrive_and_wait();
+    int total = 0;
+    unsigned int first = current_thread / 32 * 32;
+    for (unsigned int lane = 0; lane < 32; lane++) total += simd_slots[first + lane];
+    current_barrier->arrive_and_wait();
+    return total;
+}
 #include "blocks.inc"
+
+// Runs block_matmul_f32 over `groups` threadgroups of `simds` SIMD groups, each
+// threadgroup's threads as OS threads meeting at a barrier.
+template <class... A>
+static void run_simd_groups(unsigned int groups, unsigned int simds, A... args) {
+    for (unsigned int group = 0; group < groups; group++) {
+        std::barrier<> barrier(simds * 32);
+        current_barrier = &barrier;
+        std::vector<std::thread> threads;
+        for (unsigned int t = 0; t < simds * 32; t++)
+            threads.emplace_back([=]() mutable {
+                current_thread = t;
+                block_matmul_f32(args..., group, t / 32, simds, t % 32);
+            });
+        for (auto& thread : threads) thread.join();
+    }
+}
 
 static FILE* in;
 static uint read_u32() { uint v; if (fread(&v, 4, 1, in) != 1) throw 1; return v; }
@@ -70,8 +104,7 @@ int main(int argc, char** argv) {
         uint3 dims{n, k, 1};
         uint count = rows * n;
         std::vector<float> got(count);
-        for (uint i = 0; i < count; i++)
-            block_matmul_f32(w.data(), scales.data(), sums.data(), qs.data(), got.data(), bias.data(), b, dims, count, i);
+        run_simd_groups((count + 3) / 4, 4, w.data(), scales.data(), sums.data(), qs.data(), got.data(), bias.data(), b, dims, count);
         char label[64];
         snprintf(label, sizeof label, "block_matmul %s", names[f]);
         failures += compare(label, got, want);

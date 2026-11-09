@@ -747,10 +747,22 @@ kernel void quantize_rows_q8_f32(device const float* x [[buffer(0)]],
     sums[i] = float(half(float(total) * d));
 }
 
-// x · wᵀ for a block-format weight: one thread per output, summing its blocks
-// in order, each an integer dot product of the weight's values with the
-// quantised activations', times both scales (plus m · d·Σq for Q4_1). dims is
-// (n, k, biased).
+// Returns lane `lane`'s element of a block of `kind` at p: its quantised
+// value as the integer the dot product multiplies, -8 to 7 for Q4_0.
+static int block_lane(device const uchar* p, uint kind, uint lane) {
+    if (kind == 0) return int(as_type<char>(p[2 + lane]));
+    uint packed = p[(kind == 1 ? 2 : 4) + lane % 16];
+    int q = int(lane < 16 ? (packed & 0x0f) : (packed >> 4));
+    return kind == 1 ? q - 8 : q;
+}
+
+// x · wᵀ for a block-format weight: one SIMD group per output, `groups`
+// groups a threadgroup. For each block of the weight row, lane j multiplies
+// element j by the quantised activation, and the group adds the 32 products,
+// exactly, as integers; then every lane adds the block's integer dot product
+// times both scales (plus m · d·Σq for Q4_1) to its sum, in block order, as
+// the host does. A group past the last output computes the last one and
+// writes nothing. dims is (n, k, biased).
 kernel void block_matmul_f32(device const uchar* w [[buffer(0)]],
                              device const float* scales [[buffer(1)]],
                              device const float* sums [[buffer(2)]],
@@ -760,8 +772,12 @@ kernel void block_matmul_f32(device const uchar* w [[buffer(0)]],
                              constant Blocks& b [[buffer(6)]],
                              constant uint3& dims [[buffer(7)]],
                              constant uint& count [[buffer(8)]],
-                             uint i [[thread_position_in_grid]]) {
-    if (i >= count) return;
+                             uint group [[threadgroup_position_in_grid]],
+                             uint simd [[simdgroup_index_in_threadgroup]],
+                             uint groups [[simdgroups_per_threadgroup]],
+                             uint lane [[thread_index_in_simdgroup]]) {
+    uint output = group * groups + simd;
+    uint i = output < count ? output : count - 1;
     uint n = dims.x, k = dims.y, blocks = k / 32;
     uint row = i / n, col = i % n;
     device const uchar* weights = w + b.offset + col * blocks * b.bytes;
@@ -771,30 +787,12 @@ kernel void block_matmul_f32(device const uchar* w [[buffer(0)]],
     float sum = 0.0f;
     for (uint block = 0; block < blocks; block++) {
         device const uchar* p = weights + block * b.bytes;
-        device const char* qb = q + block * 32;
-        if (b.kind == 0) {
-            int total = 0;
-            for (uint j = 0; j < 32; j++) total += int(as_type<char>(p[2 + j])) * int(qb[j]);
-            sum += float(total) * (block_half(p) * sx[block]);
-        } else if (b.kind == 1) {
-            int low = 0, high = 0;
-            for (uint j = 0; j < 16; j++) {
-                uint packed = p[2 + j];
-                low += (int(packed & 0x0f) - 8) * int(qb[j]);
-                high += (int(packed >> 4) - 8) * int(qb[j + 16]);
-            }
-            sum += float(low + high) * block_half(p) * sx[block];
-        } else {
-            int low = 0, high = 0;
-            for (uint j = 0; j < 16; j++) {
-                uint packed = p[4 + j];
-                low += int(packed & 0x0f) * int(qb[j]);
-                high += int(packed >> 4) * int(qb[j + 16]);
-            }
-            sum += (block_half(p) * sx[block]) * float(low + high) + block_half(p + 2) * mx[block];
-        }
+        int total = simd_sum(block_lane(p, b.kind, lane) * int(q[block * 32 + lane]));
+        if (b.kind == 0) sum += float(total) * (block_half(p) * sx[block]);
+        else if (b.kind == 1) sum += float(total) * block_half(p) * sx[block];
+        else sum += (block_half(p) * sx[block]) * float(total) + block_half(p + 2) * mx[block];
     }
-    dst[i] = with_bias(sum, bias, col, dims.z);
+    if (output < count && lane == 0) dst[output] = with_bias(sum, bias, col, dims.z);
 }
 
 #if __METAL_VERSION__ >= 300

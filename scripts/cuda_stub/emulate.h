@@ -32,6 +32,20 @@ static std::barrier<>* block_barrier = nullptr;
 
 static int atomicAdd(int* address, int value) { return __atomic_fetch_add(address, value, __ATOMIC_RELAXED); }
 
+// A warp shuffle: each thread of the block posts its value, all meet, each
+// reads the value of the thread whose lane differs by `mask`, and all meet
+// again before the slots are reused. Every thread of the block must call it
+// the same number of times, as the kernels that use it ensure.
+static int shuffle_slots[1024];
+static int __shfl_xor_sync(unsigned int, int value, int mask) {
+    unsigned int t = threadIdx.y * blockDim.x + threadIdx.x;
+    shuffle_slots[t] = value;
+    block_barrier->arrive_and_wait();
+    int other = shuffle_slots[t ^ unsigned(mask)];
+    block_barrier->arrive_and_wait();
+    return other;
+}
+
 struct Kernel {
     void (*call)(void**);
     bool sync;

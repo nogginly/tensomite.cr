@@ -963,15 +963,36 @@ extern "C" __global__ void quantize_rows_q8_f32(const float* x, float* scales, f
     sums[i] = round_to_half(float(total) * d);
 }
 
-// x · wᵀ for a block-format weight: one thread per output, summing its blocks
-// in order, each an integer dot product of the weight's values with the
-// quantised activations', times both scales (plus m · d·Σq for Q4_1).
+// Returns lane `lane`'s element of a block of `kind` at p: its quantised
+// value as the integer the dot product multiplies, -8 to 7 for Q4_0.
+__device__ int block_lane(const unsigned char* p, unsigned int kind, unsigned int lane) {
+    if (kind == 0) return int((signed char)p[2 + lane]);
+    unsigned int packed = p[(kind == 1 ? 2 : 4) + lane % 16];
+    int q = int(lane < 16 ? (packed & 0x0fu) : (packed >> 4));
+    return kind == 1 ? q - 8 : q;
+}
+
+// Returns the sum of `value` over the 32 lanes of a warp, in every lane. The
+// sum of integers is exact in any order.
+__device__ int warp_sum(int value) {
+    for (int mask = 16; mask > 0; mask /= 2) value += __shfl_xor_sync(0xffffffffu, value, mask);
+    return value;
+}
+
+// x · wᵀ for a block-format weight: one warp per output, `WARPS` warps a
+// block. For each block of the weight row, lane j multiplies element j by the
+// quantised activation, and the warp adds the 32 products; then every lane
+// adds the block's integer dot product times both scales (plus m · d·Σq for
+// Q4_1) to its sum, in block order, as the host does, so the result has the
+// host's bits. A warp past the last output computes the last one and writes
+// nothing, so that every lane of a block takes part in every sum.
 extern "C" __global__ void block_matmul_f32(const unsigned char* w, const float* scales, const float* sums,
                                             const signed char* qs, float* dst, const float* bias,
                                             unsigned int kind, unsigned int bytes, unsigned int offset,
                                             unsigned int n, unsigned int k, unsigned int count) {
-    unsigned int i = thread_index();
-    if (i >= count) return;
+    unsigned int lane = threadIdx.x % 32;
+    unsigned int output = blockIdx.x * (blockDim.x / 32) + threadIdx.x / 32;
+    unsigned int i = output < count ? output : count - 1;
     unsigned int blocks = k / 32, row = i / n, col = i % n;
     const unsigned char* weights = w + offset + col * blocks * bytes;
     const signed char* q = qs + row * k;
@@ -980,28 +1001,10 @@ extern "C" __global__ void block_matmul_f32(const unsigned char* w, const float*
     float sum = 0.0f;
     for (unsigned int block = 0; block < blocks; block++) {
         const unsigned char* p = weights + block * bytes;
-        const signed char* qb = q + block * 32;
-        if (kind == 0) {
-            int total = 0;
-            for (unsigned int j = 0; j < 32; j++) total += int((signed char)p[2 + j]) * int(qb[j]);
-            sum += float(total) * (block_half(p) * sx[block]);
-        } else if (kind == 1) {
-            int low = 0, high = 0;
-            for (unsigned int j = 0; j < 16; j++) {
-                unsigned int packed = p[2 + j];
-                low += (int(packed & 0x0fu) - 8) * int(qb[j]);
-                high += (int(packed >> 4) - 8) * int(qb[j + 16]);
-            }
-            sum += float(low + high) * block_half(p) * sx[block];
-        } else {
-            int low = 0, high = 0;
-            for (unsigned int j = 0; j < 16; j++) {
-                unsigned int packed = p[4 + j];
-                low += int(packed & 0x0fu) * int(qb[j]);
-                high += int(packed >> 4) * int(qb[j + 16]);
-            }
-            sum += (block_half(p) * sx[block]) * float(low + high) + block_half(p + 2) * mx[block];
-        }
+        int total = warp_sum(block_lane(p, kind, lane) * int(q[block * 32 + lane]));
+        if (kind == 0) sum += float(total) * (block_half(p) * sx[block]);
+        else if (kind == 1) sum += float(total) * block_half(p) * sx[block];
+        else sum += (block_half(p) * sx[block]) * float(total) + block_half(p + 2) * mx[block];
     }
-    dst[i] = with_bias(sum, bias, col);
+    if (output < count && lane == 0) dst[output] = with_bias(sum, bias, col);
 }
