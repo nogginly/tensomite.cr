@@ -23,9 +23,10 @@ module Tensomite
     # are added in block order.
     Lanes
 
-    # Returns the number of outputs below which `Auto` uses lanes.
+    # Returns the number of outputs below which `Auto` uses lanes. On the GB10,
+    # lanes decode SmolLM2's 49,152-word head faster than threads too.
     def self.lanes_below : Int32
-      8192
+      65_536
     end
 
     # Returns the mode `TENSOMITE_BLOCK_MATMUL` names (`auto`, `thread` or
