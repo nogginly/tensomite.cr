@@ -747,10 +747,31 @@ kernel void quantize_rows_q8_f32(device const float* x [[buffer(0)]],
     sums[i] = float(half(float(total) * d));
 }
 
-// x · wᵀ for a block-format weight: one thread per output, summing its blocks
-// in order, each an integer dot product of the weight's values with the
-// quantised activations', times both scales (plus m · d·Σq for Q4_1). dims is
-// (n, k, biased).
+// Returns the contribution of one block of a weight row, at p, to an output:
+// its integer dot product with the block's quantised activations, qb, times
+// both scales, plus m · d·Σq for Q4_1, with the host's expressions, so that
+// adding the contributions in block order gives the host's bits.
+static float block_contribution(device const uchar* p, device const char* qb, float sx, float mx, uint kind) {
+    if (kind == 0) {
+        int total = 0;
+        for (uint j = 0; j < 32; j++) total += int(as_type<char>(p[2 + j])) * int(qb[j]);
+        return float(total) * (block_half(p) * sx);
+    }
+    int low = 0, high = 0;
+    uint base = kind == 1 ? 2 : 4;
+    int offset = kind == 1 ? 8 : 0;
+    for (uint j = 0; j < 16; j++) {
+        uint packed = p[base + j];
+        low += (int(packed & 0x0f) - offset) * int(qb[j]);
+        high += (int(packed >> 4) - offset) * int(qb[j + 16]);
+    }
+    if (kind == 1) return float(low + high) * block_half(p) * sx;
+    return (block_half(p) * sx) * float(low + high) + block_half(p + 2) * mx;
+}
+
+// x · wᵀ for a block-format weight: one thread per output, adding its blocks'
+// contributions in order. For products with outputs enough to fill the GPU.
+// dims is (n, k, biased).
 kernel void block_matmul_f32(device const uchar* w [[buffer(0)]],
                              device const float* scales [[buffer(1)]],
                              device const float* sums [[buffer(2)]],
@@ -765,36 +786,51 @@ kernel void block_matmul_f32(device const uchar* w [[buffer(0)]],
     uint n = dims.x, k = dims.y, blocks = k / 32;
     uint row = i / n, col = i % n;
     device const uchar* weights = w + b.offset + col * blocks * b.bytes;
-    device const char* q = qs + row * k;
-    device const float* sx = scales + row * blocks;
-    device const float* mx = sums + row * blocks;
     float sum = 0.0f;
-    for (uint block = 0; block < blocks; block++) {
-        device const uchar* p = weights + block * b.bytes;
-        device const char* qb = q + block * 32;
-        if (b.kind == 0) {
-            int total = 0;
-            for (uint j = 0; j < 32; j++) total += int(as_type<char>(p[2 + j])) * int(qb[j]);
-            sum += float(total) * (block_half(p) * sx[block]);
-        } else if (b.kind == 1) {
-            int low = 0, high = 0;
-            for (uint j = 0; j < 16; j++) {
-                uint packed = p[2 + j];
-                low += (int(packed & 0x0f) - 8) * int(qb[j]);
-                high += (int(packed >> 4) - 8) * int(qb[j + 16]);
-            }
-            sum += float(low + high) * block_half(p) * sx[block];
-        } else {
-            int low = 0, high = 0;
-            for (uint j = 0; j < 16; j++) {
-                uint packed = p[4 + j];
-                low += int(packed & 0x0f) * int(qb[j]);
-                high += int(packed >> 4) * int(qb[j + 16]);
-            }
-            sum += (block_half(p) * sx[block]) * float(low + high) + block_half(p + 2) * mx[block];
+    for (uint block = 0; block < blocks; block++)
+        sum += block_contribution(weights + block * b.bytes, qs + row * k + block * 32, scales[row * blocks + block],
+                                  sums[row * blocks + block], b.kind);
+    dst[i] = with_bias(sum, bias, col, dims.z);
+}
+
+// x · wᵀ for a block-format weight with few outputs: one SIMD group per
+// output, `groups` a threadgroup. Lane l computes the contributions of blocks
+// l, l + 32 and so on, each whole; then, 32 blocks at a time, every lane reads
+// the contributions from their lanes in block order and adds them, as the
+// host does. A group past the last output computes the last one and writes
+// nothing.
+kernel void block_matmul_lanes_f32(device const uchar* w [[buffer(0)]],
+                                   device const float* scales [[buffer(1)]],
+                                   device const float* sums [[buffer(2)]],
+                                   device const char* qs [[buffer(3)]],
+                                   device float* dst [[buffer(4)]],
+                                   device const float* bias [[buffer(5)]],
+                                   constant Blocks& b [[buffer(6)]],
+                                   constant uint3& dims [[buffer(7)]],
+                                   constant uint& count [[buffer(8)]],
+                                   uint group [[threadgroup_position_in_grid]],
+                                   uint simd [[simdgroup_index_in_threadgroup]],
+                                   uint groups [[simdgroups_per_threadgroup]],
+                                   uint lane [[thread_index_in_simdgroup]]) {
+    uint output = group * groups + simd;
+    uint i = output < count ? output : count - 1;
+    uint n = dims.x, k = dims.y, blocks = k / 32;
+    uint row = i / n, col = i % n;
+    device const uchar* weights = w + b.offset + col * blocks * b.bytes;
+    float sum = 0.0f;
+    for (uint start = 0; start < blocks; start += 32) {
+        uint block = start + lane;
+        float mine = 0.0f;
+        if (block < blocks)
+            mine = block_contribution(weights + block * b.bytes, qs + row * k + block * 32, scales[row * blocks + block],
+                                      sums[row * blocks + block], b.kind);
+        uint run = min(blocks - start, 32u);
+        for (uint j = 0; j < 32; j++) {
+            float value = simd_shuffle(mine, ushort(j));
+            if (j < run) sum += value;
         }
     }
-    dst[i] = with_bias(sum, bias, col, dims.z);
+    if (output < count && lane == 0) dst[output] = with_bias(sum, bias, col, dims.z);
 }
 
 #if __METAL_VERSION__ >= 300

@@ -963,9 +963,30 @@ extern "C" __global__ void quantize_rows_q8_f32(const float* x, float* scales, f
     sums[i] = round_to_half(float(total) * d);
 }
 
-// x · wᵀ for a block-format weight: one thread per output, summing its blocks
-// in order, each an integer dot product of the weight's values with the
-// quantised activations', times both scales (plus m · d·Σq for Q4_1).
+// Returns the contribution of one block of a weight row, at p, to an output:
+// its integer dot product with the block's quantised activations, qb, times
+// both scales, plus m · d·Σq for Q4_1, with the host's expressions, so that
+// adding the contributions in block order gives the host's bits.
+__device__ float block_contribution(const unsigned char* p, const signed char* qb, float sx, float mx, unsigned int kind) {
+    if (kind == 0) {
+        int total = 0;
+        for (unsigned int j = 0; j < 32; j++) total += int((signed char)p[2 + j]) * int(qb[j]);
+        return float(total) * (block_half(p) * sx);
+    }
+    int low = 0, high = 0;
+    unsigned int base = kind == 1 ? 2 : 4;
+    int bias = kind == 1 ? 8 : 0;
+    for (unsigned int j = 0; j < 16; j++) {
+        unsigned int packed = p[base + j];
+        low += (int(packed & 0x0fu) - bias) * int(qb[j]);
+        high += (int(packed >> 4) - bias) * int(qb[j + 16]);
+    }
+    if (kind == 1) return float(low + high) * block_half(p) * sx;
+    return (block_half(p) * sx) * float(low + high) + block_half(p + 2) * mx;
+}
+
+// x · wᵀ for a block-format weight: one thread per output, adding its blocks'
+// contributions in order. For products with outputs enough to fill the GPU.
 extern "C" __global__ void block_matmul_f32(const unsigned char* w, const float* scales, const float* sums,
                                             const signed char* qs, float* dst, const float* bias,
                                             unsigned int kind, unsigned int bytes, unsigned int offset,
@@ -974,34 +995,41 @@ extern "C" __global__ void block_matmul_f32(const unsigned char* w, const float*
     if (i >= count) return;
     unsigned int blocks = k / 32, row = i / n, col = i % n;
     const unsigned char* weights = w + offset + col * blocks * bytes;
-    const signed char* q = qs + row * k;
-    const float* sx = scales + row * blocks;
-    const float* mx = sums + row * blocks;
     float sum = 0.0f;
-    for (unsigned int block = 0; block < blocks; block++) {
-        const unsigned char* p = weights + block * bytes;
-        const signed char* qb = q + block * 32;
-        if (kind == 0) {
-            int total = 0;
-            for (unsigned int j = 0; j < 32; j++) total += int((signed char)p[2 + j]) * int(qb[j]);
-            sum += float(total) * (block_half(p) * sx[block]);
-        } else if (kind == 1) {
-            int low = 0, high = 0;
-            for (unsigned int j = 0; j < 16; j++) {
-                unsigned int packed = p[2 + j];
-                low += (int(packed & 0x0fu) - 8) * int(qb[j]);
-                high += (int(packed >> 4) - 8) * int(qb[j + 16]);
-            }
-            sum += float(low + high) * block_half(p) * sx[block];
-        } else {
-            int low = 0, high = 0;
-            for (unsigned int j = 0; j < 16; j++) {
-                unsigned int packed = p[4 + j];
-                low += int(packed & 0x0fu) * int(qb[j]);
-                high += int(packed >> 4) * int(qb[j + 16]);
-            }
-            sum += (block_half(p) * sx[block]) * float(low + high) + block_half(p + 2) * mx[block];
+    for (unsigned int block = 0; block < blocks; block++)
+        sum += block_contribution(weights + block * bytes, qs + row * k + block * 32, scales[row * blocks + block],
+                                  sums[row * blocks + block], kind);
+    dst[i] = with_bias(sum, bias, col);
+}
+
+// x · wᵀ for a block-format weight with few outputs: one warp per output,
+// `blockDim.x / 32` a block. Lane l computes the contributions of blocks l,
+// l + 32 and so on, each whole; then, 32 blocks at a time, every lane reads
+// the contributions from their lanes in block order and adds them, as the
+// host does, so the result has the host's bits. A warp past the last output
+// computes the last one and writes nothing, so that every lane of a block
+// takes part in every shuffle.
+extern "C" __global__ void block_matmul_lanes_f32(const unsigned char* w, const float* scales, const float* sums,
+                                                  const signed char* qs, float* dst, const float* bias,
+                                                  unsigned int kind, unsigned int bytes, unsigned int offset,
+                                                  unsigned int n, unsigned int k, unsigned int count) {
+    unsigned int lane = threadIdx.x % 32;
+    unsigned int output = blockIdx.x * (blockDim.x / 32) + threadIdx.x / 32;
+    unsigned int i = output < count ? output : count - 1;
+    unsigned int blocks = k / 32, row = i / n, col = i % n;
+    const unsigned char* weights = w + offset + col * blocks * bytes;
+    float sum = 0.0f;
+    for (unsigned int start = 0; start < blocks; start += 32) {
+        unsigned int block = start + lane;
+        float mine = 0.0f;
+        if (block < blocks)
+            mine = block_contribution(weights + block * bytes, qs + row * k + block * 32, scales[row * blocks + block],
+                                      sums[row * blocks + block], kind);
+        unsigned int run = blocks - start < 32 ? blocks - start : 32;
+        for (unsigned int j = 0; j < 32; j++) {
+            float value = __shfl_sync(0xffffffffu, mine, j);
+            if (j < run) sum += value;
         }
     }
-    dst[i] = with_bias(sum, bias, col);
+    if (output < count && lane == 0) dst[output] = with_bias(sum, bias, col);
 }

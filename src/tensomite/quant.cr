@@ -10,6 +10,38 @@ module Tensomite
   #   nibble and element `j + 16` in its high one; `x = (q - 8) · d`.
   # - `Q4_1`: `d` and a minimum `m` (both `F16`), then nibbles as in `Q4_0`;
   #   `x = q · d + m`.
+  # How a GPU divides the work of a quantised matmul (`Tensor#linear` with a
+  # block-format weight). Every mode gives the host's bits; they differ only in
+  # speed.
+  enum BlockMatMulMode
+    # Lanes when the product has fewer than `.lanes_below` outputs, which leave
+    # one thread per output too few to fill the GPU, and threads otherwise.
+    Auto
+    # One thread per output, adding its blocks in order.
+    Thread
+    # 32 lanes per output: each lane takes whole blocks, and the lanes' sums
+    # are added in block order.
+    Lanes
+
+    # Returns the number of outputs below which `Auto` uses lanes. On the GB10,
+    # lanes decode SmolLM2's 49,152-word head faster than threads too.
+    def self.lanes_below : Int32
+      65_536
+    end
+
+    # Returns the mode `TENSOMITE_BLOCK_MATMUL` names (`auto`, `thread` or
+    # `lanes`), or `Auto` without it, so that the modes can be timed against
+    # each other without rebuilding.
+    def self.from_env : BlockMatMulMode
+      ENV["TENSOMITE_BLOCK_MATMUL"]?.try { |name| parse?(name) } || Auto
+    end
+
+    # Returns true when a product of *outputs* outputs runs on lanes.
+    def lanes?(outputs : Int32) : Bool
+      lanes? || (auto? && outputs < BlockMatMulMode.lanes_below)
+    end
+  end
+
   module Quant
     extend self
 

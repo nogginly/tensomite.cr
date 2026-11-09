@@ -51,6 +51,31 @@ private def bit_exact?(device : Device) : Bool
   DEVICES.includes?(device)
 end
 
+# Runs the block with *device*'s quantised matmuls in *mode*, where it has modes.
+private def with_block_mode(device : Device, mode : BlockMatMulMode, &) : Nil
+  {% if flag?(:darwin) && flag?(:aarch64) %}
+    if device.is_a?(Metal)
+      saved, device.block_mode = device.block_mode, mode
+      begin
+        return yield
+      ensure
+        device.block_mode = saved
+      end
+    end
+  {% end %}
+  {% if flag?(:cuda) %}
+    if device.is_a?(CUDA)
+      saved, device.block_mode = device.block_mode, mode
+      begin
+        return yield
+      ensure
+        device.block_mode = saved
+      end
+    end
+  {% end %}
+  yield
+end
+
 describe "Tensor#linear with block-format weights" do
   rows, n, k = 5, 7, 96
   x = random_values(rows * k, 1)
@@ -98,6 +123,27 @@ describe "Tensor#linear with block-format weights" do
         before = host_ops(gpu)
         Tensor.realize([input.linear(q, Tensor.from(bias, [n], gpu)), q.gather(ids)])
         host_ops(gpu).should eq before
+      end
+    end
+  end
+
+  GPUS.each do |gpu|
+    BlockMatMulMode.values.each do |mode|
+      it "gives the host's sums on #{gpu.class} in #{mode} mode, over more blocks than lanes" do
+        long = 1280
+        xs, ws = random_values(3 * long, 4), random_values(37 * long, 5)
+        BLOCK_FORMATS.each do |dtype|
+          expected = Tensor.from(xs, [3, long]).linear(Tensor.from(ws, [37, long]).quantize(dtype)).to_a(Float32)
+          got = [] of Float32
+          with_block_mode(gpu, mode) do
+            got = Tensor.from(xs, [3, long], gpu).linear(Tensor.from(ws, [37, long], gpu).quantize(dtype)).to_a(Float32)
+          end
+          if bit_exact?(gpu)
+            got.should eq expected
+          else
+            got.zip(expected) { |a, e| a.should be_close(e, 1e-2 * Math.max(1f32, e.abs)) }
+          end
+        end
       end
     end
   end
