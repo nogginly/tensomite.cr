@@ -378,7 +378,7 @@ flowchart TB
 
 The kernel was checked before it first ran on a GPU by compiling the MSL source as C++ with each threadgroup's threads as OS threads and real barriers: every tile matched `Split` bit for bit on odd sizes, batched and transposed operands, while `Serial` differed whenever `k` > 64.
 
-**Profiling.** Setting `Metal#profile` to a `Metal::Profile` collects where time goes: seconds spent encoding dispatches, allocating and waiting for the GPU, the number of dispatches and command buffers, the buffers allocated, those the pool could not serve and those released, and the wall time of each op that ran on the host. With `per_kernel: true`, every op is committed alone and its GPU time recorded under its op's name, which slows the run but shows the GPU's own cost per op; with `shapes: true` as well, under its shapes too, such as `MatMul [128,768]·[768,50257]`. `Metal::Profile.report` prints both, and `CUDA::Profile.report` the same tables for CUDA, through `ProfileReport`: the wall time by part, then GPU time by op and by op and shape, with each matmul's rate. `bench/profile_gpt2.cr` prints it for a decoded GPT-2 token, or with `--prefill N` for a prefill of N tokens, and `examples/shakespeare.cr --device metal --profile N` for N training steps (Decision BH).
+**Profiling.** Setting `Metal#profile` to a `Metal::Profile` collects where time goes: seconds spent encoding dispatches, allocating and waiting for the GPU, the number of dispatches and command buffers, the buffers allocated, those the pool could not serve and those released, and the wall time of each op that ran on the host. With `per_kernel: true`, every op is committed alone and its GPU time recorded under its op's name, which slows the run but shows the GPU's own cost per op; with `shapes: true` as well, under its shapes too, such as `MatMul [128,768]·[768,50257]`. `Metal::Profile.report` prints both, and `CUDA::Profile.report` the same tables for CUDA, through `ProfileReport`: the wall time by part, then GPU time by op and by op and shape, with each matmul's rate. `bench/profile_decode.cr` prints it for a decoded GPT-2 token, or with `--prefill N` for a prefill of N tokens, and `examples/shakespeare.cr --device metal --profile N` for N training steps (Decision BH).
 
 The atomic kernel needs `atomic_float`, from Metal 3. Without it the device still works, and only `Atomic` raises.
 
@@ -917,7 +917,7 @@ prefill MLP up, 64 rows     |11.851|12.574|11.537|8%
 - **About 0.3 ms per realise is fixed cost:** committing a command buffer and waiting for it. It dominates small matrices, and is paid once per decoded token.
 - **With one thread per output (serial), decode left most of the GPU idle:** a 768-wide layer launched 768 threads, each looping over all of `k`.
 
-**Where a decoded token's time goes on Metal** (`bench/profile_gpt2.cr`, M5 Pro, M7 part 1):
+**Where a decoded token's time goes on Metal** (`bench/profile_decode.cr`, M5 Pro, M7 part 1):
 
 Part of the 15.65 ms wall time                                          |ms   |Share
 ------------------------------------------------------------------------|-----|-----
@@ -1038,7 +1038,7 @@ Wall per decoded token, ms       |4.95  |4.98
 - **Metal still decodes faster, by 7% rather than 17%.** Decision O's requirement holds, with less room.
 - **`BLAS` now prefills half as fast again as Metal.** Prefill is a few large matmuls, where Accelerate is strong and Metal's matmul, untiled until M7 part 8, was not.
 
-**After the tiled matmul** (M7 part 8, M5 Pro, GPU time per product of a 128-token GPT-2 prefill from `bench/profile_gpt2.cr --prefill 128`):
+**After the tiled matmul** (M7 part 8, M5 Pro, GPU time per product of a 128-token GPT-2 prefill from `bench/profile_decode.cr --prefill 128`):
 
 Products                        |Before, ms|After, ms|GFLOP/s after|`BLAS` GFLOP/s
 --------------------------------|----------|---------|-------------|--------------
@@ -1064,7 +1064,7 @@ Metal, `Atomic`        |1,988                         |186.6
 Metal, `Tiled`         |3,681                         |65.9            
 Metal, `Auto` (default)|**3,684**                     |**186.1**       
 
-- **Metal now leads on both counts:** 1.12 times `BLAS` at decode and 1.52 times at a 64-token prefill. At 128 tokens, where the tiled matmul has more rows to share, `bench/profile_gpt2.cr --prefill 128` gives 5,296 tokens/s.
+- **Metal now leads on both counts:** 1.12 times `BLAS` at decode and 1.52 times at a 64-token prefill. At 128 tokens, where the tiled matmul has more rows to share, `bench/profile_decode.cr --prefill 128` gives 5,296 tokens/s.
 - **A decoded token takes 5.07 ms** of wall time, 4.77 ms of it GPU work, in 316 dispatches and 5 command buffers.
 - **`Tiled` alone decodes slowly** (66 tokens/s), because one row fills a sixty-fourth of a block; `Auto` sends such products to `Split`. The spread between `Split`, `Atomic` and `Auto` at decode, 186 to 199 tokens/s, is mostly run-to-run noise: they run the same kernels there.
 
@@ -1081,9 +1081,9 @@ CUDA, `Auto` (default)|**4,587**                     |**170.7**       |**6**
 
 - **CUDA leads on both counts:** 5.5 times `BLAS` at a 64-token prefill and 2.5 times at decode, with every op of the forward pass on the GPU.
 - **`Auto` takes the best of both,** as on Metal: tiled products prefill nearly ten times faster than split ones, and split products decode 1.6 times faster than tiled ones.
-- **Decode has room to grow.** A decoded token takes 5.9 ms; `bench/profile_gpt2_cuda.cr` shows where it goes. Reading GPT-2 small's 0.5 GB of `F32` weights once at the GB10's memory bandwidth would take about 2 ms, I think, so most of the time is elsewhere: about 316 launches a token, the logits copied back to the host, and a KV cache that `Cat` copies whole every token.
+- **Decode has room to grow.** A decoded token takes 5.9 ms; `bench/profile_decode_cuda.cr` shows where it goes. Reading GPT-2 small's 0.5 GB of `F32` weights once at the GB10's memory bandwidth would take about 2 ms, I think, so most of the time is elsewhere: about 316 launches a token, the logits copied back to the host, and a KV cache that `Cat` copies whole every token.
 
-**Where a decoded token goes on the GB10** (Decision AW; `bench/profile_gpt2_cuda.cr`, part 4's kernels):
+**Where a decoded token goes on the GB10** (Decision AW; `bench/profile_decode_cuda.cr`, part 4's kernels):
 
 Cost                      |ms per token
 --------------------------|------------
@@ -1101,7 +1101,7 @@ copying                   |0.03
 
 **Two passes for few rows (Decision AX).** `TwoPass` cuts each product into blocks of 128 columns by one chunk of 64 along `k` (and 16 rows). Each block copies its chunk of `b` into shared memory along whichever axis is contiguous, then each thread sums its column's chunk in index order, as `Split` does, and stores the sum in scratch memory. A second kernel adds each output's chunk sums in chunk order from zero. The sums and their order are `Split`'s, so the bits are too. The head becomes 393 × 12 blocks instead of 1,571 blocks each walking 768. The scratch is one buffer kept by the device, grown as needed (2.4 MB for the head): kernels run one after another, so each launch may reuse it. `spec/cuda_spec.cr` checks `TwoPass` against `Split` bit for bit, and a change to the order of the second pass fails it.
 
-Measured on the GB10 (`bench/gpt2.cr`, then `bench/profile_gpt2_cuda.cr`):
+Measured on the GB10 (`bench/gpt2.cr`, then `bench/profile_decode_cuda.cr`):
 
 Product, decoding one token       |`Split`, GB/s|`TwoPass`, GB/s|`TwoPass`, ms
 ----------------------------------|-------------|---------------|-------------
@@ -1129,7 +1129,7 @@ CUDA, `TwoPass`       |3,718                         |203.2           |5
 CUDA, `Auto` (default)|**4,585**                     |**211.4**       |**5**               
 
 - **`Auto` decodes at 211 tokens/s,** from part 4's 171, and agrees with the profile's 212. It beats `TwoPass` alone by keeping `Split` where `b`'s columns are contiguous.
-- **What remains,** by op (Decision AZ; `bench/profile_gpt2_cuda.cr` now totals each op whatever its shape):
+- **What remains,** by op (Decision AZ; `bench/profile_decode_cuda.cr` now totals each op whatever its shape):
 
 Op       |Per token|GPU ms|Share
 ---------|---------|------|-----
@@ -1169,7 +1169,7 @@ mlp out, `[1,3072]·[3072,768]`    |202       |202       |151      |165
   Block count was not the limit: mlp out reads at 202 GB/s with 24 blocks. I think the width of each read is: a warp of 32 columns reads 128 adjacent bytes of a row of weights at each step, while one of 8 columns reads four 32-byte pieces of rows far apart. The narrower kernels were removed, and `bench/matmul_cuda.cr` stays to compare split with two passes. In the model the same products read 10–15% slower than alone, worth about 0.15 ms a token.
 - **Bias adds inside the matmul (Decision BF).** `matmul(b, bias)` with a contiguous `[N]` bias, as a `Linear` layer has, gives `MatMul` a third source, and every matmul kernel adds `bias[col]` to each output after the output's sum is complete: `with_bias(total, ...)` on CUDA and Metal, a pass over each row of the output on the host and after `cblas_sgemm`. Any other bias is added by a separate `Add`. A first version took any bias that broadcasts, read through a general view; finding each output's bias then cost integer divisions, and on the GB10 a 64-token prefill fell from 4,134 to 2,935 tokens/s and `BLAS`'s from 826 to 608. The sum is the same and the addition is the same single rounding, so the bits are those of a separate `Add`; specs compare the two on every device and in every matmul mode. Metal's `Atomic` mode starts its atomic adds from the bias instead of from zero, which, like the rest of that mode, is not bit-exact. `Linear` uses it, so GPT-2 loses 48 `Add`s a token, four per block. The gradient of the bias is the output's gradient summed over the rows, by the `Unview` of the bias expanded to the output, as a separate `Add` gives.
 
-**After views and fused bias adds (Decision BF),** on the GB10 (`bench/gpt2.cr`, then `bench/profile_gpt2_cuda.cr`):
+**After views and fused bias adds (Decision BF),** on the GB10 (`bench/gpt2.cr`, then `bench/profile_decode_cuda.cr`):
 
 Change                 |`Auto` prefill, tokens/s|`Auto` decode, tokens/s|Launches a token
 -----------------------|------------------------|-----------------------|----------------
