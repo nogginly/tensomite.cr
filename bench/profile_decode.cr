@@ -35,9 +35,9 @@ path, heads, prefill = ProfileBench.arguments
     unit = prefill ? "prefill of #{prefill} tokens" : "decoded token"
     ProfileBench.run(model, prefill) { }
     normal = Metal::Profile.new
-    wall = ProfileBench.run(model, prefill) { |on| metal.profile = on ? normal : nil }
+    wall = ProfileBench.run(model, prefill) { |measuring| metal.profile = measuring ? normal : nil }
     timed = Metal::Profile.new(per_kernel: true, shapes: true)
-    ProfileBench.run(model, prefill) { |on| metal.profile = on ? timed : nil }
+    ProfileBench.run(model, prefill) { |measuring| metal.profile = measuring ? timed : nil }
     Metal::Profile.report(STDOUT, metal.name, unit, runs, wall, normal, timed)
     puts "\nprefill tokens/s: #{(prefill * runs / wall).round(1)}" if prefill
   end

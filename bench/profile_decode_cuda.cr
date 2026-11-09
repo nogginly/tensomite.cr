@@ -29,9 +29,9 @@ def profile(model : M, cuda : CUDA, prefill : Int32?) : Nil forall M
   unit = prefill ? "prefill of #{prefill} tokens" : "decoded token"
   ProfileBench.run(model, prefill) { }
   normal = CUDA::Profile.new
-  wall = ProfileBench.run(model, prefill) { |on| cuda.profile = on ? normal : nil }
+  wall = ProfileBench.run(model, prefill) { |measuring| cuda.profile = measuring ? normal : nil }
   timed = CUDA::Profile.new(per_kernel: true, shapes: true)
-  ProfileBench.run(model, prefill) { |on| cuda.profile = on ? timed : nil }
+  ProfileBench.run(model, prefill) { |measuring| cuda.profile = measuring ? timed : nil }
   CUDA::Profile.report(STDOUT, cuda.name, unit, runs, wall, normal, timed)
   puts "\nprefill tokens/s: #{(prefill * runs / wall).round(1)}" if prefill
 end
