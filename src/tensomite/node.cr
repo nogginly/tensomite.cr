@@ -74,6 +74,15 @@ module Tensomite
     # `ĝ = g · weight`; with source x alone, the normalised input
     # `x̂ = (x - mean) / σ`.
     LayerNormGrad
+    # Root-mean-square normalisation of each row along the last axis, by
+    # `Node#epsilon`, then scaled by source 1 (the weight, expanded to the
+    # output shape), fused: `x / √(Σx²/n + ε) · w`.
+    RMSNorm
+    # Rotary embeddings, fused: `x · cos + rotate_half(x) · sin` for x (source
+    # 0) and its cosines and sines (sources 1 and 2, expanded to the output
+    # shape), where `rotate_half` swaps the halves of the last axis and negates
+    # the half it moves from the end to the start.
+    Rope
     # Source 0 with each element kept, times `Node#scale`, or zeroed, by
     # `Node#dropout`'s mask (see `Tensor#dropout`).
     Dropout

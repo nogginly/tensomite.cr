@@ -481,18 +481,30 @@ module Tensomite
       return launch_blocks(kernels, node, output) if node.reads_blocks?
       return false unless node.gpu_eligible?(MAX_DIMS)
       case node.op
-      when Op::Sum, Op::Max                                                                                   then launch_reduce(kernels, node, output)
-      when Op::Cat                                                                                            then launch_cat(kernels, node, output)
-      when Op::Write                                                                                          then launch_write(kernels, node, output)
-      when Op::Gather, Op::ScatterAdd                                                                         then launch_rows(kernels, node, output)
-      when Op::Unview                                                                                         then return launch_unview(kernels, node, output)
-      when Op::MatMul                                                                                         then launch_matmul(kernels, node, output)
-      when Op::Softmax, Op::SoftmaxGrad, Op::LogSoftmax, Op::LogSoftmaxGrad, Op::LayerNorm, Op::LayerNormGrad then launch_row_op(kernels, node, output)
-      when Op::Kernel                                                                                         then launch_kernel(node, output)
-      when Op::Dropout                                                                                        then launch_dropout(kernels, node, output)
-      else                                                                                                         return launch_elementwise(kernels, node, output)
+      when Op::Sum, Op::Max                                                                                                then launch_reduce(kernels, node, output)
+      when Op::Cat                                                                                                         then launch_cat(kernels, node, output)
+      when Op::Write                                                                                                       then launch_write(kernels, node, output)
+      when Op::Gather, Op::ScatterAdd                                                                                      then launch_rows(kernels, node, output)
+      when Op::Unview                                                                                                      then return launch_unview(kernels, node, output)
+      when Op::MatMul                                                                                                      then launch_matmul(kernels, node, output)
+      when Op::Softmax, Op::SoftmaxGrad, Op::LogSoftmax, Op::LogSoftmaxGrad, Op::LayerNorm, Op::LayerNormGrad, Op::RMSNorm then launch_row_op(kernels, node, output)
+      when Op::Kernel, Op::Dropout, Op::Rope                                                                               then launch_pointwise(kernels, node, output)
+      else                                                                                                                      return launch_elementwise(kernels, node, output)
       end
       true
+    end
+
+    # Kernels from `Tensomite.kernel`, dropout and rotary embeddings, each one
+    # thread per element.
+    private def launch_pointwise(kernels : Kernels, node : Node, output : CUDABuffer) : Nil
+      case node.op
+      when Op::Kernel  then launch_kernel(node, output)
+      when Op::Dropout then launch_dropout(kernels, node, output)
+      else
+        x, cos, sin = node.srcs
+        run(kernels["rope_f32"], node.size, pointer(x), pointer(cos), pointer(sin), output.pointer,
+          view_args(x.view), view_args(cos.view), view_args(sin.view), node.shape.last.to_u32, node.size.to_u32)
+      end
     end
 
     # The elementwise primitives: one thread per element. Returns false for an op
@@ -725,7 +737,7 @@ module Tensomite
       current.pointer
     end
 
-    # Softmax, SoftmaxGrad, LogSoftmax, LogSoftmaxGrad, LayerNorm and LayerNormGrad: one block per
+    # Softmax, SoftmaxGrad, LogSoftmax, LogSoftmaxGrad, LayerNorm, LayerNormGrad and RMSNorm: one block per
     # row along the last axis, with a thread per chunk of the row up to `REDUCE_THREADS`.
     private def launch_row_op(kernels : Kernels, node : Node, output : CUDABuffer) : Nil
       n = node.shape.last
@@ -733,7 +745,12 @@ module Tensomite
       return if rows == 0
       threads = Math.min((n + REDUCE_CHUNK - 1) // REDUCE_CHUNK, REDUCE_THREADS)
       src = node.srcs.first
-      if node.op == Op::LayerNorm
+      if node.op == Op::RMSNorm
+        weight = node.srcs[1]
+        epsilon = node.epsilon || raise Error.new("rmsnorm needs an epsilon")
+        context.launch(kernels["rmsnorm_f32"], rows, threads, pointer(src), pointer(weight), output.pointer,
+          view_args(src.view), view_args(weight.view), n.to_u32, epsilon.to_f32)
+      elsif node.op == Op::LayerNorm
         weight, bias = node.srcs[1], node.srcs[2]
         epsilon = node.epsilon || raise Error.new("layernorm needs an epsilon")
         context.launch(kernels["layernorm_f32"], rows, threads, pointer(src), pointer(weight), pointer(bias), output.pointer,

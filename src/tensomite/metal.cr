@@ -62,7 +62,7 @@ module Tensomite
       Op::Exp => "exp_f32", Op::Log => "log_f32", Op::Tanh => "tanh_f32", Op::Sqrt => "sqrt_f32",
       Op::Copy => "copy_f32",
     }
-    private OTHER    = %w[copy_into_f32 sum_f32 max_f32 sum_short_f32 max_short_f32 gather_f32 fill_zero_f32 scatter_add_f32 scatter_add_column_f32 unview_f32 matmul_f32 matmul_split_f32 matmul_tiled_chunks_64x64_f32 matmul_chunk_sums_f32 matmul_tiled_32x32_f32 matmul_tiled_64x64_f32 matmul_tiled_32x64_f32 dropout_f32 softmax_f32 softmax_scaled_f32 softmax_grad_f32 log_softmax_grad_f32 log_softmax_f32 layernorm_f32 layernorm_grad_f32 gather_blocks_f32 quantize_rows_q8_f32 block_matmul_f32 block_matmul_lanes_f32]
+    private OTHER    = %w[copy_into_f32 sum_f32 max_f32 sum_short_f32 max_short_f32 gather_f32 fill_zero_f32 scatter_add_f32 scatter_add_column_f32 unview_f32 matmul_f32 matmul_split_f32 matmul_tiled_chunks_64x64_f32 matmul_chunk_sums_f32 matmul_tiled_32x32_f32 matmul_tiled_64x64_f32 matmul_tiled_32x64_f32 dropout_f32 softmax_f32 softmax_scaled_f32 softmax_grad_f32 log_softmax_grad_f32 log_softmax_f32 layernorm_f32 layernorm_grad_f32 rmsnorm_f32 rope_f32 gather_blocks_f32 quantize_rows_q8_f32 block_matmul_f32 block_matmul_lanes_f32]
     private OPTIONAL = %w[matmul_atomic_f32]
     private COLS     = 32
     # SIMD groups in each threadgroup of a quantised matmul, one per output.
@@ -367,16 +367,15 @@ module Tensomite
       return encode_blocks(node, output) if node.reads_blocks?
       return false unless node.gpu_eligible?(MAX_DIMS)
       case node.op
-      when Op::Sum, Op::Max                                                                                   then encode_reduce(node, output)
-      when Op::Cat                                                                                            then encode_cat(node, output)
-      when Op::Write                                                                                          then encode_write(node, output)
-      when Op::Gather, Op::ScatterAdd                                                                         then encode_rows(node, output)
-      when Op::Unview                                                                                         then return encode_unview(node, output)
-      when Op::MatMul                                                                                         then encode_matmul(node, output)
-      when Op::Kernel                                                                                         then encode_kernel(node, output)
-      when Op::Dropout                                                                                        then encode_dropout(node, output)
-      when Op::Softmax, Op::SoftmaxGrad, Op::LogSoftmax, Op::LogSoftmaxGrad, Op::LayerNorm, Op::LayerNormGrad then encode_row_op(node, output)
-      else                                                                                                         return encode_elementwise(node, output)
+      when Op::Sum, Op::Max                                                                                                then encode_reduce(node, output)
+      when Op::Cat                                                                                                         then encode_cat(node, output)
+      when Op::Write                                                                                                       then encode_write(node, output)
+      when Op::Gather, Op::ScatterAdd                                                                                      then encode_rows(node, output)
+      when Op::Unview                                                                                                      then return encode_unview(node, output)
+      when Op::MatMul                                                                                                      then encode_matmul(node, output)
+      when Op::Kernel, Op::Dropout, Op::Rope                                                                               then encode_pointwise(node, output)
+      when Op::Softmax, Op::SoftmaxGrad, Op::LogSoftmax, Op::LogSoftmaxGrad, Op::LayerNorm, Op::LayerNormGrad, Op::RMSNorm then encode_row_op(node, output)
+      else                                                                                                                      return encode_elementwise(node, output)
       end
       true
     end
@@ -652,7 +651,20 @@ module Tensomite
       end
     end
 
-    # Softmax, SoftmaxGrad, LogSoftmax, LogSoftmaxGrad, LayerNorm and LayerNormGrad: one
+    # Kernels from `Tensomite.kernel`, dropout and rotary embeddings, each one
+    # thread per element.
+    private def encode_pointwise(node : Node, output : MetalBuffer) : Nil
+      case node.op
+      when Op::Kernel  then encode_kernel(node, output)
+      when Op::Dropout then encode_dropout(node, output)
+      else
+        x, cos, sin = node.srcs
+        dispatch("rope_f32", node.size, [mtl(x), mtl(cos), mtl(sin), output.mtl],
+          [view_args(x.view), view_args(cos.view), view_args(sin.view), u32(node.shape.last), u32(node.size)])
+      end
+    end
+
+    # Softmax, SoftmaxGrad, LogSoftmax, LogSoftmaxGrad, LayerNorm, LayerNormGrad and RMSNorm: one
     # threadgroup per row, with a thread per chunk of the row up to `REDUCE_THREADS`.
     private def encode_row_op(node : Node, output : MetalBuffer) : Nil
       n = node.shape.last
@@ -660,6 +672,11 @@ module Tensomite
       threads = Math.min((n + REDUCE_CHUNK - 1) // REDUCE_CHUNK, REDUCE_THREADS)
       src = node.srcs.first
       case node.op
+      when Op::RMSNorm
+        weight = node.srcs[1]
+        epsilon = node.epsilon || raise Error.new("rmsnorm needs an epsilon")
+        dispatch_groups("rmsnorm_f32", {rows, 1}, {threads, 1}, [mtl(src), mtl(weight), output.mtl],
+          [view_args(src.view), view_args(weight.view), u32(n), Slice[epsilon].to_unsafe_bytes])
       when Op::LayerNorm
         weight, bias = node.srcs[1], node.srcs[2]
         epsilon = node.epsilon || raise Error.new("layernorm needs an epsilon")

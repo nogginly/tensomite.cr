@@ -98,8 +98,32 @@ module Tensomite
     # Returns root-mean-square normalisation of the last axis, scaled by
     # *weight*, of shape `[last]`: `x / √(mean(x²) + eps) · weight`, as Llama
     # normalises.
+    #
+    # With `F32` data and *weight* of shape `[last]`, it is one fused op
+    # (`Op::RMSNorm`), which computes what the composite computes, operation for
+    # operation, on host devices.
     def rmsnorm(weight : Tensor, eps : Number = 1e-5) : Tensor
+      if fusable_row?(-1) && weight.shape == [shape[-1]]
+        check_compatible("rmsnorm", {weight})
+        return Tensor.lazy(Node.new(Op::RMSNorm, [self, weight.expand(shape)], shape, dtype, device, epsilon: eps.to_f32))
+      end
       self / ((self * self).mean(-1, keepdims: true) + eps).sqrt * weight
+    end
+
+    # Returns `self · cos + rotate_half(self) · sin`, rotary embeddings' rotation
+    # of the pairs `(i, i + width/2)` of the last axis, for *cos* and *sin* that
+    # broadcast to this shape.
+    #
+    # With `F32` data it is one fused op (`Op::Rope`), which computes what the
+    # composite computes, operation for operation, on every device: it has only
+    # multiplications, a negation and an addition, each exact in IEEE arithmetic.
+    def rope(cos : Tensor, sin : Tensor) : Tensor
+      if fusable_row?(-1) && shape[-1].even? && View.broadcast_shape(shape, cos.shape) == shape &&
+         View.broadcast_shape(shape, sin.shape) == shape
+        check_compatible("rope", {cos, sin})
+        return Tensor.lazy(Node.new(Op::Rope, [self, cos.expand(shape), sin.expand(shape)], shape, dtype, device))
+      end
+      self * cos + rotate_half * sin
     end
 
     # Returns the last axis's two halves swapped, the first negated:
@@ -108,6 +132,13 @@ module Tensomite
       half = shape[-1] // 2
       raise ShapeError.new("rotate_half needs an even last axis, not #{shape[-1]}") unless shape[-1] == 2 * half
       Tensor.cat([-slice(-1, half, 2 * half), slice(-1, 0, half)], -1)
+    end
+
+    # Returns the transpose of `rotate_half`, `[y₁, y₂] → [y₂, -y₁]`, which carries
+    # a gradient back through it.
+    protected def rotate_half_transposed : Tensor
+      half = shape[-1] // 2
+      Tensor.cat([slice(-1, half, 2 * half), -slice(-1, 0, half)], -1)
     end
 
     # Returns an `F32` mask of shape `[rows, cols]` to add to attention scores:
