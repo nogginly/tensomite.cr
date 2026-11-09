@@ -867,3 +867,141 @@ extern "C" __global__ void layernorm_f32(const float* a, const float* w, const f
     float deviation = sqrtf(variance + epsilon);
     OWN_ELEMENTS(float scaled = dst[base + s] / deviation; float weighted = scaled * w[wstart + int(s) * run_stride(vw)]; dst[base + s] = weighted + b[bstart + int(s) * run_stride(vb)];)
 }
+
+// Block formats (Q8_0, Q4_0, Q4_1), as ggml stores them: per block of 32, an
+// F16 scale d (and for Q4_1 an F16 minimum m), then the quantised values. Each
+// kernel computes what the host's `Quant` computes, operation for operation.
+// Halves are converted by hand, as the host's `F16` does, so that NVRTC needs
+// no header and the stand-in driver runs the same code.
+
+__device__ float bits_to_float(unsigned int bits) {
+    union { unsigned int u; float f; } value;
+    value.u = bits;
+    return value.f;
+}
+
+__device__ unsigned int float_to_bits(float x) {
+    union { float f; unsigned int u; } value;
+    value.f = x;
+    return value.u;
+}
+
+// Returns the half with bits `h` as a float, exactly.
+__device__ float half_to_float(unsigned int h) {
+    unsigned int sign = (h & 0x8000u) << 16, exponent = (h >> 10) & 0x1fu, fraction = h & 0x3ffu;
+    if (exponent == 0) {
+        float magnitude = float(fraction) * 5.9604645e-8f;
+        return sign ? -magnitude : magnitude;
+    }
+    if (exponent == 31) return bits_to_float(sign | 0x7f800000u | (fraction << 13));
+    return bits_to_float(sign | ((exponent + 112) << 23) | (fraction << 13));
+}
+
+// Returns x rounded to the nearest half, ties to even, as a float.
+__device__ float round_to_half(float x) {
+    unsigned int word = float_to_bits(x);
+    unsigned int sign = (word >> 16) & 0x8000u, magnitude = word & 0x7fffffffu, h;
+    if (magnitude >= 0x7f800000u) h = sign | (magnitude > 0x7f800000u ? 0x7e00u : 0x7c00u);
+    else if (magnitude >= 0x477ff000u) h = sign | 0x7c00u;
+    else if (magnitude < 0x38800000u) h = sign | (unsigned int)rintf(bits_to_float(magnitude) * 16777216.0f);
+    else h = sign | ((magnitude - 0x38000000u + 0xfffu + ((magnitude >> 13) & 1u)) >> 13);
+    return half_to_float(h);
+}
+
+__device__ float block_half(const unsigned char* p) {
+    return half_to_float(unsigned(p[0]) | unsigned(p[1]) << 8);
+}
+
+// Returns element j of a row of blocks of `kind` (0 Q8_0, 1 Q4_0, 2 Q4_1)
+// and `bytes` bytes each, starting at p.
+__device__ float block_value(const unsigned char* p, unsigned int kind, unsigned int bytes, unsigned int j) {
+    const unsigned char* block = p + (j / 32) * bytes;
+    unsigned int at = j % 32;
+    if (kind == 0) return float((signed char)block[2 + at]) * block_half(block);
+    unsigned int packed = block[(kind == 1 ? 2 : 4) + at % 16];
+    unsigned int q = at < 16 ? (packed & 0x0fu) : (packed >> 4);
+    if (kind == 1) return float(int(q) - 8) * block_half(block);
+    return block_half(block) * float(q) + block_half(block + 2);
+}
+
+// Gather from a block-format table: one thread per output element, the rows
+// dequantised as they are read; `offset` is the byte offset of the first row.
+extern "C" __global__ void gather_blocks_f32(const unsigned char* table, const int* ids, float* dst, int* errors,
+                                             unsigned int kind, unsigned int bytes, unsigned int offset,
+                                             View vi, unsigned int width, int rows, unsigned int n) {
+    unsigned int i = thread_index();
+    if (i >= n) return;
+    int id = ids[offset_of(vi, i / width)];
+    if (id < 0 || id >= rows) {
+        report(errors, id, rows);
+        dst[i] = 0.0f;
+        return;
+    }
+    const unsigned char* row = table + offset + (unsigned int)id * (width / 32) * bytes;
+    dst[i] = block_value(row, kind, bytes, i % width);
+}
+
+// Quantises each block of 32 activations to 8 bits, as the host's
+// `quantize_activations` does: one thread per block of the rows read through
+// vx, writing the F16-rounded scale, d·Σq rounded to F16, and the values.
+extern "C" __global__ void quantize_rows_q8_f32(const float* x, float* scales, float* sums, signed char* qs,
+                                                View vx, unsigned int blocks) {
+    unsigned int i = thread_index();
+    if (i >= blocks) return;
+    unsigned int base = i * 32;
+    float amax = 0.0f;
+    for (unsigned int j = 0; j < 32; j++) amax = fmaxf(amax, fabsf(x[offset_of(vx, base + j)]));
+    float d = amax / 127.0f;
+    float id = d == 0.0f ? 0.0f : 1.0f / d;
+    int total = 0;
+    for (unsigned int j = 0; j < 32; j++) {
+        signed char q = (signed char)roundf(x[offset_of(vx, base + j)] * id);
+        qs[base + j] = q;
+        total += q;
+    }
+    scales[i] = round_to_half(d);
+    sums[i] = round_to_half(float(total) * d);
+}
+
+// x · wᵀ for a block-format weight: one thread per output, summing its blocks
+// in order, each an integer dot product of the weight's values with the
+// quantised activations', times both scales (plus m · d·Σq for Q4_1).
+extern "C" __global__ void block_matmul_f32(const unsigned char* w, const float* scales, const float* sums,
+                                            const signed char* qs, float* dst, const float* bias,
+                                            unsigned int kind, unsigned int bytes, unsigned int offset,
+                                            unsigned int n, unsigned int k, unsigned int count) {
+    unsigned int i = thread_index();
+    if (i >= count) return;
+    unsigned int blocks = k / 32, row = i / n, col = i % n;
+    const unsigned char* weights = w + offset + col * blocks * bytes;
+    const signed char* q = qs + row * k;
+    const float* sx = scales + row * blocks;
+    const float* mx = sums + row * blocks;
+    float sum = 0.0f;
+    for (unsigned int block = 0; block < blocks; block++) {
+        const unsigned char* p = weights + block * bytes;
+        const signed char* qb = q + block * 32;
+        if (kind == 0) {
+            int total = 0;
+            for (unsigned int j = 0; j < 32; j++) total += int((signed char)p[2 + j]) * int(qb[j]);
+            sum += float(total) * (block_half(p) * sx[block]);
+        } else if (kind == 1) {
+            int low = 0, high = 0;
+            for (unsigned int j = 0; j < 16; j++) {
+                unsigned int packed = p[2 + j];
+                low += (int(packed & 0x0fu) - 8) * int(qb[j]);
+                high += (int(packed >> 4) - 8) * int(qb[j + 16]);
+            }
+            sum += float(low + high) * block_half(p) * sx[block];
+        } else {
+            int low = 0, high = 0;
+            for (unsigned int j = 0; j < 16; j++) {
+                unsigned int packed = p[4 + j];
+                low += int(packed & 0x0fu) * int(qb[j]);
+                high += int(packed >> 4) * int(qb[j + 16]);
+            }
+            sum += (block_half(p) * sx[block]) * float(low + high) + block_half(p + 2) * mx[block];
+        }
+    }
+    dst[i] = with_bias(sum, bias, col);
+}
