@@ -127,7 +127,14 @@ module Tensomite
     # A name for diagrams, usually given to leaves such as a model's weights.
     property name : String?
 
+    # Returns a node computing *op* of *srcs*.
+    #
+    # Raises `DTypeError` when a source or the result is in a block format: no
+    # op reads or makes one yet (Decision N).
     def initialize(@op : Op, @srcs : Array(Tensor), @shape, @dtype, @device, @axis = nil, @source_view = nil, @kernel = nil, @epsilon = nil, @scale = nil, @dropout = nil)
+      if dtype.block? || (block = srcs.find(&.dtype.block?))
+        raise DTypeError.new("#{op} cannot read or make #{block.try(&.dtype) || dtype} tensors")
+      end
     end
 
     # Returns the options of a `Softmax` or `SoftmaxGrad` node as the GPU kernels

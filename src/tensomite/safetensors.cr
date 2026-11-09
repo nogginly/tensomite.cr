@@ -107,6 +107,8 @@ module Tensomite
       case tensor.dtype
       in .f32? then tensor.to_a(Float32).to_unsafe.to_slice(tensor.size).to_unsafe_bytes
       in .i32? then tensor.to_a(Int32).to_unsafe.to_slice(tensor.size).to_unsafe_bytes
+      in .q8_0?, .q4_0?, .q4_1?
+        raise DTypeError.new("safetensors has no #{tensor.dtype}; save the model as F32")
       end
     end
 

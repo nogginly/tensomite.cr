@@ -1310,7 +1310,7 @@ Allocation, with `GC_UNMAP_THRESHOLD` unset|3.6 s              |0.9 s, with `GC_
 - **Element counts and offsets are `Int32`,** following Crystal's `Slice` indexing. That caps one buffer at about 2 GB.
 - **Only `F32` and `I32`.** No type promotion: operands must have the same dtype.
 - **BLAS covers `F32` matmul only.** See "Performance baselines" for how far the oracle is behind it.
-- **Model weights compute in `F32` only.** `BF16` weights are widened to `F32` as they load, which doubles their memory; `F16` and quantised weights arrive with M10.
+- **Model weights compute in `F32` only.** `BF16` and `F16` weights are widened to `F32` as they load, which doubles their memory. Quantised weights load in their block formats (`Q8_0`, `Q4_0`, `Q4_1`), but no op reads them until M10's kernels.
 - **One device per op.** Moving data needs an explicit `to`, which goes through host memory.
 - **Only what is written as a kernel or a fused row op is fused.** `gelu`, `softmax`, `log_softmax` and `layernorm` are one op each; the attention's scale and mask, residual adds and biases are still separate primitives, until the models move onto kernels (M7 part 6).
 - **Each scalar operand is a new leaf,** uploaded to the device once per use.

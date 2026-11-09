@@ -65,6 +65,8 @@ module Tensomite
       case node.dtype
       in .f32? then execute(Float32, node, output)
       in .i32? then execute(Int32, node, output)
+      in .q8_0?, .q4_0?, .q4_1?
+        raise DTypeError.new("no op computes #{node.dtype} values")
       end
     end
 

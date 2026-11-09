@@ -14,7 +14,19 @@ module Tensomite
     getter node : Node
     getter view : View
 
+    # Returns a tensor showing *node* through *view*.
+    #
+    # Raises `DTypeError` for a view of a block-format node that is not a run
+    # of its whole rows, laid out as they are stored (Decision N).
     def initialize(@node, @view)
+      check_block_view if node.dtype.block?
+    end
+
+    private def check_block_view : Nil
+      row = node.shape.last? || 0
+      unless view.strides == View.row_major_strides(view.shape) && view.shape.last? == row && view.offset % Math.max(row, 1) == 0
+        raise DTypeError.new("a #{node.dtype} tensor can only be viewed as runs of its whole rows, not as #{view.shape}")
+      end
     end
 
     # Returns a realised tensor holding *data* in row-major order with the given *shape*.
@@ -37,6 +49,8 @@ module Tensomite
       in .i32?
         raise DTypeError.new("#{value} is not an integer") unless value.to_i32 == value
         from([value.to_i32], [] of Int32, device)
+      in .q8_0?, .q4_0?, .q4_1?
+        raise DTypeError.new("cannot make a #{dtype} scalar; quantize an F32 tensor instead")
       end
     end
 
@@ -45,6 +59,8 @@ module Tensomite
       case dtype
       in .f32? then from(Array.new(shape.product(1), value.to_f32), shape, device)
       in .i32? then from(Array.new(shape.product(1), value.to_i32), shape, device)
+      in .q8_0?, .q4_0?, .q4_1?
+        full(shape, value, DType::F32, device).quantize(dtype)
       end
     end
 
@@ -171,6 +187,7 @@ module Tensomite
     # then upload to *device*.
     def to(device : Device) : Tensor
       return self if device.same?(self.device)
+      return Tensor.from_blocks(block_bytes, shape, dtype, device) if dtype.block?
       src = contiguous.realize
       buffer = device.alloc(dtype.bytes_for(src.size))
       device.upload(buffer, src.host_bytes[0, buffer.bytesize])
