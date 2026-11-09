@@ -670,6 +670,133 @@ template [[host_name("matmul_tiled_32x32_f32")]] kernel matmul_tiled_32_t matmul
 template [[host_name("matmul_tiled_64x64_f32")]] kernel matmul_tiled_64_t matmul_tiled<64, 64, 32, 4, 4>;
 template [[host_name("matmul_tiled_32x64_f32")]] kernel matmul_tiled_32x64_t matmul_tiled<32, 64, 32, 4, 4>;
 
+// Block formats (Q8_0, Q4_0, Q4_1), as ggml stores them: per block of 32, an
+// F16 scale d (and for Q4_1 an F16 minimum m), then the quantised values. Each
+// kernel computes what the host's `Quant` computes, operation for operation.
+
+// Returns the half at p, little-endian, as a float, exactly.
+static float block_half(device const uchar* p) {
+    return float(as_type<half>(ushort(ushort(p[0]) | ushort(p[1]) << 8)));
+}
+
+// The layout of a block-format tensor: its kind (0 Q8_0, 1 Q4_0, 2 Q4_1), the
+// bytes of one block, and the byte offset of its first row in the buffer.
+struct Blocks {
+    uint kind;
+    uint bytes;
+    uint offset;
+};
+
+// Returns element j of a row of blocks starting at p.
+static float block_value(device const uchar* p, constant Blocks& b, uint j) {
+    device const uchar* block = p + (j / 32) * b.bytes;
+    uint at = j % 32;
+    if (b.kind == 0) return float(as_type<char>(block[2 + at])) * block_half(block);
+    uint packed = block[(b.kind == 1 ? 2 : 4) + at % 16];
+    uint q = at < 16 ? (packed & 0x0f) : (packed >> 4);
+    if (b.kind == 1) return float(int(q) - 8) * block_half(block);
+    return block_half(block) * float(q) + block_half(block + 2);
+}
+
+// Gather from a block-format table: one thread per output element, the rows
+// dequantised as they are read.
+kernel void gather_blocks_f32(device const uchar* table [[buffer(0)]],
+                              device const int* ids [[buffer(1)]],
+                              device float* dst [[buffer(2)]],
+                              device atomic_int* errors [[buffer(3)]],
+                              constant Blocks& b [[buffer(4)]],
+                              constant View& vi [[buffer(5)]],
+                              constant uint& width [[buffer(6)]],
+                              constant int& rows [[buffer(7)]],
+                              constant uint& n [[buffer(8)]],
+                              uint i [[thread_position_in_grid]]) {
+    if (i >= n) return;
+    int id = ids[offset_of(vi, i / width)];
+    if (id < 0 || id >= rows) {
+        report(errors, id, rows);
+        dst[i] = 0.0f;
+        return;
+    }
+    device const uchar* row = table + b.offset + uint(id) * (width / 32) * b.bytes;
+    dst[i] = block_value(row, b, i % width);
+}
+
+// Quantises each block of 32 activations to 8 bits, as the host's
+// `quantize_activations` does: one thread per block of the rows read through
+// vx, writing the F16-rounded scale, d·Σq rounded to F16, and the values.
+kernel void quantize_rows_q8_f32(device const float* x [[buffer(0)]],
+                                 device float* scales [[buffer(1)]],
+                                 device float* sums [[buffer(2)]],
+                                 device char* qs [[buffer(3)]],
+                                 constant View& vx [[buffer(4)]],
+                                 constant uint& blocks [[buffer(5)]],
+                                 uint i [[thread_position_in_grid]]) {
+    if (i >= blocks) return;
+    uint base = i * 32;
+    float amax = 0.0f;
+    for (uint j = 0; j < 32; j++) amax = max(amax, fabs(x[offset_of(vx, base + j)]));
+    float d = amax / 127.0f;
+    float id = d == 0.0f ? 0.0f : 1.0f / d;
+    int total = 0;
+    for (uint j = 0; j < 32; j++) {
+        char q = char(round(x[offset_of(vx, base + j)] * id));
+        qs[base + j] = q;
+        total += q;
+    }
+    scales[i] = float(half(d));
+    sums[i] = float(half(float(total) * d));
+}
+
+// x · wᵀ for a block-format weight: one thread per output, summing its blocks
+// in order, each an integer dot product of the weight's values with the
+// quantised activations', times both scales (plus m · d·Σq for Q4_1). dims is
+// (n, k, biased).
+kernel void block_matmul_f32(device const uchar* w [[buffer(0)]],
+                             device const float* scales [[buffer(1)]],
+                             device const float* sums [[buffer(2)]],
+                             device const char* qs [[buffer(3)]],
+                             device float* dst [[buffer(4)]],
+                             device const float* bias [[buffer(5)]],
+                             constant Blocks& b [[buffer(6)]],
+                             constant uint3& dims [[buffer(7)]],
+                             constant uint& count [[buffer(8)]],
+                             uint i [[thread_position_in_grid]]) {
+    if (i >= count) return;
+    uint n = dims.x, k = dims.y, blocks = k / 32;
+    uint row = i / n, col = i % n;
+    device const uchar* weights = w + b.offset + col * blocks * b.bytes;
+    device const char* q = qs + row * k;
+    device const float* sx = scales + row * blocks;
+    device const float* mx = sums + row * blocks;
+    float sum = 0.0f;
+    for (uint block = 0; block < blocks; block++) {
+        device const uchar* p = weights + block * b.bytes;
+        device const char* qb = q + block * 32;
+        if (b.kind == 0) {
+            int total = 0;
+            for (uint j = 0; j < 32; j++) total += int(as_type<char>(p[2 + j])) * int(qb[j]);
+            sum += float(total) * (block_half(p) * sx[block]);
+        } else if (b.kind == 1) {
+            int low = 0, high = 0;
+            for (uint j = 0; j < 16; j++) {
+                uint packed = p[2 + j];
+                low += (int(packed & 0x0f) - 8) * int(qb[j]);
+                high += (int(packed >> 4) - 8) * int(qb[j + 16]);
+            }
+            sum += float(low + high) * block_half(p) * sx[block];
+        } else {
+            int low = 0, high = 0;
+            for (uint j = 0; j < 16; j++) {
+                uint packed = p[4 + j];
+                low += int(packed & 0x0f) * int(qb[j]);
+                high += int(packed >> 4) * int(qb[j + 16]);
+            }
+            sum += (block_half(p) * sx[block]) * float(low + high) + block_half(p + 2) * mx[block];
+        }
+    }
+    dst[i] = with_bias(sum, bias, col, dims.z);
+}
+
 #if __METAL_VERSION__ >= 300
 // Atomic, for measurement only: each thread adds its chunk sums straight into the
 // zeroed output, so the order of the additions, and the bits, can change from

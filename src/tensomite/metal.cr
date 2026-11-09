@@ -62,7 +62,7 @@ module Tensomite
       Op::Exp => "exp_f32", Op::Log => "log_f32", Op::Tanh => "tanh_f32", Op::Sqrt => "sqrt_f32",
       Op::Copy => "copy_f32",
     }
-    private OTHER          = %w[copy_into_f32 sum_f32 max_f32 sum_short_f32 max_short_f32 gather_f32 fill_zero_f32 scatter_add_f32 scatter_add_column_f32 unview_f32 matmul_f32 matmul_split_f32 matmul_tiled_chunks_64x64_f32 matmul_chunk_sums_f32 matmul_tiled_32x32_f32 matmul_tiled_64x64_f32 matmul_tiled_32x64_f32 dropout_f32 softmax_f32 softmax_scaled_f32 softmax_grad_f32 log_softmax_grad_f32 log_softmax_f32 layernorm_f32 layernorm_grad_f32]
+    private OTHER          = %w[copy_into_f32 sum_f32 max_f32 sum_short_f32 max_short_f32 gather_f32 fill_zero_f32 scatter_add_f32 scatter_add_column_f32 unview_f32 matmul_f32 matmul_split_f32 matmul_tiled_chunks_64x64_f32 matmul_chunk_sums_f32 matmul_tiled_32x32_f32 matmul_tiled_64x64_f32 matmul_tiled_32x64_f32 dropout_f32 softmax_f32 softmax_scaled_f32 softmax_grad_f32 log_softmax_grad_f32 log_softmax_f32 layernorm_f32 layernorm_grad_f32 gather_blocks_f32 quantize_rows_q8_f32 block_matmul_f32]
     private OPTIONAL       = %w[matmul_atomic_f32]
     private COLS           =  32
     private SLICES         =   8
@@ -359,6 +359,7 @@ module Tensomite
     # Metal kernel: an op not yet ported, a dtype other than `F32`, a block-format source, a view of more
     # than 8 dimensions, or a view `Unview` cannot invert.
     private def encode(node : Node, output : MetalBuffer) : Bool
+      return encode_blocks(node, output) if node.reads_blocks?
       return false unless node.gpu_eligible?(MAX_DIMS)
       case node.op
       when Op::Sum, Op::Max                                                                                   then encode_reduce(node, output)
@@ -478,6 +479,47 @@ module Tensomite
       end
       sums = Slice[m.to_u32, k.to_u32, n.to_u32, bias ? 1_u32 : 0_u32].to_unsafe_bytes
       dispatch("matmul_chunk_sums_f32", node.size, [scratch.mtl, output.mtl, bias ? mtl(bias) : output.mtl], [sums, u32(node.size)])
+    end
+
+    # Encodes an op that reads a block-format tensor and returns true, or false
+    # for one with no kernel: `BlockMatMul`, as a pass that quantises each block
+    # of the activations and then one thread per output; and `Gather`, one thread
+    # per output element.
+    private def encode_blocks(node : Node, output : MetalBuffer) : Bool
+      return false unless node.dtype.f32? && node.srcs.all? { |src| src.ndim <= MAX_DIMS }
+      case node.op
+      when Op::BlockMatMul
+        x, w, bias = node.srcs[0], node.srcs[1], node.srcs[2]?
+        n, k = w.shape
+        blocks = x.size // DType.block_size
+        # The scratch buffer holds each block's scale, then its d·Σq, then the
+        # quantised activations.
+        scratch = scratch(blocks * 8 + x.size)
+        dispatch_at("quantize_rows_q8_f32", blocks, [metal(x.node.buffer!), scratch, scratch, scratch],
+          [0, 0, blocks * 4, blocks * 8], [view_args(x.view), u32(blocks)])
+        dims = Slice[n.to_u32, k.to_u32, bias ? 1_u32 : 0_u32].to_unsafe_bytes
+        buffers = [metal(w.node.buffer!), scratch, scratch, scratch, output, bias ? metal(bias.node.buffer!) : output]
+        dispatch_at("block_matmul_f32", node.size, buffers, [0, 0, blocks * 4, blocks * 8, 0, 0], [blocks_args(w), dims, u32(node.size)])
+      when Op::Gather
+        table, ids = node.srcs
+        rows, width = table.shape
+        buffers = [mtl(table), mtl(ids), output.mtl, errors.mtl]
+        dispatch("gather_blocks_f32", node.size, buffers, [blocks_args(table), view_args(ids.view), u32(width), i32(rows), u32(node.size)])
+      else
+        return false
+      end
+      true
+    end
+
+    # Returns the kernels' `Blocks` for a block-format tensor: its kind, the
+    # bytes of a block, and the byte offset of the first row it views.
+    private def blocks_args(tensor : Tensor) : Bytes
+      kind = case tensor.dtype
+             when .q8_0? then 0_u32
+             when .q4_0? then 1_u32
+             else             2_u32
+             end
+      Slice[kind, tensor.dtype.block_bytes.to_u32, tensor.dtype.bytes_for(tensor.view.offset).to_u32].to_unsafe_bytes
     end
 
     # Returns a buffer of at least *bytesize* bytes for partial results.
@@ -682,6 +724,19 @@ module Tensomite
       dispatched
     end
 
+    # Encodes one dispatch as `#dispatch` does, binding each of *buffers* from
+    # its byte offset in *offsets*, so that parts of one buffer can be bound as
+    # separate arguments.
+    private def dispatch_at(name : String, threads : Int32, buffers : Array(MetalBuffer), offsets : Array(Int32), constants : Array(Bytes)) : Nil
+      return if threads == 0
+      pipeline = bind(name, buffers.map(&.mtl), constants, offsets)
+      width = Math.min(ObjC.send(UInt64, pipeline, "maxTotalThreadsPerThreadgroup"), 256_u64)
+      grid = StaticArray[threads.to_u64, 1_u64, 1_u64]
+      group = StaticArray[width, 1_u64, 1_u64]
+      ObjC.send(Nil, open_encoder, "dispatchThreads:threadsPerThreadgroup:", grid.to_unsafe, group.to_unsafe)
+      dispatched
+    end
+
     # Encodes one dispatch of kernel *name* over a 2-D or 3-D grid of *groups*
     # threadgroups, each of *threads* threads, binding arguments as `#dispatch` does.
     private def dispatch_groups(name : String, groups : {Int32, Int32}, threads : {Int32, Int32},
@@ -719,13 +774,14 @@ module Tensomite
 
     # Sets kernel *name*'s pipeline on the open encoder and binds its arguments;
     # returns the pipeline.
-    private def bind(name : String, buffers : Array(Void*), constants : Array(Bytes)) : Void*
+    private def bind(name : String, buffers : Array(Void*), constants : Array(Bytes), offsets : Array(Int32)? = nil) : Void*
       @profile.try { |profile| profile.dispatches += 1 }
       pipeline = @pipelines[name]
       encoder = open_encoder
       ObjC.send(Nil, encoder, "setComputePipelineState:", pipeline)
       buffers.each_with_index do |buffer, index|
-        ObjC.send(Nil, encoder, "setBuffer:offset:atIndex:", buffer, 0_u64, index.to_u64)
+        offset = offsets.try(&.[index].to_u64) || 0_u64
+        ObjC.send(Nil, encoder, "setBuffer:offset:atIndex:", buffer, offset, index.to_u64)
       end
       constants.each_with_index(buffers.size) do |bytes, index|
         ObjC.send(Nil, encoder, "setBytes:length:atIndex:", bytes.to_unsafe.as(Void*), bytes.size.to_u64, index.to_u64)

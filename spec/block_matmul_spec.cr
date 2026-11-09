@@ -30,6 +30,18 @@ private def reference(x : Array(Float32), rows : Int32, w : Tensor) : {Array(Flo
   {sums, bounds}
 end
 
+# Returns the number of ops *device* has run on the host instead of its own
+# kernels, or 0 for a device that runs everything on the host.
+private def host_ops(device : Device) : Int32
+  {% if flag?(:darwin) && flag?(:aarch64) %}
+    return device.host_ops if device.is_a?(Metal)
+  {% end %}
+  {% if flag?(:cuda) %}
+    return device.host_ops if device.is_a?(CUDA)
+  {% end %}
+  0
+end
+
 describe "Tensor#linear with block-format weights" do
   rows, n, k = 5, 7, 96
   x = random_values(rows * k, 1)
@@ -45,12 +57,18 @@ describe "Tensor#linear with block-format weights" do
     end
 
     (DEVICES + GPUS).each do |device|
-      it "gives the CPU's bits on #{device.class}, with a bias, for #{dtype}" do
+      it "matches the CPU on #{device.class}, with a bias, for #{dtype}" do
         results = [CPU.default, device].map do |dev|
           q = Tensor.from(w, [n, k], dev).quantize(dtype)
           Tensor.from(x, [rows, k], dev).linear(q, Tensor.from(bias, [n], dev)).to_a(Float32)
         end
-        results[1].should eq results[0]
+        # A GPU's division may differ in the last bit, which can move one
+        # activation by a step of its block's scale.
+        if DEVICES.includes?(device)
+          results[1].should eq results[0]
+        else
+          results[1].zip(results[0]) { |a, e| a.should be_close(e, 1e-2 * Math.max(1f32, e.abs)) }
+        end
       end
     end
 
@@ -61,6 +79,21 @@ describe "Tensor#linear with block-format weights" do
       single.should eq batched
     end
   end
+
+  {% if flag?(:darwin) && flag?(:aarch64) %}
+    GPUS.each do |gpu|
+      it "runs on #{gpu.class}'s own kernels, with no host op" do
+        BLOCK_FORMATS.each do |dtype|
+          q = Tensor.from(w, [n, k], gpu).quantize(dtype)
+          input = Tensor.from(x, [rows, k], gpu)
+          ids = Tensor.from([1, 0], [2], gpu)
+          before = host_ops(gpu)
+          Tensor.realize([input.linear(q, Tensor.from(bias, [n], gpu)), q.gather(ids)])
+          host_ops(gpu).should eq before
+        end
+      end
+    end
+  {% end %}
 
   it "reads rows of x through views, and a weight sliced by rows" do
     q = Tensor.from(w, [n, k]).quantize(DType::Q4_0)
@@ -123,6 +156,19 @@ describe "Quantised models" do
       prefill = model.forward(prompt, model.new_cache).to_a(Float32)
       cache = model.new_cache
       prompt.flat_map { |id| model.forward([id], cache).to_a(Float32) }.should eq prefill
+    end
+  end
+
+  GPUS.each do |gpu|
+    {"q8_0", "q4_0"}.each do |name|
+      it "run #{name} on #{gpu.class} within 0.001 nats of the CPU's predictions" do
+        cpu = Llama.load("#{dir}/model-#{name}.gguf")
+        on_gpu = Llama.load("#{dir}/model-#{name}.gguf", gpu)
+        log_p = cpu.forward(prompt, cpu.new_cache).log_softmax
+        log_q = on_gpu.forward(prompt, on_gpu.new_cache).to(CPU.default).log_softmax
+        divergence = (log_p.exp * (log_p - log_q)).sum(-1).mean.to_a(Float32)[0]
+        divergence.should be < 0.001
+      end
     end
   end
 
