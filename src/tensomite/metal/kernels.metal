@@ -676,7 +676,7 @@ template [[host_name("matmul_tiled_32x64_f32")]] kernel matmul_tiled_32x64_t mat
 
 // Returns the half at p, little-endian, as a float, exactly.
 static float block_half(device const uchar* p) {
-    return float(as_type<half>(ushort(p[0]) | ushort(p[1]) << 8));
+    return float(as_type<half>(ushort(ushort(p[0]) | ushort(p[1]) << 8)));
 }
 
 // The layout of a block-format tensor: its kind (0 Q8_0, 1 Q4_0, 2 Q4_1), the
