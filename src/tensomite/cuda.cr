@@ -473,6 +473,7 @@ module Tensomite
     # none: an op not yet ported, a dtype other than `F32`, a block-format source, a view of more than 8
     # dimensions, or a view `Unview` cannot invert.
     private def launch(kernels : Kernels, node : Node, output : CUDABuffer) : Bool
+      return launch_blocks(kernels, node, output) if node.reads_blocks?
       return false unless node.gpu_eligible?(MAX_DIMS)
       case node.op
       when Op::Sum, Op::Max                                                                                   then launch_reduce(kernels, node, output)
@@ -650,6 +651,50 @@ module Tensomite
           pointer(a), pointer(b), scratch, view_args(a.view), view_args(b.view), m.to_u32, k.to_u32, n.to_u32, run.to_u32)
       end
       run(kernels["matmul_chunk_sums_f32"], node.size, scratch, output.pointer, bias_pointer(node), m.to_u32, k.to_u32, n.to_u32, node.size.to_u32)
+    end
+
+    # Queues the kernels of an op that reads a block-format tensor and returns
+    # true, or returns false for one with none: `BlockMatMul`, as a pass that
+    # quantises each block of the activations into scratch memory and then one
+    # thread per output; and `Gather`, one thread per output element.
+    private def launch_blocks(kernels : Kernels, node : Node, output : CUDABuffer) : Bool
+      return false unless node.dtype.f32? && node.srcs.all? { |src| src.ndim <= MAX_DIMS }
+      case node.op
+      when Op::BlockMatMul
+        x, w = node.srcs[0], node.srcs[1]
+        n, k = w.shape
+        blocks = x.size // DType.block_size
+        # The scratch memory holds each block's scale, then its d·Σq, then the
+        # quantised activations.
+        scales = scratch(blocks * 8 + x.size)
+        sums, qs = scales + blocks * 4, scales + blocks * 8
+        run(kernels["quantize_rows_q8_f32"], blocks, pointer(x), scales, sums, qs, view_args(x.view), blocks.to_u32)
+        kind, bytes, offset = block_args(w)
+        run(kernels["block_matmul_f32"], node.size, pointer(w), scales, sums, qs, output.pointer, bias_pointer(node),
+          kind, bytes, offset, n.to_u32, k.to_u32, node.size.to_u32)
+      when Op::Gather
+        table, ids = node.srcs
+        rows, width = table.shape
+        @errors_pending = true
+        kind, bytes, offset = block_args(table)
+        run(kernels["gather_blocks_f32"], node.size, pointer(table), pointer(ids), output.pointer, errors,
+          kind, bytes, offset, view_args(ids.view), width.to_u32, rows, node.size.to_u32)
+      else
+        return false
+      end
+      true
+    end
+
+    # Returns the kernels' description of a block-format tensor: its kind (0
+    # Q8_0, 1 Q4_0, 2 Q4_1), the bytes of a block, and the byte offset of the
+    # first row it views.
+    private def block_args(tensor : Tensor) : {UInt32, UInt32, UInt32}
+      kind = case tensor.dtype
+             when .q8_0? then 0_u32
+             when .q4_0? then 1_u32
+             else             2_u32
+             end
+      {kind, tensor.dtype.block_bytes.to_u32, tensor.dtype.bytes_for(tensor.view.offset).to_u32}
     end
 
     # Returns a `MatMul`'s bias pointer, or a null pointer when it has none.

@@ -42,6 +42,15 @@ private def host_ops(device : Device) : Int32
   0
 end
 
+# Returns true for devices whose block kernels give the host's bits: the host
+# devices, and CUDA, whose division is IEEE's.
+private def bit_exact?(device : Device) : Bool
+  {% if flag?(:cuda) %}
+    return true if device.is_a?(CUDA)
+  {% end %}
+  DEVICES.includes?(device)
+end
+
 describe "Tensor#linear with block-format weights" do
   rows, n, k = 5, 7, 96
   x = random_values(rows * k, 1)
@@ -62,9 +71,9 @@ describe "Tensor#linear with block-format weights" do
           q = Tensor.from(w, [n, k], dev).quantize(dtype)
           Tensor.from(x, [rows, k], dev).linear(q, Tensor.from(bias, [n], dev)).to_a(Float32)
         end
-        # A GPU's division may differ in the last bit, which can move one
-        # activation by a step of its block's scale.
-        if DEVICES.includes?(device)
+        # Metal's division may differ in the last bit, which can move one
+        # activation by a step of its block's scale. CUDA's is IEEE's.
+        if bit_exact?(device)
           results[1].should eq results[0]
         else
           results[1].zip(results[0]) { |a, e| a.should be_close(e, 1e-2 * Math.max(1f32, e.abs)) }
@@ -80,20 +89,18 @@ describe "Tensor#linear with block-format weights" do
     end
   end
 
-  {% if flag?(:darwin) && flag?(:aarch64) %}
-    GPUS.each do |gpu|
-      it "runs on #{gpu.class}'s own kernels, with no host op" do
-        BLOCK_FORMATS.each do |dtype|
-          q = Tensor.from(w, [n, k], gpu).quantize(dtype)
-          input = Tensor.from(x, [rows, k], gpu)
-          ids = Tensor.from([1, 0], [2], gpu)
-          before = host_ops(gpu)
-          Tensor.realize([input.linear(q, Tensor.from(bias, [n], gpu)), q.gather(ids)])
-          host_ops(gpu).should eq before
-        end
+  GPUS.each do |gpu|
+    it "runs on #{gpu.class}'s own kernels, with no host op" do
+      BLOCK_FORMATS.each do |dtype|
+        q = Tensor.from(w, [n, k], gpu).quantize(dtype)
+        input = Tensor.from(x, [rows, k], gpu)
+        ids = Tensor.from([1, 0], [2], gpu)
+        before = host_ops(gpu)
+        Tensor.realize([input.linear(q, Tensor.from(bias, [n], gpu)), q.gather(ids)])
+        host_ops(gpu).should eq before
       end
     end
-  {% end %}
+  end
 
   it "reads rows of x through views, and a weight sliced by rows" do
     q = Tensor.from(w, [n, k]).quantize(DType::Q4_0)
