@@ -15,6 +15,14 @@
 # file. `--quantize Q8_0` (or `Q4_0`, `Q4_1`) quantises the model's matrices
 # with tensomite's own quantiser before measuring, and its embeddings to the
 # same, or to `--embeddings TYPE` (`F32` keeps them).
+#
+# Perplexity alone can mislead: on a text a model is too sure of, noise that
+# softens its predictions scores better. `--reference PATH` also loads an
+# unquantised model and reports the mean KL divergence of this model's
+# predictions from its, `Σ p (log p - log q)` per token, which is zero only
+# when they agree:
+#
+#     crystal run --release bench/perplexity.cr -- --model models/gpt2 --quantize Q4_0 --reference models/gpt2
 require "json"
 require "option_parser"
 require "../src/tensomite/blas"
@@ -31,6 +39,7 @@ model_path, text_path, device_name = "models/gpt2", "data/shakespeare/input.txt"
 context, windows = 128, 16
 quantize = nil.as(DType?)
 embeddings = nil.as(DType?)
+reference_path = nil.as(String?)
 
 OptionParser.parse do |parser|
   parser.banner = "Usage: perplexity [options]"
@@ -39,6 +48,7 @@ OptionParser.parse do |parser|
   parser.on("--context N", "Tokens per window (#{context})") { |value| context = value.to_i }
   parser.on("--windows N", "Windows to measure (#{windows})") { |value| windows = value.to_i }
   parser.on("--quantize TYPE", "Quantise to Q8_0, Q4_0 or Q4_1 first") { |value| quantize = DType.parse(value) }
+  parser.on("--reference PATH", "Also report the KL divergence from this model's predictions") { |path| reference_path = path }
   parser.on("--embeddings TYPE", "Quantise embeddings to TYPE instead, or F32 to keep them") { |value| embeddings = DType.parse(value) }
   parser.on("--device NAME", "cpu, blas, metal or cuda (#{device_name})") { |name| device_name = name }
   parser.on("-h", "--help", "Show this help") { puts parser; exit }
@@ -84,21 +94,27 @@ def load(path : String, device : Device, quantize : DType?, embeddings : DType?)
 end
 
 forward, bpe = load(model_path, device, quantize, embeddings)
+reference = reference_path.try { |path| load(path, device, nil, nil)[0] }
 tokens = bpe.encode(File.read(text_path), special: false)
 abort "#{text_path} has #{tokens.size} tokens, fewer than #{windows} windows of #{context}" if tokens.size < windows * context
 
 start = Time.instant
-total = 0.0
+total = divergence = 0.0
 windows.times do |window|
   ids = tokens[window * context, context]
   inputs = Tensor.from(ids[0, context - 1], [1, context - 1], device)
   targets = Tensor.from(ids[1, context - 1], [context - 1], device)
-  loss = forward.call(inputs).cross_entropy(targets).to_a(Float32)[0]
-  total += loss
+  logits = forward.call(inputs)
+  total += logits.cross_entropy(targets).to_a(Float32)[0]
+  if reference
+    log_p = reference.call(inputs).log_softmax
+    divergence += (log_p.exp * (log_p - logits.log_softmax)).sum(-1).mean.to_a(Float32)[0]
+  end
   GC.collect
 end
 seconds = (Time.instant - start).total_seconds
 mean = total / windows
 name = quantize ? "#{model_path} at #{quantize}#{", embeddings #{embeddings}" if embeddings}" : model_path
-puts "#{name}: #{mean.round(4)} nats/token, perplexity #{Math.exp(mean).round(3)}, " \
+kl = reference ? ", KL divergence #{(divergence / windows).round(5)} nats/token" : ""
+puts "#{name}: #{mean.round(4)} nats/token, perplexity #{Math.exp(mean).round(3)}#{kl}, " \
      "#{windows} windows of #{context} tokens in #{seconds.round(1)} s"
