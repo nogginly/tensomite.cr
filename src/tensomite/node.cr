@@ -33,6 +33,13 @@ module Tensomite
     # broadcast. An optional third source, a contiguous `[N]` bias, is added to
     # each output after its sum, as a separate `Add` would.
     MatMul
+    # `x · wᵀ` for `F32` rows of `[..., K]` (source 0) and a block-format weight
+    # `[N, K]` (source 1), stored as GGUF stores it, with blocks along `K`. An
+    # optional third source, a contiguous `[N]` bias, is added after each sum.
+    # Each row of `x` is quantised to 8 bits per block, as ggml's CPU kernels
+    # quantise activations, and each output is a sum over blocks of integer dot
+    # products times both scales, in block order.
+    BlockMatMul
     # Elementwise 1 where `a >= b` and 0 elsewhere, in the sources' dtype.
     GreaterEqual
     # The adjoint of reading through `Node#source_view`: each output element, in the
@@ -129,12 +136,29 @@ module Tensomite
 
     # Returns a node computing *op* of *srcs*.
     #
-    # Raises `DTypeError` when a source or the result is in a block format: no
-    # op reads or makes one yet (Decision N).
+    # Raises `DTypeError` when the result is in a block format, which no op
+    # makes, or when a source is, except `BlockMatMul`'s weight and `Gather`'s
+    # table (Decision N).
     def initialize(@op : Op, @srcs : Array(Tensor), @shape, @dtype, @device, @axis = nil, @source_view = nil, @kernel = nil, @epsilon = nil, @scale = nil, @dropout = nil)
-      if dtype.block? || (block = srcs.find(&.dtype.block?))
-        raise DTypeError.new("#{op} cannot read or make #{block.try(&.dtype) || dtype} tensors")
+      raise DTypeError.new("#{op} cannot make #{dtype} tensors") if dtype.block?
+      srcs.each_with_index do |src, i|
+        next unless src.dtype.block?
+        next if i == 1 && op == Op::BlockMatMul
+        next if i == 0 && op == Op::Gather
+        raise DTypeError.new("#{op} cannot read #{src.dtype} tensors")
       end
+    end
+
+    # Returns true when a source is in a block format.
+    def reads_blocks? : Bool
+      srcs.any?(&.dtype.block?)
+    end
+
+    # Returns true when a GPU kernel may compute this node: an `F32` result,
+    # no source in a block format, and no source of more than *max_dims*
+    # dimensions. Others run on the host.
+    def gpu_eligible?(max_dims : Int32) : Bool
+      dtype.f32? && srcs.none?(&.dtype.block?) && srcs.all? { |src| src.ndim <= max_dims }
     end
 
     # Returns the options of a `Softmax` or `SoftmaxGrad` node as the GPU kernels

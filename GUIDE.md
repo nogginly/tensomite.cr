@@ -469,7 +469,7 @@ puts bpe.decode(model.generate(prompt, 64, stop: [bpe.specials["<|im_end|>"]]))
 
 An instruct model expects its chat template, ChatML for SmolLM2, as above. `generate` stops after a token in `stop:`, which it returns as the last token. `Llama` is a `Module` named as Hugging Face's file is (`model.embed_tokens`, `model.layers.0.self_attn.q_proj`, `model.norm`, and `lm_head` when the head does not share the embeddings). PyTorch stores each `Linear`'s weight as `[outputs, inputs]`, so `Module#load(path, transposed: regex)` copies the matching weights into tensomite's `[inputs, outputs]` as they load.
 
-**GGUF files.** llama.cpp's format holds a model's weights, configuration, tokeniser and chat template in one file. `Llama.load` reads one when the path ends in `.gguf`, and `BPE.from_gguf` reads its tokeniser. `scripts/fetch_smollm2_gguf.sh` downloads SmolLM2-135M-Instruct at F16, Q8_0 and Q4_0. F32, F16 and BF16 tensors load as `F32`, and quantised tensors in their block formats (below). `Llama` cannot run quantised weights yet.
+**GGUF files.** llama.cpp's format holds a model's weights, configuration, tokeniser and chat template in one file. `Llama.load` reads one when the path ends in `.gguf`, and `BPE.from_gguf` reads its tokeniser. `scripts/fetch_smollm2_gguf.sh` downloads SmolLM2-135M-Instruct at F16, Q8_0 and Q4_0. F32, F16 and BF16 tensors load as `F32`, and quantised tensors in their block formats (below), which `Llama` runs as they are.
 
 ```crystal
 file = GGUF.open("models/smollm2-135m-instruct-gguf/SmolLM2-135M-Instruct-f16.gguf")
@@ -487,7 +487,32 @@ q.dequantize                           # F32 again, within half a step of each v
 file["blk.0.attn_q.weight"].dtype      # => Q4_0, from a GGUF
 ```
 
-Block tensors are leaves: no op reads or makes them yet, and they cannot be read with `to_a`. Their only views are runs of whole rows, such as `q.slice(0, 2, 10)`. A transpose, a reshape, or a slice across a row would cut through blocks, so each raises `DTypeError`.
+Block tensors are leaves, and they cannot be read with `to_a`. Their only views are runs of whole rows, such as `q.slice(0, 2, 10)`. A transpose, a reshape, or a slice across a row would cut through blocks, so each raises `DTypeError`. Two ops read them:
+
+- `x.linear(w)` is `x · wᵀ` for a weight stored `[outputs, inputs]`, as GGUF and PyTorch store it. With a quantised `w`, each row of `x` is first quantised to 8 bits a block, as ggml's CPU code does, so each output is a sum of integer dot products, one per block, times both scales. With an `F32` `w` it is `x.matmul(w.transpose)`.
+- `table.gather(ids)` on a quantised table gives `F32` rows, each dequantised.
+
+`model.quantize(DType::Q8_0)` quantises every `Linear` in a model. Add `embeddings: true` to quantise its `Embedding` tables too. A quantised `Linear` holds its weight `[outputs, inputs]`, so each output's inputs are whole blocks. Gradients do not pass through quantised weights: train at `F32`, then quantise.
+
+```crystal
+model = GPT2.load("models/gpt2/model.safetensors").quantize(DType::Q8_0)
+model = Llama.load("models/smollm2-135m-instruct-gguf/SmolLM2-135M-Instruct-Q4_0.gguf")
+```
+
+`bench/perplexity.cr` measures what quantisation costs. With `--reference`, it also reports the KL divergence of the quantised model's predictions from the unquantised model's. That is the better measure: on a text a model is too sure of, noise that softens its predictions lowers perplexity. Quantised GPT-2 scores *better* than F32 on Shakespeare for that reason. Some results, from 16 windows of 128 tokens of Shakespeare:
+
+Model                                      |Perplexity|KL from F32, nats/token
+-------------------------------------------|----------|-----------------------
+SmolLM2 at F32                             |60.7      |0                      
+SmolLM2 at Q8_0                            |61.0      |0.005                  
+SmolLM2 at Q4_0, llama.cpp's file          |68.0      |0.154                  
+GPT-2 at F32                               |139.4     |0                      
+GPT-2, matrices at Q4_0                    |126.6     |0.080                  
+GPT-2, matrices at Q4_0, embeddings at Q8_0|124.3     |0.132                  
+
+Embeddings are the most sensitive part. GPT-2's token table doubles as its output head: at Q8_0 it adds about 0.05 to the KL divergence, and at Q4_0 it sends perplexity into the thousands. So `quantize` leaves embeddings alone unless asked, as llama.cpp keeps them at 8 bits or more.
+
+
 
 llama.cpp's converter reorders each head's query and key rows, so that its rotary embeddings rotate adjacent features, `(2i, 2i + 1)`. `Llama.load` reorders them back to Hugging Face's halves, `(i, i + width/2)`, so a GGUF at F32 gives exactly the logits of the safetensors model it came from.
 

@@ -16,7 +16,8 @@ and greedy continuation of a ChatML prompt; the model is not committed.
 `quant` records what gguf-py's reference quantisers, which match ggml's
 bit for bit, make of fixed rows: random values, ties, constant and zero
 blocks, as hex bytes and dequantised values for Q8_0, Q4_0 and Q4_1.
-`tiny_gguf` writes `tiny_llama` and `tokenizer` as GGUF files, at F32 and F16,
+`tiny_gguf` writes `tiny_llama` and `tokenizer` as GGUF files, at F32, F16,
+Q8_0 and Q4_0 (every matrix quantised, the norms kept at F32),
 as llama.cpp's converter does, with each head's query and key rows reordered.
 `tiny_llama` builds a randomly initialised 2-layer Llama, with grouped queries
 and an untied head, over `tokenizer`'s vocabulary, and records its logits.
@@ -268,7 +269,7 @@ def tiny_gguf():
         "self_attn.o_proj": "attn_output", "mlp.gate_proj": "ffn_gate", "mlp.up_proj": "ffn_up",
         "mlp.down_proj": "ffn_down",
     }
-    for suffix, kind in (("", np.float32), ("-f16", np.float16)):
+    for suffix, kind in (("", np.float32), ("-f16", np.float16), ("-q8_0", "Q8_0"), ("-q4_0", "Q4_0")):
         writer = gguf.GGUFWriter(str(source / f"model{suffix}.gguf"), "llama")
         writer.add_name("tiny llama")
         writer.add_block_count(config["num_hidden_layers"])
@@ -300,7 +301,13 @@ def tiny_gguf():
             else:
                 key = {"model.embed_tokens.weight": "token_embd.weight", "model.norm.weight": "output_norm.weight",
                        "lm_head.weight": "output.weight"}[name]
-            writer.add_tensor(key, tensor.astype(np.float32 if tensor.ndim == 1 else kind))
+            if tensor.ndim == 1:
+                writer.add_tensor(key, tensor.astype(np.float32))
+            elif isinstance(kind, str):
+                qtype = getattr(gguf.GGMLQuantizationType, kind)
+                writer.add_tensor(key, gguf.quants.quantize(tensor.astype(np.float32), qtype), raw_dtype=qtype)
+            else:
+                writer.add_tensor(key, tensor.astype(kind))
         writer.write_header_to_file()
         writer.write_kv_data_to_file()
         writer.write_tensors_to_file()

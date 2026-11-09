@@ -44,15 +44,52 @@ module Tensomite
       Tensor.lazy(Node.new(Op::Write, [self, value], shape, dtype, device, source_view: region))
     end
 
+    # Raises unless *weight* and *bias* can apply to these rows in `#linear`.
+    private def check_linear(weight : Tensor, bias : Tensor?) : Nil
+      (bias ? {weight, bias} : {weight}).each do |other|
+        raise DeviceError.new("linear of tensors on different devices") unless device.same?(other.device)
+      end
+      raise DTypeError.new("linear needs F32 rows, not #{dtype}") unless dtype.f32?
+      unless ndim >= 1 && weight.ndim == 2 && shape[-1] == weight.shape[1]
+        raise ShapeError.new("cannot apply a #{weight.shape} weight to #{shape}")
+      end
+      n = weight.shape[0]
+      if bias && !(bias.shape == [n] && bias.dtype.f32?)
+        raise ShapeError.new("a bias for #{n} outputs must be F32 [#{n}], not #{bias.dtype} #{bias.shape}")
+      end
+    end
+
     # Returns the rows of this 2-D table selected by *ids*, an `I32` tensor of any shape.
-    # The result has shape `ids.shape + [width]`.
+    # The result has shape `ids.shape + [width]`. A block-format table gives
+    # `F32` rows, each dequantised.
     #
     # An id outside the table raises `ExecutionError` when the result is realised.
     def gather(ids : Tensor) : Tensor
       raise ShapeError.new("gather needs a 2-D table, not #{shape}") unless ndim == 2
       raise DTypeError.new("gather ids must be I32, not #{ids.dtype}") unless ids.dtype.i32?
       raise DeviceError.new("gather of tensors on different devices") unless device.same?(ids.device)
-      Tensor.lazy(Node.new(Op::Gather, [self, ids], ids.shape + [shape[1]], dtype, device))
+      Tensor.lazy(Node.new(Op::Gather, [self, ids], ids.shape + [shape[1]], dtype.block? ? DType::F32 : dtype, device))
+    end
+
+    # Returns `x · weightᵀ (+ bias)` for rows `x` of `[..., K]` and *weight* of
+    # `[N, K]`, as PyTorch's `linear` does, so a weight stored as GGUF and
+    # PyTorch store it, `[outputs, inputs]`, needs no transpose.
+    #
+    # With a block-format weight it is one `BlockMatMul`, which quantises each
+    # row of `x` to 8 bits; with an `F32` weight it is
+    # `matmul(weight.transpose, bias)`.
+    #
+    # ```
+    # w = Tensor.from(values, [1536, 576]).quantize(DType::Q4_0)
+    # x.linear(w) # [rows, 1536]
+    # ```
+    def linear(weight : Tensor, bias : Tensor? = nil) : Tensor
+      return matmul(weight.transpose, bias) unless weight.dtype.block?
+      check_linear(weight, bias)
+      n = weight.shape[0]
+      srcs = [self, weight]
+      srcs << (bias.view.contiguous? ? bias : bias.contiguous) if bias
+      Tensor.lazy(Node.new(Op::BlockMatMul, srcs, shape[0...-1] + [n], DType::F32, device))
     end
 
     # Returns the matrix product over the last two dimensions, `[..., M, K]` by

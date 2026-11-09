@@ -27,6 +27,21 @@ module Tensomite
       Tensor.from(values, shape, device)
     end
 
+    # Returns a new realised leaf of this block-format tensor's rows in *order*:
+    # row `i` of the result is row `order[i]` of this one.
+    def take_rows(order : Array(Int32)) : Tensor
+      raise DTypeError.new("take_rows is for block formats, not #{dtype}") unless dtype.block?
+      rows, width = shape[0], shape[1..].product(1)
+      row_bytes = dtype.bytes_for(width)
+      source = block_bytes
+      bytes = Bytes.new(order.size * row_bytes)
+      order.each_with_index do |row, i|
+        raise IndexError.new("row #{row} of #{rows}") unless 0 <= row < rows
+        source[row * row_bytes, row_bytes].copy_to(bytes[i * row_bytes, row_bytes])
+      end
+      Tensor.from_blocks(bytes, [order.size] + shape[1..], dtype, device)
+    end
+
     # Returns a realised leaf of *dtype*, a block format, holding *bytes*, its
     # blocks row by row.
     def self.from_blocks(bytes : Bytes, shape : Array(Int32), dtype : DType, device : Device = CPU.default) : Tensor
