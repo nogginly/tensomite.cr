@@ -44,6 +44,124 @@ module Tensomite
       end
     end
 
+    # Writes `x · wᵀ` into *dst*, `[rows, n]`, for *x*, `rows` rows of *k*
+    # values, and *w*, `n` rows of *k* values in *dtype*, as ggml's reference
+    # dot products compute it.
+    #
+    # 1. Quantises each row of *x* once, block by block: to `Q8_0` for `Q8_0`
+    #    and `Q4_0` weights, and to `Q8_1` (which also keeps `d · Σq` in `F16`)
+    #    for `Q4_1`.
+    # 2. For each output, sums the blocks in order: the integer dot product of
+    #    the block's quantised values, times the weight's and the activation's
+    #    scales, plus, for `Q4_1`, the weight's minimum times the activation's
+    #    `d · Σq`.
+    #
+    # Each output depends only on its own row and column, so the bits do not
+    # change with the number of rows.
+    def matmul(dtype : DType, x : Slice(Float32), w : Bytes, rows : Int32, n : Int32, k : Int32, dst : Slice(Float32)) : Nil
+      blocks = k // DType.block_size
+      row_bytes = dtype.bytes_for(k)
+      scales = Slice(Float32).new(blocks)
+      sums = Slice(Float32).new(blocks)
+      qs = Slice(Int8).new(k)
+      raise ArgumentError.new("#{w.size} bytes do not hold #{n} rows of #{k} #{dtype} values") unless w.size == n * row_bytes
+      raise ArgumentError.new("#{x.size} values are not #{rows} rows of #{k}") unless x.size == rows * k && dst.size == rows * n
+      rows.times do |row|
+        quantize_activations(x[row * k, k], scales, sums, qs, with_sums: dtype.q4_1?)
+        n.times do |col|
+          weight = w[col * row_bytes, row_bytes]
+          dst[row * n + col] = case dtype
+                               when .q8_0? then dot_q8_0(weight, scales, qs, blocks)
+                               when .q4_0? then dot_q4_0(weight, scales, qs, blocks)
+                               when .q4_1? then dot_q4_1(weight, scales, sums, qs, blocks)
+                               else             raise DTypeError.new("#{dtype} is not a block format")
+                               end
+        end
+      end
+    end
+
+    # Writes rows *ids* of *table*, rows of *width* values in *dtype*, into
+    # *dst* as `F32`.
+    def gather(dtype : DType, table : Bytes, width : Int32, ids : Enumerable(Int32), dst : Slice(Float32)) : Nil
+      row_bytes = dtype.bytes_for(width)
+      ids.each_with_index do |id, i|
+        dequantize(dtype, table[id * row_bytes, row_bytes], dst[i * width, width])
+      end
+    end
+
+    # Quantises *x* to 8 bits per block, as ggml's `quantize_row_q8_0` and
+    # `quantize_row_q8_1` do: each block's scale is its largest magnitude over
+    # 127, kept in `F16`, and each value is rounded halves away from zero. With
+    # *with_sums*, each block's `d · Σq`, also in `F16`, goes into *sums*.
+    private def quantize_activations(x : Slice(Float32), scales : Slice(Float32), sums : Slice(Float32), qs : Slice(Int8), with_sums : Bool) : Nil
+      scales.size.times do |block|
+        values = x[block * 32, 32]
+        d = values.max_of(&.abs) / 127.0_f32
+        id = d == 0 ? 0.0_f32 : 1.0_f32 / d
+        total = 0
+        32.times do |j|
+          q = (values[j] * id).round(:ties_away).to_i8!
+          qs[block * 32 + j] = q
+          total += q
+        end
+        scales[block] = F16.new(d).to_f32
+        sums[block] = F16.new(total.to_f32 * d).to_f32 if with_sums
+      end
+    end
+
+    # The three dot products read through pointers: `matmul` has checked that
+    # the weight row holds `blocks` blocks and the activations as many.
+    private def dot_q8_0(w : Bytes, scales : Slice(Float32), qs : Slice(Int8), blocks : Int32) : Float32
+      sum = 0.0_f32
+      wp, sp, qp = w.to_unsafe, scales.to_unsafe, qs.to_unsafe
+      blocks.times do |block|
+        base = wp + block * 34
+        qb = qp + block * 32
+        total = 0
+        32.times { |j| total += base[2 + j].to_i8!.to_i32 * qb[j] }
+        sum += total.to_f32 * (half(base) * sp[block])
+      end
+      sum
+    end
+
+    private def dot_q4_0(w : Bytes, scales : Slice(Float32), qs : Slice(Int8), blocks : Int32) : Float32
+      sum = 0.0_f32
+      wp, sp, qp = w.to_unsafe, scales.to_unsafe, qs.to_unsafe
+      blocks.times do |block|
+        base = wp + block * 18
+        qb = qp + block * 32
+        low = high = 0
+        16.times do |j|
+          packed = base[2 + j]
+          low += ((packed & 0x0f).to_i32 - 8) * qb[j]
+          high += ((packed >> 4).to_i32 - 8) * qb[j + 16]
+        end
+        sum += (low + high).to_f32 * half(base) * sp[block]
+      end
+      sum
+    end
+
+    private def dot_q4_1(w : Bytes, scales : Slice(Float32), sums : Slice(Float32), qs : Slice(Int8), blocks : Int32) : Float32
+      sum = 0.0_f32
+      wp, sp, mp, qp = w.to_unsafe, scales.to_unsafe, sums.to_unsafe, qs.to_unsafe
+      blocks.times do |block|
+        base = wp + block * 20
+        qb = qp + block * 32
+        low = high = 0
+        16.times do |j|
+          packed = base[4 + j]
+          low += (packed & 0x0f).to_i32 * qb[j]
+          high += (packed >> 4).to_i32 * qb[j + 16]
+        end
+        sum += (half(base) * sp[block]) * (low + high).to_f32 + half(base + 2) * mp[block]
+      end
+      sum
+    end
+
+    private def half(at : UInt8*) : Float32
+      F16.from_bits(at[0].to_u16 | at[1].to_u16 << 8).to_f32
+    end
+
     # The scale is the largest magnitude over 127; each value is rounded to
     # the nearest integer of the scale, halves away from zero.
     private def quantize_q8_0(x : Slice(Float32), target : Bytes) : Nil

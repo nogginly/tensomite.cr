@@ -470,10 +470,10 @@ module Tensomite
     end
 
     # Queues the kernel for *node* and returns true, or returns false when it has
-    # none: an op not yet ported, a dtype other than `F32`, a view of more than 8
+    # none: an op not yet ported, a dtype other than `F32`, a block-format source, a view of more than 8
     # dimensions, or a view `Unview` cannot invert.
     private def launch(kernels : Kernels, node : Node, output : CUDABuffer) : Bool
-      return false unless node.dtype.f32? && node.srcs.all? { |src| src.ndim <= MAX_DIMS }
+      return false unless node.gpu_eligible?(MAX_DIMS)
       case node.op
       when Op::Sum, Op::Max                                                                                   then launch_reduce(kernels, node, output)
       when Op::Cat                                                                                            then launch_cat(kernels, node, output)

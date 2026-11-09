@@ -111,6 +111,7 @@ module Tensomite
       in Op::Write        then copy_into(T, node.srcs.last, node.source_view || raise(Error.new("write needs a region")), dst)
       in Op::Gather       then gather(T, node, dst)
       in Op::MatMul       then matmul(T, node, dst)
+      in Op::BlockMatMul  then block_matmul(node, Slice.new(dst.to_unsafe.as(Float32*), dst.size))
       in Op::GreaterEqual then binary(T, node, dst) { |x, y| x >= y ? T.new(1) : T.zero }
       in Op::Unview       then unview(T, node, dst)
       in Op::ScatterAdd   then scatter_add(T, node, dst)
@@ -471,6 +472,7 @@ module Tensomite
     private def gather(type : T.class, node : Node, dst : Slice(T)) : Nil forall T
       table, ids = node.srcs
       rows, width = table.shape
+      return block_gather(node, Slice.new(dst.to_unsafe.as(Float32*), dst.size)) if table.dtype.block?
       xs = elements(T, table)
       idx = elements(Int32, ids)
       ids.size.times do |i|
@@ -481,6 +483,33 @@ module Tensomite
         pos, stride = table.view.offset_of(id * width), table.view.run_stride
         width.times { |j| dst[i * width + j] = xs[pos + j * stride] }
       end
+    end
+
+    # Gathers rows of a block-format table, dequantising each (see `Quant.gather`).
+    private def block_gather(node : Node, dst : Slice(Float32)) : Nil
+      table, ids = node.srcs
+      rows, width = table.shape
+      idx = elements(Int32, ids)
+      chosen = Array(Int32).new(ids.size) do |i|
+        id = idx[ids.view.offset_of(i)]
+        raise ExecutionError.new("index #{id} out of range for #{rows} rows") unless 0 <= id < rows
+        id + table.view.offset // width
+      end
+      Quant.gather(table.dtype, own(table.node.buffer!).bytes, width, chosen, dst)
+    end
+
+    # Computes `x · wᵀ` for a block-format weight (see `Quant.matmul`), then adds
+    # the bias, if any.
+    private def block_matmul(node : Node, dst : Slice(Float32)) : Nil
+      x, w = node.srcs[0], node.srcs[1]
+      n, k = w.shape
+      rows = x.size // k
+      xs = elements(Float32, x)
+      values = Slice(Float32).new(x.size) { |i| xs[x.view.offset_of(i)] }
+      weights = own(w.node.buffer!).bytes
+      start = w.dtype.bytes_for(w.view.offset)
+      Quant.matmul(w.dtype, values, weights[start, w.dtype.bytes_for(w.size)], rows, n, k, dst)
+      add_bias(Float32, node, dst)
     end
 
     # Computes each output as a dot product over `k`, added in index order.

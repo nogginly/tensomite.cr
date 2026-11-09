@@ -198,6 +198,36 @@ module Tensomite
       raise Error.new("#{file.path} has #{extra.join(", ")}, which the model lacks") unless extra.empty?
     end
 
+    # Quantises the weights of every `Linear` in this module to *dtype*, a block
+    # format, and, with *embeddings*, every `Embedding`'s table, and returns
+    # `self`. Parts whose name in the module matches *except* stay as they are.
+    #
+    # ```
+    # GPT2.load("models/gpt2/model.safetensors").quantize(DType::Q8_0, embeddings: true)
+    # ```
+    def quantize(dtype : DType, embeddings : Bool = false, except : Regex? = nil) : self
+      modules.each do |name, part|
+        next if except.try(&.matches?(name))
+        case part
+        when Linear    then part.quantize(dtype)
+        when Embedding then part.quantize(dtype) if embeddings
+        end
+      end
+      self
+    end
+
+    # Returns this module's descendant modules, each with its name in this
+    # module, parents before their children.
+    def modules(prefix : String = "", result : Array({String, Module}) = [] of {String, Module}) : Array({String, Module})
+      each_child do |name, child|
+        next unless child.is_a?(Module)
+        path = prefix.empty? ? name : "#{prefix}.#{name}"
+        result << {path, child}
+        child.modules(path, result)
+      end
+      result
+    end
+
     # Moves every parameter to *device*, and returns `self`.
     def to(device : Device) : self
       params.each { |param| param.value = param.value.to(device) }

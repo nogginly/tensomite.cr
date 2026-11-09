@@ -4,6 +4,9 @@ module Tensomite
   # The weight is `[inputs, outputs]`, drawn from *init*: by default uniformly
   # from ±1/√inputs, as PyTorch does, so outputs start at about the size of
   # inputs. The bias, if any, starts at zero and is not decayed.
+  #
+  # A quantised weight, from `#quantize` or a GGUF file, is held as GGUF holds
+  # it, `[outputs, inputs]` in a block format, and applied with `Tensor#linear`.
   class Linear < Layer
     getter weight : Parameter
     getter bias : Parameter?
@@ -16,7 +19,18 @@ module Tensomite
     end
 
     def forward(x : Tensor) : Tensor
-      x.matmul(weight.value, bias.try(&.value))
+      value = weight.value
+      value.dtype.block? ? x.linear(value, bias.try(&.value)) : x.matmul(value, bias.try(&.value))
+    end
+
+    # Replaces the weight with its transpose quantised to *dtype*, a block
+    # format, so that each output's inputs are whole blocks. The inputs must be
+    # a multiple of 32.
+    def quantize(dtype : DType) : Nil
+      value = weight.value
+      return if value.dtype == dtype
+      raise DTypeError.new("#{value.dtype} weights cannot be quantised again") if value.dtype.block?
+      weight.value = value.transpose.contiguous.quantize(dtype)
     end
   end
 
@@ -34,6 +48,14 @@ module Tensomite
     # Returns `[*ids.shape, width]` for ids of any shape.
     def forward(x : Tensor) : Tensor
       weight.value.gather(x)
+    end
+
+    # Replaces the table with itself quantised to *dtype*, a block format; the
+    # width must be a multiple of 32. Lookups then dequantise the rows they read.
+    def quantize(dtype : DType) : Nil
+      return if weight.value.dtype == dtype
+      raise DTypeError.new("#{weight.value.dtype} tables cannot be quantised again") if weight.value.dtype.block?
+      weight.value = weight.value.quantize(dtype)
     end
   end
 

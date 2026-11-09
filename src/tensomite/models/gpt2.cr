@@ -132,12 +132,12 @@ module Tensomite
         raise ShapeError.new("#{length} positions exceed the context of #{config.context}")
       end
       x = Tensomite.scope("embedding") do
-        (@wte.call(ids) + @wpe.weight.value.slice(0, 0, length)).reshape([batch * length, config.width])
+        (@wte.call(ids) + positions(0, length)).reshape([batch * length, config.width])
       end
       x = dropout.call(x) if dropout
       mask = Tensor.causal_mask(length, length, device).named("causal mask")
       @h.each { |block| x = block.call(x, mask, dropout: dropout) }
-      Tensomite.scope("head") { @ln_f.call(x).matmul(@wte.weight.value.transpose) }
+      Tensomite.scope("head") { @ln_f.call(x).linear(@wte.weight.value) }
     end
 
     # Returns the unrealised logits of *ids* from an empty cache, for diagrams
@@ -165,6 +165,14 @@ module Tensomite
       generate(prompt, count, sampler) { }
     end
 
+    # Returns the embeddings of positions `start...start + count`: a slice of
+    # the table, or, when it is quantised, a lookup that dequantises its rows.
+    private def positions(start : Int32, count : Int32) : Tensor
+      table = @wpe.weight.value
+      return table.slice(0, start, start + count) unless table.dtype.block?
+      @wpe.call(Tensor.from(Array.new(count) { |i| start + i }, [count], device).named("positions"))
+    end
+
     # Returns the logits of *ids* after the positions in *cache*, unrealised, and
     # appends their keys and values to it; `#forward` advances it after realising.
     private def logits(ids : Array(Int32), cache : Cache) : Tensor
@@ -174,11 +182,11 @@ module Tensomite
         raise ShapeError.new("#{past + count} positions exceed the context of #{config.context}")
       end
       x = Tensomite.scope("embedding") do
-        @wte.call(Tensor.from(ids, [count], device).named("ids")) + @wpe.weight.value.slice(0, past, past + count)
+        @wte.call(Tensor.from(ids, [count], device).named("ids")) + positions(past, count)
       end
       mask = Tensor.causal_mask(count, past + count, device).named("causal mask")
       @h.each_with_index { |block, layer| x = block.call(x, mask, cache.layers[layer]) }
-      Tensomite.scope("head") { @ln_f.call(x).matmul(@wte.weight.value.transpose) }
+      Tensomite.scope("head") { @ln_f.call(x).linear(@wte.weight.value) }
     end
   end
 end

@@ -174,8 +174,9 @@ module Tensomite
     # 3. Undoes llama.cpp's reordering of each head's query and key rows,
     #    which pairs features `(2i, 2i + 1)` for its own rotary embeddings,
     #    back to Hugging Face's `(i, i + width/2)`.
-    # 4. Transposes each `Linear`'s weight, stored `[outputs, inputs]`, into
-    #    tensomite's `[inputs, outputs]`.
+    # 4. Transposes each `F32` `Linear` weight, stored `[outputs, inputs]`, into
+    #    tensomite's `[inputs, outputs]`. Quantised weights stay as they are
+    #    stored, which is the layout `Linear` applies them in.
     def self.load(file : GGUF, device : Device = CPU.default) : Llama
       config = config(file)
       model = new(config, Builder.new(device: device, init: Init.placeholder))
@@ -184,24 +185,33 @@ module Tensomite
         key = gguf_name(name)
         raise Error.new("#{file.path} lacks #{key}") unless file.has_key?(key)
         used << key
-        if (kind = file.entries[key].kind).quantised?
-          raise DTypeError.new("#{key}: Llama cannot run #{kind} weights yet")
-        end
         value = file[key, device]
         if TRANSPOSED.matches?(name)
           heads = name.ends_with?("q_proj.weight") ? config.heads : name.ends_with?("k_proj.weight") ? config.kv_heads : nil
-          if heads
-            rows, inputs = value.shape
-            value = value.reshape([heads, rows // heads // 2, 2, inputs]).permute([0, 2, 1, 3]).reshape([rows, inputs])
-          end
-          value = value.transpose.contiguous.detach
+          value = unpermute(value, heads) if heads
+          value = value.transpose.contiguous.detach unless value.dtype.block?
         end
-        raise ShapeError.new("#{key}: #{file.path} holds #{value.shape}, the model #{param.shape}") unless value.shape == param.shape
+        expected = value.dtype.block? && TRANSPOSED.matches?(name) ? param.shape.reverse : param.shape
+        raise ShapeError.new("#{key}: #{file.path} holds #{value.shape}, the model #{expected}") unless value.shape == expected
         param.value = value
       end
       extra = file.names.reject { |key| used.includes?(key) }
       raise Error.new("#{file.path} has #{extra.join(", ")}, which the model lacks") unless extra.empty?
       model
+    end
+
+    # Returns *weight*, `[heads × head width, inputs]`, with each head's rows
+    # reordered from llama.cpp's rotary layout, in which features `2i` and
+    # `2i + 1` are paired, to Hugging Face's, in which `i` and `i + width/2` are.
+    protected def self.unpermute(weight : Tensor, heads : Int32) : Tensor
+      rows, inputs = weight.shape
+      half = rows // heads // 2
+      unless weight.dtype.block?
+        return weight.reshape([heads, half, 2, inputs]).permute([0, 2, 1, 3]).reshape([rows, inputs])
+      end
+      order = [] of Int32
+      heads.times { |head| 2.times { |pair| half.times { |i| order << head * 2 * half + 2 * i + pair } } }
+      weight.take_rows(order)
     end
 
     # Returns a model of *config*'s sizes, its parts made by *build*.
@@ -290,7 +300,7 @@ module Tensomite
         if lm_head = @lm_head
           lm_head.call(normed)
         else
-          normed.matmul(@model.embed_tokens.weight.value.transpose)
+          normed.linear(@model.embed_tokens.weight.value)
         end
       end
     end

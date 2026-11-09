@@ -356,10 +356,10 @@ module Tensomite
     end
 
     # Encodes *node* as GPU work and returns true, or returns false when it has no
-    # Metal kernel: an op not yet ported, a dtype other than `F32`, a view of more
+    # Metal kernel: an op not yet ported, a dtype other than `F32`, a block-format source, a view of more
     # than 8 dimensions, or a view `Unview` cannot invert.
     private def encode(node : Node, output : MetalBuffer) : Bool
-      return false unless node.dtype.f32? && node.srcs.all? { |src| src.ndim <= MAX_DIMS }
+      return false unless node.gpu_eligible?(MAX_DIMS)
       case node.op
       when Op::Sum, Op::Max                                                                                   then encode_reduce(node, output)
       when Op::Cat                                                                                            then encode_cat(node, output)

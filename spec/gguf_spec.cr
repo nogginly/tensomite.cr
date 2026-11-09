@@ -86,6 +86,13 @@ describe "M10: SmolLM2-135M-Instruct from GGUF" do
       model = Llama.load(file, BLAS.default)
       model.generate(prompt, 20).should eq greedy.first(20)
     end
+    q8_0 = path.sub(/-f16\.gguf$/, "-Q8_0.gguf")
+    if File.exists?(q8_0)
+      it "answers greedily at Q8_0 as PyTorch does at F32" do
+        model = Llama.load(q8_0, BLAS.default)
+        model.generate(prompt, 20).should eq greedy.first(20)
+      end
+    end
   else
     pending "needs TENSOMITE_SMOLLM2_GGUF, an F16 GGUF of SmolLM2-135M-Instruct (see scripts/fetch_smollm2_gguf.sh)"
   end
