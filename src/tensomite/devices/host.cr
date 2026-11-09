@@ -115,7 +115,8 @@ module Tensomite
       in Op::GreaterEqual then binary(T, node, dst) { |x, y| x >= y ? T.new(1) : T.zero }
       in Op::Unview       then unview(T, node, dst)
       in Op::ScatterAdd   then scatter_add(T, node, dst)
-      in Op::Softmax, Op::SoftmaxGrad, Op::LogSoftmax, Op::LogSoftmaxGrad, Op::LayerNorm, Op::LayerNormGrad
+      in Op::Rope         then rope(node, Slice.new(dst.to_unsafe.as(Float32*), dst.size))
+      in Op::Softmax, Op::SoftmaxGrad, Op::LogSoftmax, Op::LogSoftmaxGrad, Op::LayerNorm, Op::LayerNormGrad, Op::RMSNorm
         rows(node, Slice.new(dst.to_unsafe.as(Float32*), dst.size))
       in Op::Dropout then dropout(node, Slice.new(dst.to_unsafe.as(Float32*), dst.size))
       in Op::Kernel
@@ -304,12 +305,12 @@ module Tensomite
           end
           n.times { |j| total += row_out[j] }
           n.times { |j| row_out[j] = row_out[j] / total }
-        when Op::SoftmaxGrad
-          softmax_grad_row(node, xs, pos, stride, dst, base, n)
-        when Op::LogSoftmaxGrad
-          log_softmax_grad_row(node, xs, pos, stride, dst, base, n)
+        when Op::SoftmaxGrad, Op::LogSoftmaxGrad
+          gradient_row(node, xs, pos, stride, dst, base, n)
         when Op::LayerNormGrad
           layernorm_grad_row(node, dst, base, n)
+        when Op::RMSNorm
+          rmsnorm_row(node, xs, pos, stride, dst, base, n)
         when Op::LogSoftmax
           HostDevice.check_run(pos, n, stride, xs.size) { describe(node) }
           row_in, row_out = xs.to_unsafe + pos, dst.to_unsafe + base
@@ -359,6 +360,47 @@ module Tensomite
       total = 0f32
       n.times { |j| total += row_out[j] }
       n.times { |j| row_out[j] = row_out[j] / total }
+    end
+
+    # Writes `x / √(Σx²/n + ε) · w` for the row at *base*: the sum of squares
+    # folded from zero, then each operation rounded as the composite's op would.
+    private def rmsnorm_row(node : Node, xs : Slice(Float32), pos : Int32, stride : Int32,
+                            dst : Slice(Float32), base : Int32, n : Int32) : Nil
+      weight = node.srcs[1]
+      ws, pw, sw = elements(Float32, weight), weight.view.offset_of(base), weight.view.run_stride
+      epsilon = node.epsilon || raise Error.new("rmsnorm needs an epsilon")
+      squares = 0f32
+      n.times { |j| squares += xs[pos + j * stride] * xs[pos + j * stride] }
+      root = Math.sqrt(squares / n.to_f32 + epsilon)
+      row_out = dst.to_unsafe + base
+      n.times { |j| row_out[j] = xs[pos + j * stride] / root * ws[pw + j * sw] }
+    end
+
+    # Writes `x · cos + rotate_half(x) · sin` for each element, where
+    # `rotate_half(x)` at a column of the first half is the element half a row
+    # on, times -1, and at a column of the second half the element half a row
+    # back, as the composite's ops compute it.
+    private def rope(node : Node, dst : Slice(Float32)) : Nil
+      x, cos, sin = node.srcs
+      xs, cs, ss = elements(Float32, x), elements(Float32, cos), elements(Float32, sin)
+      n = node.shape.last
+      half = n // 2
+      dst.size.times do |i|
+        col = i % n
+        partner = xs[x.view.offset_of(col < half ? i + half : i - half)]
+        rotated = col < half ? partner * -1f32 : partner
+        dst[i] = xs[x.view.offset_of(i)] * cs[cos.view.offset_of(i)] + rotated * ss[sin.view.offset_of(i)]
+      end
+    end
+
+    # Writes the row at *base* of a softmax's or log-softmax's gradient.
+    private def gradient_row(node : Node, gs : Slice(Float32), pg : Int32, sg : Int32,
+                             dst : Slice(Float32), base : Int32, n : Int32) : Nil
+      if node.op == Op::SoftmaxGrad
+        softmax_grad_row(node, gs, pg, sg, dst, base, n)
+      else
+        log_softmax_grad_row(node, gs, pg, sg, dst, base, n)
+      end
     end
 
     # Writes `y · (g - Σ g·y)`, times the scale when the node has one, for the

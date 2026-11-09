@@ -235,7 +235,7 @@ module Tensomite
       unless x.shape[-1] == width && start + length <= context
         raise ShapeError.new("rotary embeddings of width #{width} and context #{context} cannot rotate #{x.shape} from #{start}")
       end
-      x * @cos.slice(0, start, start + length) + x.rotate_half * @sin.slice(0, start, start + length)
+      x.rope(@cos.slice(0, start, start + length), @sin.slice(0, start, start + length))
     end
   end
 

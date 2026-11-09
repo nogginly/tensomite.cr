@@ -148,18 +148,18 @@ a.matmul(w, Tensor.from([0.5f32, -1f32], [2])).to_a(Float32)   # => [4.5, 4.0, 1
 
 ## Neural-network building blocks
 
-Method                               |Use                                                                                              
--------------------------------------|-------------------------------------------------------------------------------------------------
-`gelu`                               |the GELU activation (tanh approximation), as in GPT-2                                            
-`softmax(axis = -1)`                 |turns scores into probabilities that sum to 1                                                    
-`softmax(scale: s, mask: m)`         |the softmax of `x · s + m`, as attention takes it, in one fused op                               
-`log_softmax(axis = -1)`             |the log of `softmax`, computed stably                                                            
-`layernorm(weight, bias, eps = 1e-5)`|normalises each row to mean 0 and variance 1, then scales and shifts                             
-`rmsnorm(weight, eps = 1e-5)`        |divides each row by its root mean square, then scales, as in Llama                               
-`silu`, `swiglu(up)`                 |SiLU, `x · sigmoid(x)`, and Llama's gate `silu(x) · up`, each one fused kernel                   
-`rotate_half`                        |swaps the last axis's halves and negates the first, `[x₁, x₂] → [-x₂, x₁]`, for rotary embeddings
-`cross_entropy(targets)`             |the mean loss of `[n, classes]` scores against `[n]` `I32` class indices                         
-`Tensor.causal_mask(rows, cols)`     |0 where a position may look, -∞ where it may not, for attention                                  
+Method                               |Use                                                                                                                                                
+-------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------
+`gelu`                               |the GELU activation (tanh approximation), as in GPT-2                                                                                              
+`softmax(axis = -1)`                 |turns scores into probabilities that sum to 1                                                                                                      
+`softmax(scale: s, mask: m)`         |the softmax of `x · s + m`, as attention takes it, in one fused op                                                                                 
+`log_softmax(axis = -1)`             |the log of `softmax`, computed stably                                                                                                              
+`layernorm(weight, bias, eps = 1e-5)`|normalises each row to mean 0 and variance 1, then scales and shifts                                                                               
+`rmsnorm(weight, eps = 1e-5)`        |divides each row by its root mean square, then scales, as in Llama, in one fused op                                                                
+`silu`, `swiglu(up)`                 |SiLU, `x · sigmoid(x)`, and Llama's gate `silu(x) · up`, each one fused kernel                                                                     
+`rotate_half`, `rope(cos, sin)`      |swaps the last axis's halves and negates the first, `[x₁, x₂] → [-x₂, x₁]`; and `x · cos + rotate_half(x) · sin`, rotary embeddings in one fused op
+`cross_entropy(targets)`             |the mean loss of `[n, classes]` scores against `[n]` `I32` class indices                                                                           
+`Tensor.causal_mask(rows, cols)`     |0 where a position may look, -∞ where it may not, for attention                                                                                    
 
 ```crystal
 logits = Tensor.from([1, 2, 3].map(&.to_f32), [1, 3])

@@ -153,6 +153,11 @@ module Tensomite
         [Tensor.lazy(Node.new(Op::LogSoftmaxGrad, [g, result], result.shape, result.dtype, result.device))] of Tensor?
       in Op::LayerNorm
         layernorm_backward(node, g)
+      in Op::RMSNorm
+        rmsnorm_backward(node, g)
+      in Op::Rope
+        _, cos, sin = srcs
+        [g * cos + (g * sin).rotate_half_transposed, nil, nil] of Tensor?
       in Op::Kernel
         kernel = node.kernel || raise Error.new("kernel node without a kernel")
         srcs.map_with_index do |_, i|
@@ -181,6 +186,19 @@ module Tensomite
       dx = Tensor.lazy(Node.new(Op::LayerNormGrad, [g, x, weight], x.shape, x.dtype, x.device, epsilon: epsilon))
       normalised = Tensor.lazy(Node.new(Op::LayerNormGrad, [x], x.shape, x.dtype, x.device, epsilon: epsilon))
       [dx, g * normalised, g] of Tensor?
+    end
+
+    # Returns the gradients of a fused RMS norm's input and weight, as composites
+    # of primitives: with `r = √(mean(x²) + ε)` and `ĝ = g · w`, the input's
+    # is `ĝ / r - x · mean(ĝ · x) / r³`, and the weight's `g · x / r`, in the
+    # expanded shape, so that accumulating it sums over the rows.
+    private def self.rmsnorm_backward(node : Node, g : Tensor) : Array(Tensor?)
+      x, weight = node.srcs
+      epsilon = node.epsilon || raise Error.new("rmsnorm needs an epsilon")
+      root = ((x * x).mean(-1, keepdims: true) + epsilon).sqrt
+      scaled = g * weight
+      dx = scaled / root - x * ((scaled * x).mean(-1, keepdims: true) / (root * root * root))
+      [dx, g * (x / root)] of Tensor?
     end
 
     # Returns the gradient of a softmax's input from *g* and its output *y*:
