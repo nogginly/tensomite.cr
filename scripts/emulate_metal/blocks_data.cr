@@ -19,7 +19,7 @@ private def values(count : Int32, seed : Int32) : Array(Float32)
   Array.new(count) { rng.rand(-2.0..2.0).to_f32 }
 end
 
-rows, n, k = 5, 37, 160
+rows, n, k = 5, 37, 1280
 File.open(ARGV[0], "w") do |io|
   {DType::Q8_0, DType::Q4_0, DType::Q4_1}.each do |dtype|
     x, weights, bias = values(rows * k, 1), values(n * k, 2), values(n, 3)

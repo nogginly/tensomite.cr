@@ -229,6 +229,9 @@ module Tensomite
     # How `MatMul` divides its work; see `MatMulMode`.
     property matmul_mode = MatMulMode::Auto
 
+    # How a quantised matmul divides its work; see `BlockMatMulMode`.
+    property block_mode = BlockMatMulMode.from_env
+
     # The block size of the tiled matmul; see `MatMulTile`.
     property matmul_tile = MatMulTile::T64x64
 
@@ -658,8 +661,8 @@ module Tensomite
     # Queues the kernels of an op that reads a block-format tensor and returns
     # true, or returns false for one with none: `BlockMatMul`, as a pass that
     # quantises each block of the activations into scratch memory and then one
-    # warp per output, `BLOCK_WARPS` to a block; and `Gather`, one thread per
-    # output element.
+    # thread per output or, as `#block_mode` says, one warp per output,
+    # `BLOCK_WARPS` to a block; and `Gather`, one thread per output element.
     private def launch_blocks(kernels : Kernels, node : Node, output : CUDABuffer) : Bool
       return false unless node.dtype.f32? && node.srcs.all? { |src| src.ndim <= MAX_DIMS }
       case node.op
@@ -673,9 +676,13 @@ module Tensomite
         sums, qs = scales + blocks * 4, scales + blocks * 8
         run(kernels["quantize_rows_q8_f32"], blocks, pointer(x), scales, sums, qs, view_args(x.view), blocks.to_u32)
         kind, bytes, offset = block_args(w)
-        groups = (node.size + BLOCK_WARPS - 1) // BLOCK_WARPS
-        context.launch(kernels["block_matmul_f32"], groups, 32 * BLOCK_WARPS, pointer(w), scales, sums, qs, output.pointer,
-          bias_pointer(node), kind, bytes, offset, n.to_u32, k.to_u32, node.size.to_u32) if node.size > 0
+        args = {pointer(w), scales, sums, qs, output.pointer, bias_pointer(node), kind, bytes, offset, n.to_u32, k.to_u32, node.size.to_u32}
+        if block_mode.lanes?(node.size)
+          groups = (node.size + BLOCK_WARPS - 1) // BLOCK_WARPS
+          context.launch(kernels["block_matmul_lanes_f32"], groups, 32 * BLOCK_WARPS, *args) if node.size > 0
+        else
+          run(kernels["block_matmul_f32"], node.size, *args)
+        end
       when Op::Gather
         table, ids = node.srcs
         rows, width = table.shape

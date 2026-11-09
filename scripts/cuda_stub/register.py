@@ -2,7 +2,7 @@
 
 A kernel is a function declared `extern "C" __global__`, or one a BINARY,
 UNARY or TILED macro defines. One that uses shared memory, directly or through
-the tiled matmul templates, or warp shuffles, through warp_sum, is marked to
+the tiled matmul templates, or warp shuffles, is marked to
 run its threads as OS threads: every kernel that synchronises its threads
 shares memory between them, and may reach __syncthreads or a shuffle through a
 helper or a macro.
@@ -19,4 +19,4 @@ parts = re.split(r'(?=^extern "C" __global__ void )', source, flags=re.M)
 for part in parts:
     match = re.match(r'extern "C" __global__ void (\w+)\(', part)
     if match:
-        print(f"REGISTER({match.group(1)}, {'true' if '__shared__' in part or '__syncthreads' in part or 'matmul_tiled' in part or 'warp_sum' in part else 'false'})")
+        print(f"REGISTER({match.group(1)}, {'true' if '__shared__' in part or '__syncthreads' in part or 'matmul_tiled' in part or '__shfl' in part else 'false'})")
