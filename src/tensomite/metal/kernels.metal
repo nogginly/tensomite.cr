@@ -670,53 +670,6 @@ template [[host_name("matmul_tiled_32x32_f32")]] kernel matmul_tiled_32_t matmul
 template [[host_name("matmul_tiled_64x64_f32")]] kernel matmul_tiled_64_t matmul_tiled<64, 64, 32, 4, 4>;
 template [[host_name("matmul_tiled_32x64_f32")]] kernel matmul_tiled_32x64_t matmul_tiled<32, 64, 32, 4, 4>;
 
-// Root-mean-square normalisation of each row: one threadgroup per row, the
-// sum of squares added in chunks, then each element divided by √(Σx²/n + ε)
-// and scaled by the weight.
-kernel void rmsnorm_f32(device const float* a [[buffer(0)]],
-                        device const float* w [[buffer(1)]],
-                        device float* dst [[buffer(2)]],
-                        constant View& v [[buffer(3)]],
-                        constant View& vw [[buffer(4)]],
-                        constant uint& n [[buffer(5)]],
-                        constant float& epsilon [[buffer(6)]],
-                        uint row [[threadgroup_position_in_grid]],
-                        uint t [[thread_position_in_threadgroup]],
-                        uint threads [[threads_per_threadgroup]]) {
-    threadgroup float partial[REDUCE_THREADS];
-    threadgroup float shared;
-    uint base = row * n;
-    int start = offset_of(v, base);
-    int stride = run_stride(v);
-    int wstart = offset_of(vw, base);
-    float squares;
-    ROW_SUM(squares, float x = a[start + int(s) * stride]; float sq = x * x; acc = acc + sq;)
-    float root = precise::sqrt(squares / float(n) + epsilon);
-    OWN_ELEMENTS(float scaled = a[start + int(s) * stride] / root; dst[base + s] = scaled * w[wstart + int(s) * run_stride(vw)];)
-}
-
-// Rotary embeddings: one thread per element, `x · cos + rotate_half(x) · sin`,
-// where rotate_half(x) at a column of the first half is the element half a
-// row on, times -1, and at one of the second half the element half a row back.
-kernel void rope_f32(device const float* a [[buffer(0)]],
-                     device const float* c [[buffer(1)]],
-                     device const float* sn [[buffer(2)]],
-                     device float* dst [[buffer(3)]],
-                     constant View& va [[buffer(4)]],
-                     constant View& vc [[buffer(5)]],
-                     constant View& vs [[buffer(6)]],
-                     constant uint& n [[buffer(7)]],
-                     constant uint& count [[buffer(8)]],
-                     uint i [[thread_position_in_grid]]) {
-    if (i >= count) return;
-    uint col = i % n, middle = n / 2;
-    float partner = a[offset_of(va, col < middle ? i + middle : i - middle)];
-    float rotated = col < middle ? partner * -1.0f : partner;
-    float first = a[offset_of(va, i)] * c[offset_of(vc, i)];
-    float second = rotated * sn[offset_of(vs, i)];
-    dst[i] = first + second;
-}
-
 // Block formats (Q8_0, Q4_0, Q4_1), as ggml stores them: per block of 32, an
 // F16 scale d (and for Q4_1 an F16 minimum m), then the quantised values. Each
 // kernel computes what the host's `Quant` computes, operation for operation.
@@ -1212,4 +1165,51 @@ kernel void layernorm_f32(device const float* a [[buffer(0)]],
     float variance = squares / count;
     float deviation = precise::sqrt(variance + epsilon);
     OWN_ELEMENTS(float scaled = dst[base + s] / deviation; float weighted = scaled * w[wstart + int(s) * run_stride(vw)]; dst[base + s] = weighted + b[bstart + int(s) * run_stride(vb)];)
+}
+
+// Root-mean-square normalisation of each row: one threadgroup per row, the
+// sum of squares added in chunks, then each element divided by √(Σx²/n + ε)
+// and scaled by the weight.
+kernel void rmsnorm_f32(device const float* a [[buffer(0)]],
+                        device const float* w [[buffer(1)]],
+                        device float* dst [[buffer(2)]],
+                        constant View& v [[buffer(3)]],
+                        constant View& vw [[buffer(4)]],
+                        constant uint& n [[buffer(5)]],
+                        constant float& epsilon [[buffer(6)]],
+                        uint row [[threadgroup_position_in_grid]],
+                        uint t [[thread_position_in_threadgroup]],
+                        uint threads [[threads_per_threadgroup]]) {
+    threadgroup float partial[REDUCE_THREADS];
+    threadgroup float shared;
+    uint base = row * n;
+    int start = offset_of(v, base);
+    int stride = run_stride(v);
+    int wstart = offset_of(vw, base);
+    float squares;
+    ROW_SUM(squares, float x = a[start + int(s) * stride]; float sq = x * x; acc = acc + sq;)
+    float root = precise::sqrt(squares / float(n) + epsilon);
+    OWN_ELEMENTS(float scaled = a[start + int(s) * stride] / root; dst[base + s] = scaled * w[wstart + int(s) * run_stride(vw)];)
+}
+
+// Rotary embeddings: one thread per element, `x · cos + rotate_half(x) · sin`,
+// where rotate_half(x) at a column of the first half is the element half a
+// row on, times -1, and at one of the second half the element half a row back.
+kernel void rope_f32(device const float* a [[buffer(0)]],
+                     device const float* c [[buffer(1)]],
+                     device const float* sn [[buffer(2)]],
+                     device float* dst [[buffer(3)]],
+                     constant View& va [[buffer(4)]],
+                     constant View& vc [[buffer(5)]],
+                     constant View& vs [[buffer(6)]],
+                     constant uint& n [[buffer(7)]],
+                     constant uint& count [[buffer(8)]],
+                     uint i [[thread_position_in_grid]]) {
+    if (i >= count) return;
+    uint col = i % n, middle = n / 2;
+    float partner = a[offset_of(va, col < middle ? i + middle : i - middle)];
+    float rotated = col < middle ? partner * -1.0f : partner;
+    float first = a[offset_of(va, i)] * c[offset_of(vc, i)];
+    float second = rotated * sn[offset_of(vs, i)];
+    dst[i] = first + second;
 }
