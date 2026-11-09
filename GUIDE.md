@@ -499,10 +499,18 @@ model = GPT2.load("models/gpt2/model.safetensors").quantize(DType::Q8_0)
 model = Llama.load("models/smollm2-135m-instruct-gguf/SmolLM2-135M-Instruct-Q4_0.gguf")
 ```
 
-`bench/perplexity.cr` measures what quantisation costs. Some results, from 16 windows of 128 tokens of Shakespeare:
+`bench/perplexity.cr` measures what quantisation costs. With `--reference`, it also reports the KL divergence of the quantised model's predictions from the unquantised model's. That is the better measure: on a text a model is too sure of, noise that softens its predictions lowers perplexity. Quantised GPT-2 scores *better* than F32 on Shakespeare for that reason. Some results, from 16 windows of 128 tokens of Shakespeare:
 
-- SmolLM2 goes from 60.7 at F32 to 61.0 at Q8_0, and to 68.0 at llama.cpp's Q4_0.
-- Embeddings are the most sensitive part. GPT-2's token table doubles as its output head, and quantising it to Q4_0 sends perplexity into the thousands. So `quantize` leaves embeddings alone unless asked, as llama.cpp keeps them at 8 bits or more.
+Model                                      |Perplexity|KL from F32, nats/token
+-------------------------------------------|----------|-----------------------
+SmolLM2 at F32                             |60.7      |0                      
+SmolLM2 at Q8_0                            |61.0      |0.005                  
+SmolLM2 at Q4_0, llama.cpp's file          |68.0      |0.154                  
+GPT-2 at F32                               |139.4     |0                      
+GPT-2, matrices at Q4_0                    |126.6     |0.080                  
+GPT-2, matrices at Q4_0, embeddings at Q8_0|124.3     |0.132                  
+
+Embeddings are the most sensitive part. GPT-2's token table doubles as its output head: at Q8_0 it adds about 0.05 to the KL divergence, and at Q4_0 it sends perplexity into the thousands. So `quantize` leaves embeddings alone unless asked, as llama.cpp keeps them at 8 bits or more.
 
 
 
