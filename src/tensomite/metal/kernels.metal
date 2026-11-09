@@ -709,9 +709,9 @@ kernel void rope_f32(device const float* a [[buffer(0)]],
                      constant uint& count [[buffer(8)]],
                      uint i [[thread_position_in_grid]]) {
     if (i >= count) return;
-    uint col = i % n, half = n / 2;
-    float partner = a[offset_of(va, col < half ? i + half : i - half)];
-    float rotated = col < half ? partner * -1.0f : partner;
+    uint col = i % n, middle = n / 2;
+    float partner = a[offset_of(va, col < middle ? i + middle : i - middle)];
+    float rotated = col < middle ? partner * -1.0f : partner;
     float first = a[offset_of(va, i)] * c[offset_of(vc, i)];
     float second = rotated * sn[offset_of(vs, i)];
     dst[i] = first + second;

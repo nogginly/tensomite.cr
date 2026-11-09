@@ -893,9 +893,9 @@ extern "C" __global__ void rope_f32(const float* a, const float* c, const float*
                                     View va, View vc, View vs, unsigned int n, unsigned int count) {
     unsigned int i = thread_index();
     if (i >= count) return;
-    unsigned int col = i % n, half = n / 2;
-    float partner = a[offset_of(va, col < half ? i + half : i - half)];
-    float rotated = col < half ? partner * -1.0f : partner;
+    unsigned int col = i % n, middle = n / 2;
+    float partner = a[offset_of(va, col < middle ? i + middle : i - middle)];
+    float rotated = col < middle ? partner * -1.0f : partner;
     float first = a[offset_of(va, i)] * c[offset_of(vc, i)];
     float second = rotated * sn[offset_of(vs, i)];
     dst[i] = first + second;
