@@ -67,11 +67,13 @@ module Tensomite
     private COLS     = 32
     # SIMD groups in each threadgroup of a quantised matmul on lanes; at most
     # the kernels' LANE_GROUPS.
-    private BLOCK_GROUPS   =   4
-    private SLICES         =   8
-    private REDUCE_THREADS = 256
-    private REDUCE_CHUNK   =  16
-    private NORM_THREADS   = 512
+    private BLOCK_GROUPS = 4
+    # Outputs from which a quantised matmul on lanes gives each SIMD group four.
+    private LANE_GROUPED_FROM = 2048
+    private SLICES            =    8
+    private REDUCE_THREADS    =  256
+    private REDUCE_CHUNK      =   16
+    private NORM_THREADS      =  512
 
     # How `MatMul` divides its work.
     enum MatMulMode
@@ -490,9 +492,11 @@ module Tensomite
     # Encodes an op that reads a block-format tensor and returns true, or false
     # for one with no kernel: `BlockMatMul`, as a pass that quantises each block
     # of the activations and then one thread per output or, as `#block_mode`
-    # says, one SIMD group per `BlockMatMulMode.lane_outputs` outputs,
-    # `BLOCK_GROUPS` to a threadgroup; and `Gather`, one thread per output
-    # element.
+    # says, one SIMD group per 4 outputs from `LANE_GROUPED_FROM` outputs and
+    # per output below, `BLOCK_GROUPS` to a threadgroup, unless
+    # `TENSOMITE_LANE_OUTPUTS` says otherwise; and `Gather`, one thread per
+    # output element. On the M5 Pro, four outputs a group, sharing their
+    # activations, were faster than one or two.
     private def encode_blocks(node : Node, output : MetalBuffer) : Bool
       return false unless node.dtype.f32? && node.srcs.all? { |src| src.ndim <= MAX_DIMS }
       case node.op
@@ -509,7 +513,7 @@ module Tensomite
         buffers = [metal(w.node.buffer!), scratch, scratch, scratch, output, bias ? metal(bias.node.buffer!) : output]
         offsets, constants = [0, 0, blocks * 4, blocks * 8, 0, 0], [blocks_args(w), dims, u32(node.size)]
         if block_mode.lanes?(node.size) && w.dtype.bytes_for(w.view.offset).even?
-          per = BlockMatMulMode.lane_outputs(node.size)
+          per = BlockMatMulMode.lane_outputs(node.size >= LANE_GROUPED_FROM ? 4 : 1)
           groups = (node.size + BLOCK_GROUPS * per - 1) // (BLOCK_GROUPS * per)
           dispatch_groups_at("block_matmul_lanes_f32", groups, 32 * BLOCK_GROUPS, buffers, offsets, constants + [u32(per)])
         else

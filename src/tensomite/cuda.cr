@@ -674,9 +674,11 @@ module Tensomite
     # Queues the kernels of an op that reads a block-format tensor and returns
     # true, or returns false for one with none: `BlockMatMul`, as a pass that
     # quantises each block of the activations into scratch memory and then one
-    # thread per output or, as `#block_mode` says, one warp per
-    # `BlockMatMulMode.lane_outputs` outputs, `BLOCK_WARPS` to a block; and
-    # `Gather`, one thread per output element.
+    # thread per output or, as `#block_mode` says, one warp per output,
+    # `BLOCK_WARPS` to a block; and `Gather`, one thread per output element.
+    # A warp computes one output unless `TENSOMITE_LANE_OUTPUTS` says more:
+    # on the GB10, two or four outputs a warp, sharing their activations, were
+    # no faster than one, which leaves more warps to hide memory's latency.
     private def launch_blocks(kernels : Kernels, node : Node, output : CUDABuffer) : Bool
       return false unless node.dtype.f32? && node.srcs.all? { |src| src.ndim <= MAX_DIMS }
       case node.op
@@ -692,7 +694,7 @@ module Tensomite
         kind, bytes, offset = block_args(w)
         args = {pointer(w), scales, sums, qs, output.pointer, bias_pointer(node), kind, bytes, offset, n.to_u32, k.to_u32, node.size.to_u32}
         if block_mode.lanes?(node.size) && offset.even?
-          per = BlockMatMulMode.lane_outputs(node.size)
+          per = BlockMatMulMode.lane_outputs(1)
           groups = (node.size + BLOCK_WARPS * per - 1) // (BLOCK_WARPS * per)
           context.launch(kernels["block_matmul_lanes_f32"], groups, 32 * BLOCK_WARPS, *args, per.to_u32) if node.size > 0
         else

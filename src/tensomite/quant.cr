@@ -36,13 +36,12 @@ module Tensomite
       ENV["TENSOMITE_BLOCK_MATMUL"]?.try { |name| parse?(name) } || Auto
     end
 
-    # Returns the outputs each warp or SIMD group computes when a product of
-    # *outputs* outputs runs on lanes: 4 from 2,048 outputs, which still leaves
-    # 512 groups to fill the GPU, and 1 below. `TENSOMITE_LANE_OUTPUTS` (1 to 4)
-    # sets it instead, so that the counts can be timed against each other
-    # without rebuilding.
-    def self.lane_outputs(outputs : Int32) : Int32
-      ENV["TENSOMITE_LANE_OUTPUTS"]?.try(&.to_i?).try(&.clamp(1, 4)) || (outputs >= 2048 ? 4 : 1)
+    # Returns the outputs each warp or SIMD group computes when a product runs
+    # on lanes: *chosen*, the device's own choice, or the count
+    # `TENSOMITE_LANE_OUTPUTS` (1 to 4) sets, so that the counts can be timed
+    # against each other without rebuilding.
+    def self.lane_outputs(chosen : Int32) : Int32
+      ENV["TENSOMITE_LANE_OUTPUTS"]?.try(&.to_i?).try(&.clamp(1, 4)) || chosen
     end
 
     # Returns true when a product of *outputs* outputs runs on lanes.
