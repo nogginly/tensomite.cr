@@ -42,6 +42,18 @@ module Tensomite
       Tensor.from_blocks(bytes, [order.size] + shape[1..], dtype, device)
     end
 
+    # Returns a new realised leaf of *tensors*' rows, in order: block-format
+    # tensors of one dtype and row width.
+    def self.cat_rows(tensors : Array(Tensor)) : Tensor
+      first = tensors.first
+      unless tensors.all? { |tensor| tensor.dtype == first.dtype && tensor.ndim == 2 && tensor.shape[1] == first.shape[1] }
+        raise ShapeError.new("cat_rows needs 2-D tensors of one dtype and width")
+      end
+      bytes = IO::Memory.new
+      tensors.each { |tensor| bytes.write(tensor.block_bytes) }
+      from_blocks(bytes.to_slice, [tensors.sum(&.shape[0]), first.shape[1]], first.dtype, first.device)
+    end
+
     # Returns a realised leaf of *dtype*, a block format, holding *bytes*, its
     # blocks row by row.
     def self.from_blocks(bytes : Bytes, shape : Array(Int32), dtype : DType, device : Device = CPU.default) : Tensor

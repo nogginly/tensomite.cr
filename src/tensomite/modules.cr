@@ -23,6 +23,47 @@ module Tensomite
       value.dtype.block? ? x.linear(value, bias.try(&.value)) : x.matmul(value, bias.try(&.value))
     end
 
+    # Joins the weights of *parts*, `Linear`s that read the same input, into one,
+    # so that one product computes all their outputs, and returns it; each
+    # part's weight becomes a view of its share, so nothing is held twice.
+    # Returns `nil`, and changes nothing, when the parts have biases or weights
+    # of different dtypes.
+    #
+    # Quantised weights, `[outputs, inputs]`, are joined by rows, and `F32`
+    # ones, `[inputs, outputs]`, by columns. Each output is computed as the
+    # part's own product computes it, so the results keep their bits on every
+    # device whose products do not depend on their shape.
+    def self.merge(parts : Array(Linear)) : Tensor?
+      values = parts.map(&.weight.value)
+      dtype = values.first.dtype
+      return if parts.any?(&.bias) || values.any? { |value| value.dtype != dtype }
+      if dtype.block?
+        merged = Tensor.cat_rows(values)
+        axis = 0
+      else
+        merged = Tensor.cat(values, 1).detach
+        axis = 1
+      end
+      offset = 0
+      parts.each do |part|
+        size = part.weight.value.shape[axis]
+        part.weight.value = merged.slice(axis, offset, offset + size)
+        offset += size
+      end
+      merged
+    end
+
+    # Returns true when every one of *parts* still holds its share of *merged*,
+    # as `.merge` left it, so that one product of *merged* stands for theirs.
+    def self.merged?(parts : Array(Linear), merged : Tensor) : Bool
+      parts.all?(&.weight.value.node.same?(merged.node))
+    end
+
+    # Returns `x` times a weight joined by `.merge`.
+    def self.apply(x : Tensor, merged : Tensor) : Tensor
+      merged.dtype.block? ? x.linear(merged) : x.matmul(merged)
+    end
+
     # Replaces the weight with its transpose quantised to *dtype*, a block
     # format, so that each output's inputs are whole blocks. The inputs must be
     # a multiple of 32.
@@ -253,6 +294,7 @@ module Tensomite
     getter k_proj : Linear
     getter v_proj : Linear
     getter o_proj : Linear
+    @qkv : Tensor? = nil
 
     def initialize(width : Int32, @heads : Int32, @kv_heads : Int32, head_width : Int32 = width // heads,
                    bias : Bool = false, init : Init = Init.normal(0.02),
@@ -282,9 +324,10 @@ module Tensomite
       length = mask.shape[0]
       batch, head_width, group = rows // length, rope.width, heads // kv_heads
       start = cache ? cache.length : 0
-      q = split(q_proj.call(x), batch, length, heads, head_width)
-      k = split(k_proj.call(x), batch, length, kv_heads, head_width)
-      v = split(v_proj.call(x), batch, length, kv_heads, head_width)
+      q, k, v = project(x)
+      q = split(q, batch, length, heads, head_width)
+      k = split(k, batch, length, kv_heads, head_width)
+      v = split(v, batch, length, kv_heads, head_width)
       q, k = rope.call(q, start), rope.call(k, start)
       k, v = cache.append(k, v) if cache
       grouped = q.reshape([batch, kv_heads, group * length, head_width])
@@ -292,6 +335,26 @@ module Tensomite
       weights = grouped.matmul(k.transpose).softmax(scale: 1 / Math.sqrt(head_width), mask: masks)
       attended = weights.matmul(v).reshape([batch, heads, length, head_width])
       o_proj.call(attended.permute([0, 2, 1, 3]).reshape([rows, heads * head_width]))
+    end
+
+    # Joins the query, key and value projections into one product (see
+    # `Linear.merge`), which `#forward` uses while they hold their shares of it.
+    # Returns true when they could be joined.
+    def merge : Bool
+      !(@qkv = Linear.merge([q_proj, k_proj, v_proj])).nil?
+    end
+
+    # Returns the queries, keys and values of *x*: from one product of the
+    # joined projections while `#merge`'s join holds, else from three.
+    private def project(x : Tensor) : {Tensor, Tensor, Tensor}
+      parts = [q_proj, k_proj, v_proj]
+      if (joined = @qkv) && Linear.merged?(parts, joined)
+        all = Linear.apply(x, joined)
+        sizes = parts.map { |part| part.weight.value.dtype.block? ? part.weight.value.shape[0] : part.weight.value.shape[1] }
+        {all.slice(1, 0, sizes[0]), all.slice(1, sizes[0], sizes[0] + sizes[1]), all.slice(1, sizes[0] + sizes[1], sizes.sum)}
+      else
+        {q_proj.call(x), k_proj.call(x), v_proj.call(x)}
+      end
     end
 
     private def split(x : Tensor, batch : Int32, length : Int32, count : Int32, head_width : Int32) : Tensor
@@ -305,6 +368,7 @@ module Tensomite
     getter gate_proj : Linear
     getter up_proj : Linear
     getter down_proj : Linear
+    @gate_up : Tensor? = nil
 
     def initialize(width : Int32, hidden : Int32, init : Init = Init.normal(0.02),
                    rng : Random = Tensomite.rng, device : Device = CPU.default)
@@ -314,7 +378,19 @@ module Tensomite
     end
 
     def forward(x : Tensor) : Tensor
+      if (joined = @gate_up) && Linear.merged?([gate_proj, up_proj], joined)
+        both = Linear.apply(x, joined)
+        hidden = both.shape[-1] // 2
+        return down_proj.call(both.slice(-1, 0, hidden).swiglu(both.slice(-1, hidden, 2 * hidden)))
+      end
       down_proj.call(gate_proj.call(x).swiglu(up_proj.call(x)))
+    end
+
+    # Joins the gate and up projections into one product (see `Linear.merge`),
+    # which `#forward` uses while they hold their shares of it. Returns true
+    # when they could be joined.
+    def merge : Bool
+      !(@gate_up = Linear.merge([gate_proj, up_proj])).nil?
     end
   end
 

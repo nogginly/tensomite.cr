@@ -467,6 +467,8 @@ puts bpe.decode(model.generate(prompt, 64, stop: [bpe.specials["<|im_end|>"]]))
 # => The capital of France is Paris. ... <|im_end|>
 ```
 
+A loaded `Llama` joins the projections that read the same input, queries, keys and values, and the MLP's gate and up, into one product each (`Linear.merge`), which halves the dispatches of a decoded token's products without changing its logits.
+
 An instruct model expects its chat template, ChatML for SmolLM2, as above. `generate` stops after a token in `stop:`, which it returns as the last token. `Llama` is a `Module` named as Hugging Face's file is (`model.embed_tokens`, `model.layers.0.self_attn.q_proj`, `model.norm`, and `lm_head` when the head does not share the embeddings). PyTorch stores each `Linear`'s weight as `[outputs, inputs]`, so `Module#load(path, transposed: regex)` copies the matching weights into tensomite's `[inputs, outputs]` as they load.
 
 **GGUF files.** llama.cpp's format holds a model's weights, configuration, tokeniser and chat template in one file. `Llama.load` reads one when the path ends in `.gguf`, and `BPE.from_gguf` reads its tokeniser. `scripts/fetch_smollm2_gguf.sh` downloads SmolLM2-135M-Instruct at F16, Q8_0 and Q4_0. F32, F16 and BF16 tensors load as `F32`, and quantised tensors in their block formats (below), which `Llama` runs as they are.

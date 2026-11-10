@@ -114,6 +114,13 @@ module Tensomite
         x = x + @self_attn.call(@input_layernorm.call(x), mask, rope, cache)
         x + @mlp.call(@post_attention_layernorm.call(x))
       end
+
+      # Joins the projections that read the same input: queries, keys and
+      # values, and the MLP's gate and up (see `Linear.merge`).
+      def merge : Nil
+        @self_attn.merge
+        @mlp.merge
+      end
     end
 
     # The embeddings, blocks and final norm: Hugging Face's `model`.
@@ -164,6 +171,7 @@ module Tensomite
       config = Config.from_json(File.read(File.join(path, "config.json")))
       new(config, Builder.new(device: device, init: Init.placeholder))
         .load(File.join(path, "model.safetensors"), transposed: TRANSPOSED)
+        .tap(&.merge_projections)
     end
 
     # Returns the model in *file*, a GGUF file, with its weights on *device*.
@@ -197,7 +205,23 @@ module Tensomite
       end
       extra = file.names.reject { |key| used.includes?(key) }
       raise Error.new("#{file.path} has #{extra.join(", ")}, which the model lacks") unless extra.empty?
+      model.merge_projections
       model
+    end
+
+    # Joins, in every block, the projections that read the same input, so that
+    # each block runs four products instead of seven (see `Linear.merge`). A
+    # loaded model is already joined; a model whose weights are replaced, as in
+    # training, runs its products separately until joined again.
+    def merge_projections : self
+      @model.layers.each(&.merge)
+      self
+    end
+
+    # Quantises as `Module#quantize` does, then joins the projections again.
+    def quantize(dtype : DType, embeddings : Bool = false, except : Regex? = nil) : self
+      super
+      merge_projections
     end
 
     # Returns *weight*, `[heads × head width, inputs]`, with each head's rows
