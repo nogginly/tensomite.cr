@@ -7,15 +7,27 @@ module ProfileBench
   DECODE   = 32
   PREFILLS =  4
 
-  USAGE = "usage: PATH [HEADS] [--prefill N]: a GPT-2 model.safetensors (with its heads, 12 by default), " \
-          "a Llama-family directory, or a Llama GGUF file"
+  USAGE = "usage: PATH [HEADS] [--prefill N] [--quantize TYPE]: a GPT-2 model.safetensors (with its heads, " \
+          "12 by default), a Llama-family directory, or a Llama GGUF file"
 
-  # Returns the model path, GPT-2's heads, and the prefill length, if any.
-  def self.arguments : {String, Int32, Int32?}
+  # Returns the model path, GPT-2's heads, the prefill length, if any, and the
+  # block format to quantise to, if any.
+  def self.arguments : {String, Int32, Int32?, Tensomite::DType?}
     path = ARGV[0]? || abort USAGE
-    prefill = ARGV.index("--prefill").try { |i| ARGV[i + 1]?.try(&.to_i) || abort "--prefill needs a token count" }
+    prefill = option("--prefill").try(&.to_i)
+    quantize = option("--quantize").try { |name| Tensomite::DType.parse(name) }
     heads = ARGV[1]?.try { |arg| arg.starts_with?("--") ? nil : arg.to_i } || 12
-    {path, heads, prefill}
+    {path, heads, prefill, quantize}
+  end
+
+  private def self.option(name : String) : String?
+    ARGV.index(name).try { |i| ARGV[i + 1]? || abort "#{name} needs a value" }
+  end
+
+  # Returns *model* with its matrices and embeddings quantised to *dtype*, or
+  # as it is when *dtype* is `nil`.
+  def self.quantize(model : M, dtype : Tensomite::DType?) : M forall M
+    dtype ? model.quantize(dtype, embeddings: true) : model
   end
 
   # Returns true when *path* holds a Llama-family model: a GGUF file, or a
