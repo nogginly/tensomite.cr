@@ -95,6 +95,7 @@ kernel void copy_into_f32(device const float* src [[buffer(0)]],
 // max_short_f32), which is the same arithmetic as a single chunk.
 #define REDUCE_THREADS 256
 #define REDUCE_CHUNK 16
+#define NORM_THREADS 512
 
 // Returns the position of element s of the run that starts at logical index base.
 static int run_position(constant View& v, int start, uint walk, uint base, uint s) {
@@ -1167,9 +1168,11 @@ kernel void layernorm_f32(device const float* a [[buffer(0)]],
     OWN_ELEMENTS(float scaled = dst[base + s] / deviation; float weighted = scaled * w[wstart + int(s) * run_stride(vw)]; dst[base + s] = weighted + b[bstart + int(s) * run_stride(vb)];)
 }
 
-// Root-mean-square normalisation of each row: one threadgroup per row, the
-// sum of squares added in chunks, then each element divided by √(Σx²/n + ε)
-// and scaled by the weight.
+// Root-mean-square normalisation of each row: one threadgroup per row of a
+// power of two threads, at most NORM_THREADS. Thread t adds the squares of
+// elements t, t + threads and so on, so that a SIMD group reads neighbouring
+// elements together; the threads' sums are then added in a tree, each element
+// divided by √(Σx²/n + ε) and scaled by the weight.
 kernel void rmsnorm_f32(device const float* a [[buffer(0)]],
                         device const float* w [[buffer(1)]],
                         device float* dst [[buffer(2)]],
@@ -1180,16 +1183,29 @@ kernel void rmsnorm_f32(device const float* a [[buffer(0)]],
                         uint row [[threadgroup_position_in_grid]],
                         uint t [[thread_position_in_threadgroup]],
                         uint threads [[threads_per_threadgroup]]) {
-    threadgroup float partial[REDUCE_THREADS];
-    threadgroup float shared;
+    threadgroup float partial[NORM_THREADS];
     uint base = row * n;
     int start = offset_of(v, base);
     int stride = run_stride(v);
     int wstart = offset_of(vw, base);
-    float squares;
-    ROW_SUM(squares, float x = a[start + int(s) * stride]; float sq = x * x; acc = acc + sq;)
-    float root = precise::sqrt(squares / float(n) + epsilon);
-    OWN_ELEMENTS(float scaled = a[start + int(s) * stride] / root; dst[base + s] = scaled * w[wstart + int(s) * run_stride(vw)];)
+    int wstride = run_stride(vw);
+    float acc = 0.0f;
+    for (uint s = t; s < n; s += threads) {
+        float x = a[start + int(s) * stride];
+        float sq = x * x;
+        acc = acc + sq;
+    }
+    partial[t] = acc;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint width = threads / 2; width > 0; width /= 2) {
+        if (t < width) partial[t] = partial[t] + partial[t + width];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float root = precise::sqrt(partial[0] / float(n) + epsilon);
+    for (uint s = t; s < n; s += threads) {
+        float scaled = a[start + int(s) * stride] / root;
+        dst[base + s] = scaled * w[wstart + int(s) * wstride];
+    }
 }
 
 // Rotary embeddings: one thread per element, `x · cos + rotate_half(x) · sin`,

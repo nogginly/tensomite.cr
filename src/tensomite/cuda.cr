@@ -95,6 +95,7 @@ module Tensomite
     private MAX_DIMS       =   8
     private REDUCE_THREADS = 256
     private REDUCE_CHUNK   =  16
+    private NORM_THREADS   = 512
     private BLOCK          = 256
     # Warps in each block of a quantised matmul, one per output.
     private BLOCK_WARPS =   4
@@ -737,8 +738,19 @@ module Tensomite
       current.pointer
     end
 
-    # Softmax, SoftmaxGrad, LogSoftmax, LogSoftmaxGrad, LayerNorm, LayerNormGrad and RMSNorm: one block per
-    # row along the last axis, with a thread per chunk of the row up to `REDUCE_THREADS`.
+    # Returns the threads RMSNorm's kernel gives a row of *n*: the smallest power
+    # of two from 32 that gives each at most four elements, up to `NORM_THREADS`.
+    def self.norm_threads(n : Int32) : Int32
+      threads = 32
+      while threads < NORM_THREADS && threads * 4 < n
+        threads *= 2
+      end
+      threads
+    end
+
+    # Softmax, SoftmaxGrad, LogSoftmax, LogSoftmaxGrad, LayerNorm and LayerNormGrad: one block per
+    # row along the last axis, with a thread per chunk of the row up to `REDUCE_THREADS`; RMSNorm:
+    # one block per row of `norm_threads` threads.
     private def launch_row_op(kernels : Kernels, node : Node, output : CUDABuffer) : Nil
       n = node.shape.last
       rows = node.size // n
@@ -748,7 +760,7 @@ module Tensomite
       if node.op == Op::RMSNorm
         weight = node.srcs[1]
         epsilon = node.epsilon || raise Error.new("rmsnorm needs an epsilon")
-        context.launch(kernels["rmsnorm_f32"], rows, threads, pointer(src), pointer(weight), output.pointer,
+        context.launch(kernels["rmsnorm_f32"], rows, CUDA.norm_threads(n), pointer(src), pointer(weight), output.pointer,
           view_args(src.view), view_args(weight.view), n.to_u32, epsilon.to_f32)
       elsif node.op == Op::LayerNorm
         weight, bias = node.srcs[1], node.srcs[2]

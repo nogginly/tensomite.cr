@@ -10,7 +10,7 @@ private def rope_composite(x : Tensor, cos : Tensor, sin : Tensor) : Tensor
 end
 
 # Returns true when *device* computes the fused RMS norm as the host does; GPUs
-# sum each row in chunks.
+# sum each row in their own order.
 private def host_order?(device : Device) : Bool
   DEVICES.includes?(device)
 end
@@ -28,21 +28,23 @@ private def host_ops(device : Device) : Int32
 end
 
 describe "Fused RMSNorm and RoPE" do
-  x_values = random_values(6 * 2 * 96, 1)
-  weight_values = random_values(96, 2)
   rope_values = random_values(2 * 4 * 3 * 96, 6)
 
   (DEVICES + GPUS).each do |device|
-    it "computes RMSNorm as its composite on #{device.class}" do
-      x = Tensor.from(x_values, [12, 96], device)
-      weight = Tensor.from(weight_values, [96], device)
-      fused = x.rmsnorm(weight, 1e-5)
-      fused.node.op.should eq Op::RMSNorm
-      expected = rmsnorm_composite(Tensor.from(x_values, [12, 96]), Tensor.from(weight_values, [96]), 1e-5).to_a(Float32)
-      if host_order?(device)
-        fused.to_a(Float32).should eq expected
-      else
-        fused.to_a(Float32).zip(expected) { |a, e| a.should be_close(e, 1e-5 * Math.max(1f32, e.abs)) }
+    [{12, 96}, {3, 1000}, {1, 2048}].each do |(rows, width)|
+      it "computes RMSNorm as its composite on #{device.class}, rows of #{width}" do
+        x_values = random_values(rows * width, 1)
+        weight_values = random_values(width, 2)
+        x = Tensor.from(x_values, [rows, width], device)
+        weight = Tensor.from(weight_values, [width], device)
+        fused = x.rmsnorm(weight, 1e-5)
+        fused.node.op.should eq Op::RMSNorm
+        expected = rmsnorm_composite(Tensor.from(x_values, [rows, width]), Tensor.from(weight_values, [width]), 1e-5).to_a(Float32)
+        if host_order?(device)
+          fused.to_a(Float32).should eq expected
+        else
+          fused.to_a(Float32).zip(expected) { |a, e| a.should be_close(e, 1e-5 * Math.max(1f32, e.abs)) }
+        end
       end
     end
 

@@ -69,6 +69,7 @@ extern "C" __global__ void copy_into_f32(const float* src, float* dst, View vs, 
 // folded by one thread per output, the same arithmetic as a single chunk.
 #define REDUCE_THREADS 256
 #define REDUCE_CHUNK 16
+#define NORM_THREADS 512
 
 // Returns the position of element s of the run that starts at logical index base.
 __device__ int run_position(const View& v, int start, unsigned int walk, unsigned int base, unsigned int s) {
@@ -868,22 +869,37 @@ extern "C" __global__ void layernorm_f32(const float* a, const float* w, const f
     OWN_ELEMENTS(float scaled = dst[base + s] / deviation; float weighted = scaled * w[wstart + int(s) * run_stride(vw)]; dst[base + s] = weighted + b[bstart + int(s) * run_stride(vb)];)
 }
 
-// Root-mean-square normalisation of each row: one block per row, the sum of
-// squares added in chunks, then each element divided by √(Σx²/n + ε) and
-// scaled by the weight.
+// Root-mean-square normalisation of each row: one block per row of a power of
+// two threads, at most NORM_THREADS. Thread t adds the squares of elements t,
+// t + threads and so on, so that a warp reads neighbouring elements together;
+// the threads' sums are then added in a tree, each element divided by
+// √(Σx²/n + ε) and scaled by the weight.
 extern "C" __global__ void rmsnorm_f32(const float* a, const float* w, float* dst, View v, View vw,
                                        unsigned int n, float epsilon) {
-    __shared__ float partial[REDUCE_THREADS];
-    __shared__ float shared;
+    __shared__ float partial[NORM_THREADS];
     unsigned int row = blockIdx.x, t = threadIdx.x, threads = blockDim.x;
     unsigned int base = row * n;
     int start = offset_of(v, base);
     int stride = run_stride(v);
     int wstart = offset_of(vw, base);
-    float squares;
-    ROW_SUM(squares, float x = a[start + int(s) * stride]; float sq = x * x; acc = acc + sq;)
-    float root = sqrtf(squares / float(n) + epsilon);
-    OWN_ELEMENTS(float scaled = a[start + int(s) * stride] / root; dst[base + s] = scaled * w[wstart + int(s) * run_stride(vw)];)
+    int wstride = run_stride(vw);
+    float acc = 0.0f;
+    for (unsigned int s = t; s < n; s += threads) {
+        float x = a[start + int(s) * stride];
+        float sq = x * x;
+        acc = acc + sq;
+    }
+    partial[t] = acc;
+    __syncthreads();
+    for (unsigned int width = threads / 2; width > 0; width /= 2) {
+        if (t < width) partial[t] = partial[t] + partial[t + width];
+        __syncthreads();
+    }
+    float root = sqrtf(partial[0] / float(n) + epsilon);
+    for (unsigned int s = t; s < n; s += threads) {
+        float scaled = a[start + int(s) * stride] / root;
+        dst[base + s] = scaled * w[wstart + int(s) * wstride];
+    }
 }
 
 // Rotary embeddings: one thread per element, `x · cos + rotate_half(x) · sin`,

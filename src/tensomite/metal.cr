@@ -70,6 +70,7 @@ module Tensomite
     private SLICES         =   8
     private REDUCE_THREADS = 256
     private REDUCE_CHUNK   =  16
+    private NORM_THREADS   = 512
 
     # How `MatMul` divides its work.
     enum MatMulMode
@@ -664,8 +665,19 @@ module Tensomite
       end
     end
 
-    # Softmax, SoftmaxGrad, LogSoftmax, LogSoftmaxGrad, LayerNorm, LayerNormGrad and RMSNorm: one
-    # threadgroup per row, with a thread per chunk of the row up to `REDUCE_THREADS`.
+    # Returns the threads RMSNorm's kernel gives a row of *n*: the smallest power
+    # of two from 32 that gives each at most four elements, up to `NORM_THREADS`.
+    def self.norm_threads(n : Int32) : Int32
+      threads = 32
+      while threads < NORM_THREADS && threads * 4 < n
+        threads *= 2
+      end
+      threads
+    end
+
+    # Softmax, SoftmaxGrad, LogSoftmax, LogSoftmaxGrad, LayerNorm and LayerNormGrad: one threadgroup
+    # per row, with a thread per chunk of the row up to `REDUCE_THREADS`; RMSNorm: one threadgroup
+    # per row of `norm_threads` threads.
     private def encode_row_op(node : Node, output : MetalBuffer) : Nil
       n = node.shape.last
       rows = node.size // n
@@ -675,7 +687,7 @@ module Tensomite
       when Op::RMSNorm
         weight = node.srcs[1]
         epsilon = node.epsilon || raise Error.new("rmsnorm needs an epsilon")
-        dispatch_groups("rmsnorm_f32", {rows, 1}, {threads, 1}, [mtl(src), mtl(weight), output.mtl],
+        dispatch_groups("rmsnorm_f32", {rows, 1}, {Metal.norm_threads(n), 1}, [mtl(src), mtl(weight), output.mtl],
           [view_args(src.view), view_args(weight.view), u32(n), Slice[epsilon].to_unsafe_bytes])
       when Op::LayerNorm
         weight, bias = node.srcs[1], node.srcs[2]
