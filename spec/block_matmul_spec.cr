@@ -147,7 +147,7 @@ describe "Tensor#linear with block-format weights" do
       end
     end
 
-    (1..4).each do |per|
+    [1, 2, 4, 7, 32].each do |per|
       it "gives the host's sums on #{gpu.class} on lanes of #{per} outputs, groups straddling rows" do
         long = 1280
         xs, ws = random_values(3 * long, 4), random_values(37 * long, 5)

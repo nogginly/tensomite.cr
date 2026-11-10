@@ -795,9 +795,12 @@ kernel void block_matmul_f32(device const uchar* w [[buffer(0)]],
 }
 
 // Block-format products on lanes: at most LANE_GROUPS SIMD groups a
-// threadgroup, each computing at most LANE_OUTPUTS outputs.
+// threadgroup, each computing at most LANE_OUTPUTS outputs, whose
+// contributions it keeps LANE_STRIDE floats apart, so that the lanes adding
+// them read different banks of threadgroup memory.
 #define LANE_GROUPS 4
-#define LANE_OUTPUTS 4
+#define LANE_OUTPUTS 32
+#define LANE_STRIDE 33
 
 // A block's 32 quantised activations y, as floats placed and scaled for the
 // nibbles of a 16-bit weight word read in place: y[2i] at v[i], y[2i + 1] /
@@ -868,10 +871,10 @@ kernel void block_matmul_lanes_f32(device const uchar* w [[buffer(0)]],
                                    uint simd [[simdgroup_index_in_threadgroup]],
                                    uint groups [[simdgroups_per_threadgroup]],
                                    uint lane [[thread_index_in_simdgroup]]) {
-    threadgroup float parts[LANE_GROUPS * LANE_OUTPUTS * 32];
+    threadgroup float parts[LANE_GROUPS * LANE_OUTPUTS * LANE_STRIDE];
     uint n = dims.x, k = dims.y, blocks = k / 32;
     uint first = (group * groups + simd) * per;
-    uint mine = simd * LANE_OUTPUTS * 32;
+    uint mine = simd * LANE_OUTPUTS * LANE_STRIDE;
     uint lead = min(first, count - 1) / n;
     float sum = 0.0f;
     for (uint start = 0; start < blocks; start += 32) {
@@ -892,13 +895,13 @@ kernel void block_matmul_lanes_f32(device const uchar* w [[buffer(0)]],
                     Nibbles own = row == lead ? a : nibbles_at(qb);
                     part = nibble_contribution(p, own, scales[at], sums[at], b.kind);
                 }
-                parts[mine + r * 32 + lane] = part;
+                parts[mine + r * LANE_STRIDE + lane] = part;
             }
         }
         simdgroup_barrier(mem_flags::mem_threadgroup);
         if (lane < per) {
             uint run = min(blocks - start, 32u);
-            for (uint j = 0; j < run; j++) sum += parts[mine + lane * 32 + j];
+            for (uint j = 0; j < run; j++) sum += parts[mine + lane * LANE_STRIDE + j];
         }
         simdgroup_barrier(mem_flags::mem_threadgroup);
     }

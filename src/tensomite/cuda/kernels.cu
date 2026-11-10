@@ -70,8 +70,12 @@ extern "C" __global__ void copy_into_f32(const float* src, float* dst, View vs, 
 #define REDUCE_THREADS 256
 #define REDUCE_CHUNK 16
 #define NORM_THREADS 512
+// Block-format products on lanes: BLOCK_WARPS warps a block, each computing at
+// most LANE_OUTPUTS outputs, whose contributions it keeps LANE_STRIDE floats
+// apart, so that the lanes adding them read different banks of shared memory.
 #define BLOCK_WARPS 4
-#define LANE_OUTPUTS 4
+#define LANE_OUTPUTS 32
+#define LANE_STRIDE 33
 
 // Returns the position of element s of the run that starts at logical index base.
 __device__ int run_position(const View& v, int start, unsigned int walk, unsigned int base, unsigned int s) {
@@ -1095,11 +1099,11 @@ extern "C" __global__ void block_matmul_lanes_f32(const unsigned char* w, const 
                                                   const signed char* qs, float* dst, const float* bias,
                                                   unsigned int kind, unsigned int bytes, unsigned int offset,
                                                   unsigned int n, unsigned int k, unsigned int count, unsigned int per) {
-    __shared__ float parts[BLOCK_WARPS * LANE_OUTPUTS * 32];
+    __shared__ float parts[BLOCK_WARPS * LANE_OUTPUTS * LANE_STRIDE];
     unsigned int lane = threadIdx.x % 32, warp = threadIdx.x / 32;
     unsigned int first = (blockIdx.x * (blockDim.x / 32) + warp) * per;
     unsigned int blocks = k / 32;
-    float* mine = parts + warp * LANE_OUTPUTS * 32;
+    float* mine = parts + warp * LANE_OUTPUTS * LANE_STRIDE;
     unsigned int lead = min(first, count - 1) / n;
     float sum = 0.0f;
     for (unsigned int start = 0; start < blocks; start += 32) {
@@ -1114,19 +1118,19 @@ extern "C" __global__ void block_matmul_lanes_f32(const unsigned char* w, const 
                 const unsigned char* p = w + offset + (col * blocks + block) * bytes;
                 unsigned int at = row * blocks + block;
                 if (row == lead) {
-                    mine[r * 32 + lane] = wide_contribution(p, a, scales[at], sums[at], kind);
+                    mine[r * LANE_STRIDE + lane] = wide_contribution(p, a, scales[at], sums[at], kind);
                 } else {
                     int own[8];
                     const int* words = (const int*)(qs + row * k + block * 32);
                     for (unsigned int j = 0; j < 8; j++) own[j] = words[j];
-                    mine[r * 32 + lane] = wide_contribution(p, own, scales[at], sums[at], kind);
+                    mine[r * LANE_STRIDE + lane] = wide_contribution(p, own, scales[at], sums[at], kind);
                 }
             }
         }
         __syncwarp();
         if (lane < per) {
             unsigned int run = blocks - start < 32 ? blocks - start : 32;
-            for (unsigned int j = 0; j < run; j++) sum += mine[lane * 32 + j];
+            for (unsigned int j = 0; j < run; j++) sum += mine[lane * LANE_STRIDE + j];
         }
         __syncwarp();
     }

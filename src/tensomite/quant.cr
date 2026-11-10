@@ -38,10 +38,10 @@ module Tensomite
 
     # Returns the outputs each warp or SIMD group computes when a product runs
     # on lanes: *chosen*, the device's own choice, or the count
-    # `TENSOMITE_LANE_OUTPUTS` (1 to 4) sets, so that the counts can be timed
+    # `TENSOMITE_LANE_OUTPUTS` (1 to 32) sets, so that the counts can be timed
     # against each other without rebuilding.
     def self.lane_outputs(chosen : Int32) : Int32
-      ENV["TENSOMITE_LANE_OUTPUTS"]?.try(&.to_i?).try(&.clamp(1, 4)) || chosen
+      ENV["TENSOMITE_LANE_OUTPUTS"]?.try(&.to_i?).try(&.clamp(1, 32)) || chosen
     end
 
     # Returns true when a product of *outputs* outputs runs on lanes.
