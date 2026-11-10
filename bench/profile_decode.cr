@@ -3,6 +3,10 @@
 #
 #     crystal run --release bench/profile_decode.cr -- path/to/gpt2/model.safetensors [heads] [--prefill N]
 #     crystal run --release bench/profile_decode.cr -- models/smollm2-135m-instruct-gguf/SmolLM2-135M-Instruct-Q4_0.gguf
+#     crystal run --release bench/profile_decode.cr -- models/smollm2-1.7b-instruct --quantize Q4_0
+#
+# `--quantize TYPE` quantises the matrices and embeddings with tensomite's own
+# quantiser after loading.
 #
 # Without `--prefill`: 32 decoded tokens after a 64-token prompt. With it: four
 # prefills of N tokens, each into an empty cache. Each workload runs twice:
@@ -26,7 +30,7 @@ require "./profile_load"
 
 include Tensomite
 
-path, heads, prefill = ProfileBench.arguments
+path, heads, prefill, quantize = ProfileBench.arguments
 
 {% if flag?(:darwin) && flag?(:aarch64) %}
   # Warms the model up, then profiles it as normal and per kernel, and prints the report.
@@ -45,9 +49,9 @@ path, heads, prefill = ProfileBench.arguments
   abort "no Metal GPU" unless Metal.available?
   metal = Metal.default
   if ProfileBench.llama?(path)
-    profile(Llama.load(path, metal), metal, prefill)
+    profile(ProfileBench.quantize(Llama.load(path, metal), quantize), metal, prefill)
   else
-    profile(GPT2.load(path, heads, metal), metal, prefill)
+    profile(ProfileBench.quantize(GPT2.load(path, heads, metal), quantize), metal, prefill)
   end
 {% else %}
   puts "bench/profile_decode.cr measures Metal, which needs macOS on Apple Silicon"

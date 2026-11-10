@@ -3,6 +3,10 @@
 #
 #     crystal run --release -Dcuda bench/profile_decode_cuda.cr -- path/to/gpt2/model.safetensors [heads] [--prefill N]
 #     crystal run --release -Dcuda bench/profile_decode_cuda.cr -- models/smollm2-135m-instruct-gguf/SmolLM2-135M-Instruct-Q4_0.gguf
+#     crystal run --release -Dcuda bench/profile_decode_cuda.cr -- models/smollm2-1.7b-instruct --quantize Q4_0
+#
+# `--quantize TYPE` quantises the matrices and embeddings with tensomite's own
+# quantiser after loading.
 #
 # Without `--prefill`: 32 decoded tokens after a 64-token prompt. With it: four
 # prefills of N tokens, each into an empty cache. Each workload runs twice:
@@ -21,7 +25,7 @@ require "./profile_load"
 
 include Tensomite
 
-path, heads, prefill = ProfileBench.arguments
+path, heads, prefill, quantize = ProfileBench.arguments
 
 # Warms the model up, then profiles it as normal and per kernel, and prints the report.
 def profile(model : M, cuda : CUDA, prefill : Int32?) : Nil forall M
@@ -39,7 +43,7 @@ end
 abort "no CUDA GPU" unless CUDA.available?
 cuda = CUDA.default
 if ProfileBench.llama?(path)
-  profile(Llama.load(path, cuda), cuda, prefill)
+  profile(ProfileBench.quantize(Llama.load(path, cuda), quantize), cuda, prefill)
 else
-  profile(GPT2.load(path, heads, cuda), cuda, prefill)
+  profile(ProfileBench.quantize(GPT2.load(path, heads, cuda), quantize), cuda, prefill)
 end
