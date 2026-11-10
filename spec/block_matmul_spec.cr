@@ -146,6 +146,30 @@ describe "Tensor#linear with block-format weights" do
         end
       end
     end
+
+    (1..4).each do |per|
+      it "gives the host's sums on #{gpu.class} on lanes of #{per} outputs, groups straddling rows" do
+        long = 1280
+        xs, ws = random_values(3 * long, 4), random_values(37 * long, 5)
+        BLOCK_FORMATS.each do |dtype|
+          expected = Tensor.from(xs, [3, long]).linear(Tensor.from(ws, [37, long]).quantize(dtype)).to_a(Float32)
+          got = [] of Float32
+          ENV["TENSOMITE_LANE_OUTPUTS"] = per.to_s
+          begin
+            with_block_mode(gpu, BlockMatMulMode::Lanes) do
+              got = Tensor.from(xs, [3, long], gpu).linear(Tensor.from(ws, [37, long], gpu).quantize(dtype)).to_a(Float32)
+            end
+          ensure
+            ENV.delete("TENSOMITE_LANE_OUTPUTS")
+          end
+          if bit_exact?(gpu)
+            got.should eq expected
+          else
+            got.zip(expected) { |a, e| a.should be_close(e, 1e-2 * Math.max(1f32, e.abs)) }
+          end
+        end
+      end
+    end
   end
 
   it "reads rows of x through views, and a weight sliced by rows" do

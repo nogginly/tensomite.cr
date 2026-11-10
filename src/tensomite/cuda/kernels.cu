@@ -70,6 +70,8 @@ extern "C" __global__ void copy_into_f32(const float* src, float* dst, View vs, 
 #define REDUCE_THREADS 256
 #define REDUCE_CHUNK 16
 #define NORM_THREADS 512
+#define BLOCK_WARPS 4
+#define LANE_OUTPUTS 4
 
 // Returns the position of element s of the run that starts at logical index base.
 __device__ int run_position(const View& v, int start, unsigned int walk, unsigned int base, unsigned int s) {
@@ -1051,34 +1053,83 @@ extern "C" __global__ void block_matmul_f32(const unsigned char* w, const float*
     dst[i] = with_bias(sum, bias, col);
 }
 
-// x · wᵀ for a block-format weight with few outputs: one warp per output,
-// `blockDim.x / 32` a block. Lane l computes the contributions of blocks l,
-// l + 32 and so on, each whole; then, 32 blocks at a time, every lane reads
-// the contributions from their lanes in block order and adds them, as the
-// host does, so the result has the host's bits. A warp past the last output
-// computes the last one and writes nothing, so that every lane of a block
-// takes part in every shuffle.
+// Returns the 4 bytes at p, which is 2-byte aligned, as one little-endian word.
+__device__ int word_at(const unsigned char* p) {
+    const unsigned short* h = (const unsigned short*)p;
+    return int(unsigned(h[0]) | unsigned(h[1]) << 16);
+}
+
+// Returns block_contribution's value for the block at p, which is 2-byte
+// aligned, from its quantised activations as 8 words, a: the same integer dot
+// product, four products an instruction, and the same expressions after it.
+__device__ float wide_contribution(const unsigned char* p, const int* a, float sx, float mx, unsigned int kind) {
+    int total = 0;
+    if (kind == 0) {
+        for (unsigned int j = 0; j < 8; j++) total = __dp4a(word_at(p + 2 + 4 * j), a[j], total);
+        return float(total) * (block_half(p) * sx);
+    }
+    const unsigned char* packed = p + (kind == 1 ? 2 : 4);
+    for (unsigned int j = 0; j < 4; j++) {
+        int word = word_at(packed + 4 * j);
+        total = __dp4a(word & 0x0f0f0f0f, a[j], total);
+        total = __dp4a((word >> 4) & 0x0f0f0f0f, a[4 + j], total);
+    }
+    if (kind == 1) {
+        int sum = 0;
+        for (unsigned int j = 0; j < 8; j++) sum = __dp4a(0x01010101, a[j], sum);
+        return float(total - 8 * sum) * block_half(p) * sx;
+    }
+    return (block_half(p) * sx) * float(total) + block_half(p + 2) * mx;
+}
+
+// x · wᵀ for a block-format weight with few outputs: `per` consecutive outputs
+// (at most LANE_OUTPUTS) per warp, `blockDim.x / 32` warps a block. Lane l
+// computes the contributions of blocks l, l + 32 and so on to each of its
+// warp's outputs, reading the weights two bytes at a time and the quantised
+// activations four, once for the outputs that share a row. For each 32 blocks,
+// the lanes put their contributions in shared memory, and lane r adds those of
+// output r in block order, as the host does, so the result has the host's
+// bits. Outputs past the last compute the last one and write nothing. The
+// weights must start at an even byte offset.
 extern "C" __global__ void block_matmul_lanes_f32(const unsigned char* w, const float* scales, const float* sums,
                                                   const signed char* qs, float* dst, const float* bias,
                                                   unsigned int kind, unsigned int bytes, unsigned int offset,
-                                                  unsigned int n, unsigned int k, unsigned int count) {
-    unsigned int lane = threadIdx.x % 32;
-    unsigned int output = blockIdx.x * (blockDim.x / 32) + threadIdx.x / 32;
-    unsigned int i = output < count ? output : count - 1;
-    unsigned int blocks = k / 32, row = i / n, col = i % n;
-    const unsigned char* weights = w + offset + col * blocks * bytes;
+                                                  unsigned int n, unsigned int k, unsigned int count, unsigned int per) {
+    __shared__ float parts[BLOCK_WARPS * LANE_OUTPUTS * 32];
+    unsigned int lane = threadIdx.x % 32, warp = threadIdx.x / 32;
+    unsigned int first = (blockIdx.x * (blockDim.x / 32) + warp) * per;
+    unsigned int blocks = k / 32;
+    float* mine = parts + warp * LANE_OUTPUTS * 32;
+    unsigned int lead = min(first, count - 1) / n;
     float sum = 0.0f;
     for (unsigned int start = 0; start < blocks; start += 32) {
         unsigned int block = start + lane;
-        float mine = 0.0f;
-        if (block < blocks)
-            mine = block_contribution(weights + block * bytes, qs + row * k + block * 32, scales[row * blocks + block],
-                                      sums[row * blocks + block], kind);
-        unsigned int run = blocks - start < 32 ? blocks - start : 32;
-        for (unsigned int j = 0; j < 32; j++) {
-            float value = __shfl_sync(0xffffffffu, mine, j);
-            if (j < run) sum += value;
+        if (block < blocks) {
+            int a[8];
+            const int* lead_words = (const int*)(qs + lead * k + block * 32);
+            for (unsigned int j = 0; j < 8; j++) a[j] = lead_words[j];
+            for (unsigned int r = 0; r < per; r++) {
+                unsigned int i = min(first + r, count - 1);
+                unsigned int row = i / n, col = i % n;
+                const unsigned char* p = w + offset + (col * blocks + block) * bytes;
+                unsigned int at = row * blocks + block;
+                if (row == lead) {
+                    mine[r * 32 + lane] = wide_contribution(p, a, scales[at], sums[at], kind);
+                } else {
+                    int own[8];
+                    const int* words = (const int*)(qs + row * k + block * 32);
+                    for (unsigned int j = 0; j < 8; j++) own[j] = words[j];
+                    mine[r * 32 + lane] = wide_contribution(p, own, scales[at], sums[at], kind);
+                }
+            }
         }
+        __syncwarp();
+        if (lane < per) {
+            unsigned int run = blocks - start < 32 ? blocks - start : 32;
+            for (unsigned int j = 0; j < run; j++) sum += mine[lane * 32 + j];
+        }
+        __syncwarp();
     }
-    if (output < count && lane == 0) dst[output] = with_bias(sum, bias, col);
+    unsigned int output = first + lane;
+    if (lane < per && output < count) dst[output] = with_bias(sum, bias, output % n);
 }

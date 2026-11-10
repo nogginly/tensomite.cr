@@ -59,6 +59,16 @@ static T __shfl_xor_sync(unsigned int, T value, int mask) {
     return shuffle_from(value, t ^ unsigned(mask));
 }
 
+// A warp's barrier: here the whole block's, which every kernel that calls it
+// reaches from every thread the same number of times.
+#define __syncwarp() block_barrier->arrive_and_wait()
+
+// The dot product of the four signed bytes of a with those of b, plus c.
+static int __dp4a(int a, int b, int c) {
+    for (int j = 0; j < 4; j++) c += int((signed char)(a >> (8 * j))) * int((signed char)(b >> (8 * j)));
+    return c;
+}
+
 struct Kernel {
     void (*call)(void**);
     bool sync;

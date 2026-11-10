@@ -794,12 +794,68 @@ kernel void block_matmul_f32(device const uchar* w [[buffer(0)]],
     dst[i] = with_bias(sum, bias, col, dims.z);
 }
 
-// x · wᵀ for a block-format weight with few outputs: one SIMD group per
-// output, `groups` a threadgroup. Lane l computes the contributions of blocks
-// l, l + 32 and so on, each whole; then, 32 blocks at a time, every lane reads
-// the contributions from their lanes in block order and adds them, as the
-// host does. A group past the last output computes the last one and writes
-// nothing.
+// Block-format products on lanes: at most LANE_GROUPS SIMD groups a
+// threadgroup, each computing at most LANE_OUTPUTS outputs.
+#define LANE_GROUPS 4
+#define LANE_OUTPUTS 4
+
+// Returns the 4 bytes at p, which is 2-byte aligned, as one little-endian word.
+static uint word_at(device const uchar* p) {
+    device const ushort* h = (device const ushort*)p;
+    return uint(h[0]) | uint(h[1]) << 16;
+}
+
+// Returns c plus the dot product of the four signed bytes of a with those of b.
+static int dot4(uint a, uint b, int c) {
+    for (uint j = 0; j < 4; j++) c += (as_type<int>(a << (24 - 8 * j)) >> 24) * (as_type<int>(b << (24 - 8 * j)) >> 24);
+    return c;
+}
+
+// A block's 32 quantised activations, four to a word.
+struct Words {
+    uint w[8];
+};
+
+// Returns the activations of the block at qb, which is 4-byte aligned.
+static Words words_at(device const char* qb) {
+    device const uint* p = (device const uint*)qb;
+    Words a;
+    for (uint j = 0; j < 8; j++) a.w[j] = p[j];
+    return a;
+}
+
+// Returns block_contribution's value for the block at p, which is 2-byte
+// aligned, from its quantised activations a: the same integer dot product,
+// read four bytes at a time, and the same expressions after it.
+static float wide_contribution(device const uchar* p, Words a, float sx, float mx, uint kind) {
+    int total = 0;
+    if (kind == 0) {
+        for (uint j = 0; j < 8; j++) total = dot4(word_at(p + 2 + 4 * j), a.w[j], total);
+        return float(total) * (block_half(p) * sx);
+    }
+    device const uchar* packed = p + (kind == 1 ? 2 : 4);
+    for (uint j = 0; j < 4; j++) {
+        uint word = word_at(packed + 4 * j);
+        total = dot4(word & 0x0f0f0f0fu, a.w[j], total);
+        total = dot4((word >> 4) & 0x0f0f0f0fu, a.w[4 + j], total);
+    }
+    if (kind == 1) {
+        int sum = 0;
+        for (uint j = 0; j < 8; j++) sum = dot4(0x01010101u, a.w[j], sum);
+        return float(total - 8 * sum) * block_half(p) * sx;
+    }
+    return (block_half(p) * sx) * float(total) + block_half(p + 2) * mx;
+}
+
+// x · wᵀ for a block-format weight with few outputs: `per` consecutive outputs
+// (at most LANE_OUTPUTS) per SIMD group, `groups` a threadgroup (at most
+// LANE_GROUPS). Lane l computes the contributions of blocks l, l + 32 and so
+// on to each of its group's outputs, reading the weights two bytes at a time
+// and the quantised activations four, once for the outputs that share a row.
+// For each 32 blocks, the lanes put their contributions in threadgroup memory,
+// and lane r adds those of output r in block order, as the host does. Outputs
+// past the last compute the last one and write nothing. The weights must
+// start at an even byte offset.
 kernel void block_matmul_lanes_f32(device const uchar* w [[buffer(0)]],
                                    device const float* scales [[buffer(1)]],
                                    device const float* sums [[buffer(2)]],
@@ -809,29 +865,39 @@ kernel void block_matmul_lanes_f32(device const uchar* w [[buffer(0)]],
                                    constant Blocks& b [[buffer(6)]],
                                    constant uint3& dims [[buffer(7)]],
                                    constant uint& count [[buffer(8)]],
+                                   constant uint& per [[buffer(9)]],
                                    uint group [[threadgroup_position_in_grid]],
                                    uint simd [[simdgroup_index_in_threadgroup]],
                                    uint groups [[simdgroups_per_threadgroup]],
                                    uint lane [[thread_index_in_simdgroup]]) {
-    uint output = group * groups + simd;
-    uint i = output < count ? output : count - 1;
+    threadgroup float parts[LANE_GROUPS * LANE_OUTPUTS * 32];
     uint n = dims.x, k = dims.y, blocks = k / 32;
-    uint row = i / n, col = i % n;
-    device const uchar* weights = w + b.offset + col * blocks * b.bytes;
+    uint first = (group * groups + simd) * per;
+    uint mine = simd * LANE_OUTPUTS * 32;
+    uint lead = min(first, count - 1) / n;
     float sum = 0.0f;
     for (uint start = 0; start < blocks; start += 32) {
         uint block = start + lane;
-        float mine = 0.0f;
-        if (block < blocks)
-            mine = block_contribution(weights + block * b.bytes, qs + row * k + block * 32, scales[row * blocks + block],
-                                      sums[row * blocks + block], b.kind);
-        uint run = min(blocks - start, 32u);
-        for (uint j = 0; j < 32; j++) {
-            float value = simd_shuffle(mine, ushort(j));
-            if (j < run) sum += value;
+        if (block < blocks) {
+            Words a = words_at(qs + lead * k + block * 32);
+            for (uint r = 0; r < per; r++) {
+                uint i = min(first + r, count - 1);
+                uint row = i / n, col = i % n;
+                device const uchar* p = w + b.offset + (col * blocks + block) * b.bytes;
+                uint at = row * blocks + block;
+                Words own = row == lead ? a : words_at(qs + row * k + block * 32);
+                parts[mine + r * 32 + lane] = wide_contribution(p, own, scales[at], sums[at], b.kind);
+            }
         }
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+        if (lane < per) {
+            uint run = min(blocks - start, 32u);
+            for (uint j = 0; j < run; j++) sum += parts[mine + lane * 32 + j];
+        }
+        simdgroup_barrier(mem_flags::mem_threadgroup);
     }
-    if (output < count && lane == 0) dst[output] = with_bias(sum, bias, col, dims.z);
+    uint output = first + lane;
+    if (lane < per && output < count) dst[output] = with_bias(sum, bias, output % n, dims.z);
 }
 
 #if __METAL_VERSION__ >= 300
