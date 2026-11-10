@@ -1,7 +1,7 @@
 // Runs the Metal block-format kernels (quantize_rows_q8_f32, block_matmul_f32
 // and gather_blocks_f32) on the CPU, and checks their results against the
 // host's, bit for bit: block_matmul_lanes_f32 as threadgroups of SIMD groups,
-// with 1 to 32 outputs a group, the others one thread at a time. Reads the file blocks_data.cr writes.
+// with 1 to 8 outputs a group, the others one thread at a time. Reads the file blocks_data.cr writes.
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -93,7 +93,7 @@ int main(int argc, char** argv) {
             block_matmul_f32(w.data(), scales.data(), sums.data(), qs.data(), got.data(), bias.data(), b, dims, count, i);
         snprintf(label, sizeof label, "block_matmul %s", names[f]);
         failures += compare(label, got, want);
-        for (uint per : {1u, 2u, 4u, 7u, 32u}) {
+        for (uint per : {1u, 2u, 4u, 7u, 8u}) {
             std::fill(got.begin(), got.end(), 0.0f);
             run_simd_groups((count + 4 * per - 1) / (4 * per), 4, w.data(), scales.data(), sums.data(), qs.data(), got.data(),
                             bias.data(), b, dims, count, per);

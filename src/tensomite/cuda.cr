@@ -696,7 +696,8 @@ module Tensomite
         if block_mode.lanes?(node.size) && offset.even?
           per = BlockMatMulMode.lane_outputs(1)
           groups = (node.size + BLOCK_WARPS * per - 1) // (BLOCK_WARPS * per)
-          context.launch(kernels["block_matmul_lanes_f32"], groups, 32 * BLOCK_WARPS, *args, per.to_u32) if node.size > 0
+          name = block_mode.unordered? ? "block_matmul_unordered_f32" : "block_matmul_lanes_f32"
+          context.launch(kernels[name], groups, 32 * BLOCK_WARPS, *args, per.to_u32) if node.size > 0
         else
           run(kernels["block_matmul_f32"], node.size, *args)
         end

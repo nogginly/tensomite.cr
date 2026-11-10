@@ -799,7 +799,7 @@ kernel void block_matmul_f32(device const uchar* w [[buffer(0)]],
 // contributions it keeps LANE_STRIDE floats apart, so that the lanes adding
 // them read different banks of threadgroup memory.
 #define LANE_GROUPS 4
-#define LANE_OUTPUTS 32
+#define LANE_OUTPUTS 8
 #define LANE_STRIDE 33
 
 // A block's 32 quantised activations y, as floats placed and scaled for the
@@ -910,6 +910,51 @@ kernel void block_matmul_lanes_f32(device const uchar* w [[buffer(0)]],
 }
 
 #if __METAL_VERSION__ >= 300
+// For measurement only: block_matmul_lanes_f32's work, but each lane keeps one
+// running sum per output over its blocks, and simd_sum adds the lanes' sums
+// in its own order, so the bits can differ from the host's.
+kernel void block_matmul_unordered_f32(device const uchar* w [[buffer(0)]],
+                                       device const float* scales [[buffer(1)]],
+                                       device const float* sums [[buffer(2)]],
+                                       device const char* qs [[buffer(3)]],
+                                       device float* dst [[buffer(4)]],
+                                       device const float* bias [[buffer(5)]],
+                                       constant Blocks& b [[buffer(6)]],
+                                       constant uint3& dims [[buffer(7)]],
+                                       constant uint& count [[buffer(8)]],
+                                       constant uint& per [[buffer(9)]],
+                                       uint group [[threadgroup_position_in_grid]],
+                                       uint simd [[simdgroup_index_in_threadgroup]],
+                                       uint groups [[simdgroups_per_threadgroup]],
+                                       uint lane [[thread_index_in_simdgroup]]) {
+    uint n = dims.x, k = dims.y, blocks = k / 32;
+    uint first = (group * groups + simd) * per;
+    uint lead = min(first, count - 1) / n;
+    float total[LANE_OUTPUTS];
+    for (uint r = 0; r < LANE_OUTPUTS; r++) total[r] = 0.0f;
+    for (uint block = lane; block < blocks; block += 32) {
+        Nibbles a;
+        if (b.kind != 0) a = nibbles_at(qs + lead * k + block * 32);
+        for (uint r = 0; r < per; r++) {
+            uint i = min(first + r, count - 1);
+            uint row = i / n, col = i % n;
+            device const uchar* p = w + b.offset + (col * blocks + block) * b.bytes;
+            device const char* qb = qs + row * k + block * 32;
+            uint at = row * blocks + block;
+            if (b.kind == 0) {
+                total[r] += block_contribution(p, qb, scales[at], sums[at], 0);
+            } else {
+                Nibbles own = row == lead ? a : nibbles_at(qb);
+                total[r] += nibble_contribution(p, own, scales[at], sums[at], b.kind);
+            }
+        }
+    }
+    for (uint r = 0; r < per; r++) {
+        float sum = simd_sum(total[r]);
+        if (lane == 0 && first + r < count) dst[first + r] = with_bias(sum, bias, (first + r) % n, dims.z);
+    }
+}
+
 // Atomic, for measurement only: each thread adds its chunk sums straight into the
 // zeroed output, so the order of the additions, and the bits, can change from
 // run to run.

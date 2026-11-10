@@ -74,7 +74,7 @@ extern "C" __global__ void copy_into_f32(const float* src, float* dst, View vs, 
 // most LANE_OUTPUTS outputs, whose contributions it keeps LANE_STRIDE floats
 // apart, so that the lanes adding them read different banks of shared memory.
 #define BLOCK_WARPS 4
-#define LANE_OUTPUTS 32
+#define LANE_OUTPUTS 8
 #define LANE_STRIDE 33
 
 // Returns the position of element s of the run that starts at logical index base.
@@ -1136,4 +1136,44 @@ extern "C" __global__ void block_matmul_lanes_f32(const unsigned char* w, const 
     }
     unsigned int output = first + lane;
     if (lane < per && output < count) dst[output] = with_bias(sum, bias, output % n);
+}
+
+// For measurement only: block_matmul_lanes_f32's work, but each lane keeps one
+// running sum per output over its blocks, and the lanes' sums are added in a
+// tree of shuffles, so the bits can differ from the host's.
+extern "C" __global__ void block_matmul_unordered_f32(const unsigned char* w, const float* scales, const float* sums,
+                                                      const signed char* qs, float* dst, const float* bias,
+                                                      unsigned int kind, unsigned int bytes, unsigned int offset,
+                                                      unsigned int n, unsigned int k, unsigned int count,
+                                                      unsigned int per) {
+    unsigned int lane = threadIdx.x % 32, warp = threadIdx.x / 32;
+    unsigned int first = (blockIdx.x * (blockDim.x / 32) + warp) * per;
+    unsigned int blocks = k / 32;
+    unsigned int lead = min(first, count - 1) / n;
+    float total[LANE_OUTPUTS];
+    for (unsigned int r = 0; r < LANE_OUTPUTS; r++) total[r] = 0.0f;
+    for (unsigned int block = lane; block < blocks; block += 32) {
+        int a[8];
+        const int* lead_words = (const int*)(qs + lead * k + block * 32);
+        for (unsigned int j = 0; j < 8; j++) a[j] = lead_words[j];
+        for (unsigned int r = 0; r < per; r++) {
+            unsigned int i = min(first + r, count - 1);
+            unsigned int row = i / n, col = i % n;
+            const unsigned char* p = w + offset + (col * blocks + block) * bytes;
+            unsigned int at = row * blocks + block;
+            if (row == lead) {
+                total[r] += wide_contribution(p, a, scales[at], sums[at], kind);
+            } else {
+                int own[8];
+                const int* words = (const int*)(qs + row * k + block * 32);
+                for (unsigned int j = 0; j < 8; j++) own[j] = words[j];
+                total[r] += wide_contribution(p, own, scales[at], sums[at], kind);
+            }
+        }
+    }
+    for (unsigned int r = 0; r < per; r++) {
+        float sum = total[r];
+        for (int width = 16; width > 0; width /= 2) sum += __shfl_xor_sync(0xffffffffu, sum, width);
+        if (lane == 0 && first + r < count) dst[first + r] = with_bias(sum, bias, (first + r) % n);
+    }
 }
