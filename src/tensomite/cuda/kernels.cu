@@ -1093,8 +1093,8 @@ __device__ float wide_contribution(const unsigned char* p, const int* a, float s
 // activations four, once for the outputs that share a row. For each 32 blocks,
 // the lanes put their contributions in shared memory, and lane r adds those of
 // output r in block order, as the host does, so the result has the host's
-// bits. Outputs past the last compute the last one and write nothing. The
-// weights must start at an even byte offset.
+// bits. Each output's row and column are found by stepping from the first's,
+// not by dividing. The weights must start at an even byte offset.
 extern "C" __global__ void block_matmul_lanes_f32(const unsigned char* w, const float* scales, const float* sums,
                                                   const signed char* qs, float* dst, const float* bias,
                                                   unsigned int kind, unsigned int bytes, unsigned int offset,
@@ -1104,7 +1104,8 @@ extern "C" __global__ void block_matmul_lanes_f32(const unsigned char* w, const 
     unsigned int first = (blockIdx.x * (blockDim.x / 32) + warp) * per;
     unsigned int blocks = k / 32;
     float* mine = parts + warp * LANE_OUTPUTS * LANE_STRIDE;
-    unsigned int lead = min(first, count - 1) / n;
+    unsigned int lead = min(first, count - 1) / n, lead_col = min(first, count - 1) % n;
+    unsigned int live = first < count ? min(per, count - first) : 0;
     float sum = 0.0f;
     for (unsigned int start = 0; start < blocks; start += 32) {
         unsigned int block = start + lane;
@@ -1112,9 +1113,8 @@ extern "C" __global__ void block_matmul_lanes_f32(const unsigned char* w, const 
             int a[8];
             const int* lead_words = (const int*)(qs + lead * k + block * 32);
             for (unsigned int j = 0; j < 8; j++) a[j] = lead_words[j];
-            for (unsigned int r = 0; r < per; r++) {
-                unsigned int i = min(first + r, count - 1);
-                unsigned int row = i / n, col = i % n;
+            unsigned int row = lead, col = lead_col;
+            for (unsigned int r = 0; r < live; r++) {
                 const unsigned char* p = w + offset + (col * blocks + block) * bytes;
                 unsigned int at = row * blocks + block;
                 if (row == lead) {
@@ -1125,6 +1125,7 @@ extern "C" __global__ void block_matmul_lanes_f32(const unsigned char* w, const 
                     for (unsigned int j = 0; j < 8; j++) own[j] = words[j];
                     mine[r * LANE_STRIDE + lane] = wide_contribution(p, own, scales[at], sums[at], kind);
                 }
+                if (++col == n) col = 0, row++;
             }
         }
         __syncwarp();
@@ -1149,16 +1150,16 @@ extern "C" __global__ void block_matmul_unordered_f32(const unsigned char* w, co
     unsigned int lane = threadIdx.x % 32, warp = threadIdx.x / 32;
     unsigned int first = (blockIdx.x * (blockDim.x / 32) + warp) * per;
     unsigned int blocks = k / 32;
-    unsigned int lead = min(first, count - 1) / n;
+    unsigned int lead = min(first, count - 1) / n, lead_col = min(first, count - 1) % n;
+    unsigned int live = first < count ? min(per, count - first) : 0;
     float total[LANE_OUTPUTS];
     for (unsigned int r = 0; r < LANE_OUTPUTS; r++) total[r] = 0.0f;
     for (unsigned int block = lane; block < blocks; block += 32) {
         int a[8];
         const int* lead_words = (const int*)(qs + lead * k + block * 32);
         for (unsigned int j = 0; j < 8; j++) a[j] = lead_words[j];
-        for (unsigned int r = 0; r < per; r++) {
-            unsigned int i = min(first + r, count - 1);
-            unsigned int row = i / n, col = i % n;
+        unsigned int row = lead, col = lead_col;
+        for (unsigned int r = 0; r < live; r++) {
             const unsigned char* p = w + offset + (col * blocks + block) * bytes;
             unsigned int at = row * blocks + block;
             if (row == lead) {
@@ -1169,6 +1170,7 @@ extern "C" __global__ void block_matmul_unordered_f32(const unsigned char* w, co
                 for (unsigned int j = 0; j < 8; j++) own[j] = words[j];
                 total[r] += wide_contribution(p, own, scales[at], sums[at], kind);
             }
+            if (++col == n) col = 0, row++;
         }
     }
     for (unsigned int r = 0; r < per; r++) {

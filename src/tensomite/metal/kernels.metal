@@ -855,8 +855,9 @@ static float nibble_contribution(device const uchar* p, Nibbles a, float sx, flo
 // time, against activations prepared once for the outputs that share a row,
 // and Q8_0 as block_contribution does. For each 32 blocks, the lanes put their
 // contributions in threadgroup memory, and lane r adds those of output r in
-// block order, as the host does. Outputs past the last compute the last one
-// and write nothing. The weights must start at an even byte offset.
+// block order, as the host does. Each output's row and column are found by
+// stepping from the first's, not by dividing. The weights must start at an
+// even byte offset.
 kernel void block_matmul_lanes_f32(device const uchar* w [[buffer(0)]],
                                    device const float* scales [[buffer(1)]],
                                    device const float* sums [[buffer(2)]],
@@ -875,16 +876,16 @@ kernel void block_matmul_lanes_f32(device const uchar* w [[buffer(0)]],
     uint n = dims.x, k = dims.y, blocks = k / 32;
     uint first = (group * groups + simd) * per;
     uint mine = simd * LANE_OUTPUTS * LANE_STRIDE;
-    uint lead = min(first, count - 1) / n;
+    uint lead = min(first, count - 1) / n, lead_col = min(first, count - 1) % n;
+    uint live = first < count ? min(per, count - first) : 0;
     float sum = 0.0f;
     for (uint start = 0; start < blocks; start += 32) {
         uint block = start + lane;
         if (block < blocks) {
             Nibbles a;
             if (b.kind != 0) a = nibbles_at(qs + lead * k + block * 32);
-            for (uint r = 0; r < per; r++) {
-                uint i = min(first + r, count - 1);
-                uint row = i / n, col = i % n;
+            uint row = lead, col = lead_col;
+            for (uint r = 0; r < live; r++) {
                 device const uchar* p = w + b.offset + (col * blocks + block) * b.bytes;
                 device const char* qb = qs + row * k + block * 32;
                 uint at = row * blocks + block;
@@ -896,6 +897,7 @@ kernel void block_matmul_lanes_f32(device const uchar* w [[buffer(0)]],
                     part = nibble_contribution(p, own, scales[at], sums[at], b.kind);
                 }
                 parts[mine + r * LANE_STRIDE + lane] = part;
+                if (++col == n) col = 0, row++;
             }
         }
         simdgroup_barrier(mem_flags::mem_threadgroup);
@@ -929,15 +931,15 @@ kernel void block_matmul_unordered_f32(device const uchar* w [[buffer(0)]],
                                        uint lane [[thread_index_in_simdgroup]]) {
     uint n = dims.x, k = dims.y, blocks = k / 32;
     uint first = (group * groups + simd) * per;
-    uint lead = min(first, count - 1) / n;
+    uint lead = min(first, count - 1) / n, lead_col = min(first, count - 1) % n;
+    uint live = first < count ? min(per, count - first) : 0;
     float total[LANE_OUTPUTS];
     for (uint r = 0; r < LANE_OUTPUTS; r++) total[r] = 0.0f;
     for (uint block = lane; block < blocks; block += 32) {
         Nibbles a;
         if (b.kind != 0) a = nibbles_at(qs + lead * k + block * 32);
-        for (uint r = 0; r < per; r++) {
-            uint i = min(first + r, count - 1);
-            uint row = i / n, col = i % n;
+        uint row = lead, col = lead_col;
+        for (uint r = 0; r < live; r++) {
             device const uchar* p = w + b.offset + (col * blocks + block) * b.bytes;
             device const char* qb = qs + row * k + block * 32;
             uint at = row * blocks + block;
@@ -947,6 +949,7 @@ kernel void block_matmul_unordered_f32(device const uchar* w [[buffer(0)]],
                 Nibbles own = row == lead ? a : nibbles_at(qb);
                 total[r] += nibble_contribution(p, own, scales[at], sums[at], b.kind);
             }
+            if (++col == n) col = 0, row++;
         }
     }
     for (uint r = 0; r < per; r++) {
