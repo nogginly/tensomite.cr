@@ -799,63 +799,61 @@ kernel void block_matmul_f32(device const uchar* w [[buffer(0)]],
 #define LANE_GROUPS 4
 #define LANE_OUTPUTS 4
 
-// Returns the 4 bytes at p, which is 2-byte aligned, as one little-endian word.
-static uint word_at(device const uchar* p) {
-    device const ushort* h = (device const ushort*)p;
-    return uint(h[0]) | uint(h[1]) << 16;
-}
-
-// Returns c plus the dot product of the four signed bytes of a with those of b.
-static int dot4(uint a, uint b, int c) {
-    for (uint j = 0; j < 4; j++) c += (as_type<int>(a << (24 - 8 * j)) >> 24) * (as_type<int>(b << (24 - 8 * j)) >> 24);
-    return c;
-}
-
-// A block's 32 quantised activations, four to a word.
-struct Words {
-    uint w[8];
+// A block's 32 quantised activations y, as floats placed and scaled for the
+// nibbles of a 16-bit weight word read in place: y[2i] at v[i], y[2i + 1] /
+// 256 at v[8 + i], y[2i + 16] / 16 at v[16 + i] and y[2i + 17] / 4096 at
+// v[24 + i]; and Σy. Scaling by a power of two is exact, so each masked
+// nibble times its entry is the integer product q·y exactly.
+struct Nibbles {
+    float v[32];
+    float sum;
 };
 
-// Returns the activations of the block at qb, which is 4-byte aligned.
-static Words words_at(device const char* qb) {
-    device const uint* p = (device const uint*)qb;
-    Words a;
-    for (uint j = 0; j < 8; j++) a.w[j] = p[j];
+// Returns the activations of the block at qb as Nibbles.
+static Nibbles nibbles_at(device const char* qb) {
+    Nibbles a;
+    float sum = 0.0f;
+    for (uint i = 0; i < 8; i++) {
+        float e0 = float(qb[2 * i]), e1 = float(qb[2 * i + 1]), e2 = float(qb[2 * i + 16]), e3 = float(qb[2 * i + 17]);
+        a.v[i] = e0;
+        a.v[8 + i] = e1 * 0.00390625f;
+        a.v[16 + i] = e2 * 0.0625f;
+        a.v[24 + i] = e3 * 0.000244140625f;
+        sum += e0 + e1 + e2 + e3;
+    }
+    a.sum = sum;
     return a;
 }
 
-// Returns block_contribution's value for the block at p, which is 2-byte
-// aligned, from its quantised activations a: the same integer dot product,
-// read four bytes at a time, and the same expressions after it.
-static float wide_contribution(device const uchar* p, Words a, float sx, float mx, uint kind) {
-    int total = 0;
-    if (kind == 0) {
-        for (uint j = 0; j < 8; j++) total = dot4(word_at(p + 2 + 4 * j), a.w[j], total);
-        return float(total) * (block_half(p) * sx);
-    }
-    device const uchar* packed = p + (kind == 1 ? 2 : 4);
-    for (uint j = 0; j < 4; j++) {
-        uint word = word_at(packed + 4 * j);
-        total = dot4(word & 0x0f0f0f0fu, a.w[j], total);
-        total = dot4((word >> 4) & 0x0f0f0f0fu, a.w[4 + j], total);
+// Returns block_contribution's value for the Q4_0 or Q4_1 block at p, which
+// is 2-byte aligned. The integer dot product is summed in floats: every
+// product and partial sum is an integer below 2^24, so each is exact in any
+// order, and Σ(q - 8)·y is Σq·y - 8·Σy exactly. The expressions after it are
+// the host's.
+static float nibble_contribution(device const uchar* p, Nibbles a, float sx, float mx, uint kind) {
+    device const ushort* h = (device const ushort*)(p + (kind == 1 ? 2 : 4));
+    float acc = 0.0f;
+    for (uint i = 0; i < 8; i++) {
+        uint word = h[i];
+        acc += float(word & 0x000fu) * a.v[i] + float(word & 0x0f00u) * a.v[8 + i] +
+               float(word & 0x00f0u) * a.v[16 + i] + float(word & 0xf000u) * a.v[24 + i];
     }
     if (kind == 1) {
-        int sum = 0;
-        for (uint j = 0; j < 8; j++) sum = dot4(0x01010101u, a.w[j], sum);
-        return float(total - 8 * sum) * block_half(p) * sx;
+        float total = acc - 8.0f * a.sum;
+        return total * block_half(p) * sx;
     }
-    return (block_half(p) * sx) * float(total) + block_half(p + 2) * mx;
+    return (block_half(p) * sx) * acc + block_half(p + 2) * mx;
 }
 
 // x · wᵀ for a block-format weight with few outputs: `per` consecutive outputs
 // (at most LANE_OUTPUTS) per SIMD group, `groups` a threadgroup (at most
 // LANE_GROUPS). Lane l computes the contributions of blocks l, l + 32 and so
-// on to each of its group's outputs, reading the weights two bytes at a time
-// and the quantised activations four, once for the outputs that share a row.
-// For each 32 blocks, the lanes put their contributions in threadgroup memory,
-// and lane r adds those of output r in block order, as the host does. Outputs
-// past the last compute the last one and write nothing. The weights must
-// start at an even byte offset.
+// on to each of its group's outputs: Q4_0 and Q4_1 weights two bytes at a
+// time, against activations prepared once for the outputs that share a row,
+// and Q8_0 as block_contribution does. For each 32 blocks, the lanes put their
+// contributions in threadgroup memory, and lane r adds those of output r in
+// block order, as the host does. Outputs past the last compute the last one
+// and write nothing. The weights must start at an even byte offset.
 kernel void block_matmul_lanes_f32(device const uchar* w [[buffer(0)]],
                                    device const float* scales [[buffer(1)]],
                                    device const float* sums [[buffer(2)]],
@@ -879,14 +877,22 @@ kernel void block_matmul_lanes_f32(device const uchar* w [[buffer(0)]],
     for (uint start = 0; start < blocks; start += 32) {
         uint block = start + lane;
         if (block < blocks) {
-            Words a = words_at(qs + lead * k + block * 32);
+            Nibbles a;
+            if (b.kind != 0) a = nibbles_at(qs + lead * k + block * 32);
             for (uint r = 0; r < per; r++) {
                 uint i = min(first + r, count - 1);
                 uint row = i / n, col = i % n;
                 device const uchar* p = w + b.offset + (col * blocks + block) * b.bytes;
+                device const char* qb = qs + row * k + block * 32;
                 uint at = row * blocks + block;
-                Words own = row == lead ? a : words_at(qs + row * k + block * 32);
-                parts[mine + r * 32 + lane] = wide_contribution(p, own, scales[at], sums[at], b.kind);
+                float part;
+                if (b.kind == 0) {
+                    part = block_contribution(p, qb, scales[at], sums[at], 0);
+                } else {
+                    Nibbles own = row == lead ? a : nibbles_at(qb);
+                    part = nibble_contribution(p, own, scales[at], sums[at], b.kind);
+                }
+                parts[mine + r * 32 + lane] = part;
             }
         }
         simdgroup_barrier(mem_flags::mem_threadgroup);
