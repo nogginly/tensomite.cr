@@ -914,7 +914,8 @@ kernel void block_matmul_lanes_f32(device const uchar* w [[buffer(0)]],
 #if __METAL_VERSION__ >= 300
 // For measurement only: block_matmul_lanes_f32's work, but each lane keeps one
 // running sum per output over its blocks, and simd_sum adds the lanes' sums
-// in its own order, so the bits can differ from the host's.
+// in its own order, so the bits can differ from the host's. The loops over
+// outputs are unrolled, so that the sums stay in registers.
 kernel void block_matmul_unordered_f32(device const uchar* w [[buffer(0)]],
                                        device const float* scales [[buffer(1)]],
                                        device const float* sums [[buffer(2)]],
@@ -934,12 +935,15 @@ kernel void block_matmul_unordered_f32(device const uchar* w [[buffer(0)]],
     uint lead = min(first, count - 1) / n, lead_col = min(first, count - 1) % n;
     uint live = first < count ? min(per, count - first) : 0;
     float total[LANE_OUTPUTS];
+#pragma unroll
     for (uint r = 0; r < LANE_OUTPUTS; r++) total[r] = 0.0f;
     for (uint block = lane; block < blocks; block += 32) {
         Nibbles a;
         if (b.kind != 0) a = nibbles_at(qs + lead * k + block * 32);
         uint row = lead, col = lead_col;
-        for (uint r = 0; r < live; r++) {
+#pragma unroll
+        for (uint r = 0; r < LANE_OUTPUTS; r++) {
+            if (r >= live) break;
             device const uchar* p = w + b.offset + (col * blocks + block) * b.bytes;
             device const char* qb = qs + row * k + block * 32;
             uint at = row * blocks + block;
@@ -952,7 +956,9 @@ kernel void block_matmul_unordered_f32(device const uchar* w [[buffer(0)]],
             if (++col == n) col = 0, row++;
         }
     }
-    for (uint r = 0; r < per; r++) {
+#pragma unroll
+    for (uint r = 0; r < LANE_OUTPUTS; r++) {
+        if (r >= per) break;
         float sum = simd_sum(total[r]);
         if (lane == 0 && first + r < count) dst[first + r] = with_bias(sum, bias, (first + r) % n, dims.z);
     }

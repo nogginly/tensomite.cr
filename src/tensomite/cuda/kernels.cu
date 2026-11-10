@@ -1141,7 +1141,8 @@ extern "C" __global__ void block_matmul_lanes_f32(const unsigned char* w, const 
 
 // For measurement only: block_matmul_lanes_f32's work, but each lane keeps one
 // running sum per output over its blocks, and the lanes' sums are added in a
-// tree of shuffles, so the bits can differ from the host's.
+// tree of shuffles, so the bits can differ from the host's. The loops over
+// outputs are unrolled, so that the sums stay in registers.
 extern "C" __global__ void block_matmul_unordered_f32(const unsigned char* w, const float* scales, const float* sums,
                                                       const signed char* qs, float* dst, const float* bias,
                                                       unsigned int kind, unsigned int bytes, unsigned int offset,
@@ -1153,13 +1154,16 @@ extern "C" __global__ void block_matmul_unordered_f32(const unsigned char* w, co
     unsigned int lead = min(first, count - 1) / n, lead_col = min(first, count - 1) % n;
     unsigned int live = first < count ? min(per, count - first) : 0;
     float total[LANE_OUTPUTS];
+#pragma unroll
     for (unsigned int r = 0; r < LANE_OUTPUTS; r++) total[r] = 0.0f;
     for (unsigned int block = lane; block < blocks; block += 32) {
         int a[8];
         const int* lead_words = (const int*)(qs + lead * k + block * 32);
         for (unsigned int j = 0; j < 8; j++) a[j] = lead_words[j];
         unsigned int row = lead, col = lead_col;
-        for (unsigned int r = 0; r < live; r++) {
+#pragma unroll
+        for (unsigned int r = 0; r < LANE_OUTPUTS; r++) {
+            if (r >= live) break;
             const unsigned char* p = w + offset + (col * blocks + block) * bytes;
             unsigned int at = row * blocks + block;
             if (row == lead) {
@@ -1173,7 +1177,9 @@ extern "C" __global__ void block_matmul_unordered_f32(const unsigned char* w, co
             if (++col == n) col = 0, row++;
         }
     }
-    for (unsigned int r = 0; r < per; r++) {
+#pragma unroll
+    for (unsigned int r = 0; r < LANE_OUTPUTS; r++) {
+        if (r >= per) break;
         float sum = total[r];
         for (int width = 16; width > 0; width /= 2) sum += __shfl_xor_sync(0xffffffffu, sum, width);
         if (lane == 0 && first + r < count) dst[first + r] = with_bias(sum, bias, (first + r) % n);
