@@ -1,3 +1,5 @@
+require "wait_group"
+
 module Tensomite
   # Quantises and dequantises rows in ggml's block formats on the host, giving
   # the bytes and values of ggml's reference code (`quantize_row_*_ref` and
@@ -148,16 +150,51 @@ module Tensomite
       rows.times do |row|
         quantize_activations(x[row * k, k], scales, sums, qs, with_sums: dtype.q4_1?)
         blocks.times { |block| totals[block] = block_total(qs.to_unsafe + block * 32) }
-        n.times do |col|
-          weight = w.to_unsafe + col * row_bytes
-          dst[row * n + col] = case dtype
-                               when .q8_0? then fast_q8_0(weight, scales, qs, blocks)
-                               when .q4_0? then fast_q4_0(weight, scales, totals, qs, blocks)
-                               when .q4_1? then fast_q4_1(weight, scales, sums, qs, blocks)
-                               else             raise DTypeError.new("#{dtype} is not a block format")
-                               end
+        out = dst[row * n, n]
+        Quant.in_parallel(n, n * row_bytes) do |first, stop|
+          (first...stop).each do |col|
+            weight = w.to_unsafe + col * row_bytes
+            out[col] = case dtype
+                       when .q8_0? then fast_q8_0(weight, scales, qs, blocks)
+                       when .q4_0? then fast_q4_0(weight, scales, totals, qs, blocks)
+                       when .q4_1? then fast_q4_1(weight, scales, sums, qs, blocks)
+                       else             raise DTypeError.new("#{dtype} is not a block format")
+                       end
+          end
         end
       end
+    end
+
+    # The threads quantised products run on: `TENSOMITE_THREADS`, or the
+    # machine's CPU count. Setting it after the first product has shared its
+    # work changes how many spans products are cut into, not the pool's size.
+    class_property threads : Int32 = ENV["TENSOMITE_THREADS"]?.try(&.to_i?).try(&.clamp(1, 1024)) || System.cpu_count.to_i.clamp(1, 1024)
+
+    # The fewest weight bytes worth a thread of their own.
+    private PARALLEL_BYTES = 64 * 1024
+
+    @@pool : Fiber::ExecutionContext::Parallel? = nil
+
+    # Runs the block on spans `first...stop` that cover `0...count` in order:
+    # one span on the calling thread when the work, *bytes* of weights, is too
+    # small to share, or up to `.threads` spans on the pool's threads
+    # otherwise, returning when all have finished. Each index falls in exactly
+    # one span, so the results do not depend on the number of threads.
+    protected def self.in_parallel(count : Int32, bytes : Int32, &block : Int32, Int32 ->) : Nil
+      spans = Math.min(threads, Math.min(count, bytes // PARALLEL_BYTES))
+      return block.call(0, count) if spans <= 1
+      HALVES.size
+      pool = @@pool ||= Fiber::ExecutionContext::Parallel.new("tensomite", threads)
+      done = WaitGroup.new(spans)
+      spans.times do |span|
+        first, stop = count * span // spans, count * (span + 1) // spans
+        pool.spawn do
+          block.call(first, stop)
+        ensure
+          done.done
+        end
+      end
+      done.wait
     end
 
     # Returns the sum of a block's 32 quantised values.
