@@ -97,7 +97,7 @@ module Tensomite
     private REDUCE_CHUNK   =  16
     private NORM_THREADS   = 512
     private BLOCK          = 256
-    # Warps in each block of a quantised matmul, one per output.
+    # Warps in each block of a quantised matmul on lanes.
     private BLOCK_WARPS =   4
     private COLS        =  32
     private SLICES      =   8
@@ -676,6 +676,9 @@ module Tensomite
     # quantises each block of the activations into scratch memory and then one
     # thread per output or, as `#block_mode` says, one warp per output,
     # `BLOCK_WARPS` to a block; and `Gather`, one thread per output element.
+    # A warp computes one output unless `TENSOMITE_LANE_OUTPUTS` says more:
+    # on the GB10, two or four outputs a warp, sharing their activations, were
+    # no faster than one, which leaves more warps to hide memory's latency.
     private def launch_blocks(kernels : Kernels, node : Node, output : CUDABuffer) : Bool
       return false unless node.dtype.f32? && node.srcs.all? { |src| src.ndim <= MAX_DIMS }
       case node.op
@@ -690,9 +693,11 @@ module Tensomite
         run(kernels["quantize_rows_q8_f32"], blocks, pointer(x), scales, sums, qs, view_args(x.view), blocks.to_u32)
         kind, bytes, offset = block_args(w)
         args = {pointer(w), scales, sums, qs, output.pointer, bias_pointer(node), kind, bytes, offset, n.to_u32, k.to_u32, node.size.to_u32}
-        if block_mode.lanes?(node.size)
-          groups = (node.size + BLOCK_WARPS - 1) // BLOCK_WARPS
-          context.launch(kernels["block_matmul_lanes_f32"], groups, 32 * BLOCK_WARPS, *args) if node.size > 0
+        if block_mode.lanes?(node.size) && offset.even?
+          per = BlockMatMulMode.lane_outputs(1)
+          groups = (node.size + BLOCK_WARPS * per - 1) // (BLOCK_WARPS * per)
+          name = block_mode.unordered? ? "block_matmul_unordered_f32" : "block_matmul_lanes_f32"
+          context.launch(kernels[name], groups, 32 * BLOCK_WARPS, *args, per.to_u32) if node.size > 0
         else
           run(kernels["block_matmul_f32"], node.size, *args)
         end

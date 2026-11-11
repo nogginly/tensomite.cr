@@ -11,8 +11,8 @@ module Tensomite
   # - `Q4_1`: `d` and a minimum `m` (both `F16`), then nibbles as in `Q4_0`;
   #   `x = q · d + m`.
   # How a GPU divides the work of a quantised matmul (`Tensor#linear` with a
-  # block-format weight). Every mode gives the host's bits; they differ only in
-  # speed.
+  # block-format weight). Every mode but `Unordered` gives the host's bits;
+  # they differ only in speed.
   enum BlockMatMulMode
     # Lanes when the product has fewer than `.lanes_below` outputs, which leave
     # one thread per output too few to fill the GPU, and threads otherwise.
@@ -22,6 +22,10 @@ module Tensomite
     # 32 lanes per output: each lane takes whole blocks, and the lanes' sums
     # are added in block order.
     Lanes
+    # For measurement only: as `Lanes`, but each lane keeps one running sum
+    # over its blocks and the lanes' sums are added in a tree, so the bits can
+    # differ from the host's. It shows what adding in block order costs.
+    Unordered
 
     # Returns the number of outputs below which `Auto` uses lanes. On the GB10,
     # lanes decode SmolLM2's 49,152-word head faster than threads too.
@@ -29,16 +33,25 @@ module Tensomite
       65_536
     end
 
-    # Returns the mode `TENSOMITE_BLOCK_MATMUL` names (`auto`, `thread` or
-    # `lanes`), or `Auto` without it, so that the modes can be timed against
+    # Returns the mode `TENSOMITE_BLOCK_MATMUL` names (`auto`, `thread`,
+    # `lanes` or `unordered`), or `Auto` without it, so that the modes can be timed against
     # each other without rebuilding.
     def self.from_env : BlockMatMulMode
       ENV["TENSOMITE_BLOCK_MATMUL"]?.try { |name| parse?(name) } || Auto
     end
 
-    # Returns true when a product of *outputs* outputs runs on lanes.
+    # Returns the outputs each warp or SIMD group computes when a product runs
+    # on lanes: *chosen*, the device's own choice, or the count
+    # `TENSOMITE_LANE_OUTPUTS` (1 to 8) sets, so that the counts can be timed
+    # against each other without rebuilding.
+    def self.lane_outputs(chosen : Int32) : Int32
+      ENV["TENSOMITE_LANE_OUTPUTS"]?.try(&.to_i?).try(&.clamp(1, 8)) || chosen
+    end
+
+    # Returns true when a product of *outputs* outputs runs on lanes, in block
+    # order or not.
     def lanes?(outputs : Int32) : Bool
-      lanes? || (auto? && outputs < BlockMatMulMode.lanes_below)
+      lanes? || unordered? || (auto? && outputs < BlockMatMulMode.lanes_below)
     end
   end
 
