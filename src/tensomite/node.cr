@@ -86,6 +86,12 @@ module Tensomite
     # Source 0 with each element kept, times `Node#scale`, or zeroed, by
     # `Node#dropout`'s mask (see `Tensor#dropout`).
     Dropout
+    # Attention, fused, for a few query rows: for queries q, keys k and values
+    # v (sources 0 to 2, `[..., rows, width]`, `[..., positions, width]` and
+    # `[..., positions, value width]`), `softmax(q · kᵀ · Node#scale + mask) ·
+    # v`, with the mask (source 3, if any) expanded to `[..., rows,
+    # positions]`. Only GPUs make it (see `Tensor.attention`).
+    Attention
     # Source 1 copied into the region `Node#source_view` of source 0, in place:
     # the node's buffer is source 0's, and every other element keeps its value.
     # See `Tensor#write`.
@@ -132,8 +138,8 @@ module Tensomite
     getter kernel : Kernel?
     # The epsilon a `LayerNorm` node adds to each row's variance.
     getter epsilon : Float32?
-    # The factor a `Softmax` node multiplies its input by, or a `SoftmaxGrad` node
-    # its result by.
+    # The factor a `Softmax` or `Attention` node multiplies its scores by, or a
+    # `SoftmaxGrad` node its result by.
     getter scale : Float32?
     # The mask a `Dropout` node applies.
     getter dropout : DropoutMask?

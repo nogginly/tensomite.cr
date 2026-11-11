@@ -110,6 +110,50 @@ module Tensomite
       self / ((self * self).mean(-1, keepdims: true) + eps).sqrt * weight
     end
 
+    # The most query rows per head, and cached positions, that `.attention`
+    # fuses.
+    ATTENTION_ROWS      =    8
+    ATTENTION_POSITIONS = 4096
+
+    # Returns attention: `softmax(q · kᵀ · scale + mask) · v`, for queries *q*
+    # `[..., rows, width]`, keys *k* `[..., positions, width]` and values *v*
+    # `[..., positions, value width]`, with *mask* broadcast to `[...,
+    # rows, positions]`.
+    #
+    # On a device that `Device#fuses_attention?`, with `F32` data, at most
+    # `ATTENTION_ROWS` rows per head and `ATTENTION_POSITIONS` positions, as
+    # decoding has, it is one op (`Op::Attention`), whose scores never leave
+    # the GPU; its results are within rounding of the composite's. Otherwise it
+    # is the composite: a matmul, a fused softmax and a matmul.
+    def self.attention(q : Tensor, k : Tensor, v : Tensor, *, scale : Number, mask : Tensor? = nil) : Tensor
+      if attention_fusable?(q, k, v, mask)
+        q.check_compatible("attention", mask ? [k, v, mask] : [k, v])
+        scores = q.shape[0...-1] + [k.shape[-2]]
+        srcs = [q, k, v]
+        srcs << mask.expand(scores) if mask
+        return Tensor.lazy(Node.new(Op::Attention, srcs, q.shape[0...-1] + [v.shape[-1]], q.dtype, q.device, scale: scale.to_f32))
+      end
+      q.matmul(k.transpose).softmax(scale: scale, mask: mask).matmul(v)
+    end
+
+    # Returns true when `.attention` of these makes one `Op::Attention`.
+    private def self.attention_fusable?(q : Tensor, k : Tensor, v : Tensor, mask : Tensor?) : Bool
+      return false unless q.device.fuses_attention? && {q, k, v}.all?(&.dtype.f32?) && mask.try(&.dtype.f32?) != false
+      return false unless attention_shapes?(q, k, v)
+      return false unless q.shape[-2] <= ATTENTION_ROWS && 0 < k.shape[-2] <= ATTENTION_POSITIONS
+      scores = q.shape[0...-1] + [k.shape[-2]]
+      mask.nil? || View.broadcast_shape(scores, mask.shape) == scores
+    end
+
+    # Returns true when *q*, *k* and *v* are `[..., rows, width]`, `[...,
+    # positions, width]` and `[..., positions, value width]` with the same
+    # leading dimensions.
+    private def self.attention_shapes?(q : Tensor, k : Tensor, v : Tensor) : Bool
+      return false unless q.ndim >= 2 && q.ndim == k.ndim && k.ndim == v.ndim
+      lead = q.shape[0...-2]
+      lead == k.shape[0...-2] && lead == v.shape[0...-2] && q.shape[-1] == k.shape[-1] && k.shape[-2] == v.shape[-2]
+    end
+
     # Returns `self · cos + rotate_half(self) · sin`, rotary embeddings' rotation
     # of the pairs `(i, i + width/2)` of the last axis, for *cos* and *sin* that
     # broadcast to this shape.

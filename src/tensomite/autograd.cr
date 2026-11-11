@@ -155,6 +155,8 @@ module Tensomite
         layernorm_backward(node, g)
       in Op::RMSNorm
         rmsnorm_backward(node, g)
+      in Op::Attention
+        attention_backward(node, g)
       in Op::Rope
         _, cos, sin = srcs
         [g * cos + (g * sin).rotate_half_transposed, nil, nil] of Tensor?
@@ -171,6 +173,22 @@ module Tensomite
       in Nil
         raise Error.new("leaf nodes have no sources")
       end
+    end
+
+    # Returns the gradients of a fused attention's queries, keys, values and
+    # mask, from its softmax weights recomputed as the composite computes them:
+    # `dv = wᵀ · g`, the weights' gradient `g · vᵀ` through the softmax, then
+    # `dq = ds · k` and `dk = dsᵀ · q`; the mask's lacks the scale.
+    private def self.attention_backward(node : Node, g : Tensor) : Array(Tensor?)
+      q, k, v = node.srcs
+      mask = node.srcs[3]?
+      scale = node.scale || raise Error.new("attention needs a scale")
+      weights = q.matmul(k.transpose).softmax(scale: scale, mask: mask)
+      dw = g.matmul(v.transpose)
+      ds = softmax_grad(dw, weights, scale)
+      grads = [ds.matmul(k), ds.transpose.matmul(q), weights.transpose.matmul(g)] of Tensor?
+      grads << softmax_grad(dw, weights, nil) if mask
+      grads
     end
 
     # Returns the gradients of a fused layer norm's input, weight and bias, each
