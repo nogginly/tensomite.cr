@@ -65,10 +65,9 @@ module Tensomite
     private OTHER    = %w[copy_into_f32 sum_f32 max_f32 sum_short_f32 max_short_f32 gather_f32 fill_zero_f32 scatter_add_f32 scatter_add_column_f32 unview_f32 matmul_f32 matmul_split_f32 matmul_tiled_chunks_64x64_f32 matmul_chunk_sums_f32 matmul_tiled_32x32_f32 matmul_tiled_64x64_f32 matmul_tiled_32x64_f32 dropout_f32 softmax_f32 softmax_scaled_f32 softmax_grad_f32 log_softmax_grad_f32 log_softmax_f32 layernorm_f32 layernorm_grad_f32 rmsnorm_f32 rope_f32 gather_blocks_f32 quantize_rows_q8_f32 block_matmul_f32 block_matmul_lanes_f32]
     private OPTIONAL = %w[matmul_atomic_f32 block_matmul_unordered_f32]
     private COLS     = 32
-    # SIMD groups in each threadgroup of a quantised matmul on lanes; at most
-    # the kernels' LANE_GROUPS.
+    # SIMD groups in each threadgroup of a quantised matmul on lanes.
     private BLOCK_GROUPS = 4
-    # Outputs from which a quantised matmul on lanes gives each SIMD group four.
+    # Outputs from which an unordered quantised matmul gives each SIMD group four.
     private LANE_GROUPED_FROM = 2048
     private SLICES            =    8
     private REDUCE_THREADS    =  256
@@ -492,11 +491,12 @@ module Tensomite
     # Encodes an op that reads a block-format tensor and returns true, or false
     # for one with no kernel: `BlockMatMul`, as a pass that quantises each block
     # of the activations and then one thread per output or, as `#block_mode`
-    # says, one SIMD group per 4 outputs from `LANE_GROUPED_FROM` outputs and
-    # per output below, `BLOCK_GROUPS` to a threadgroup, unless
-    # `TENSOMITE_LANE_OUTPUTS` says otherwise; and `Gather`, one thread per
-    # output element. On the M5 Pro, four outputs a group, sharing their
-    # activations, were faster than one or two.
+    # says, one SIMD group per output, `BLOCK_GROUPS` to a threadgroup; and
+    # `Gather`, one thread per output element. `Unordered`, for measurement,
+    # gives each SIMD group 4 outputs from `LANE_GROUPED_FROM` outputs and 1
+    # below, unless `TENSOMITE_LANE_OUTPUTS` says otherwise. The lanes kernel
+    # reads a byte at a time: wider reads and grouped outputs in block order
+    # were slower on the M5 Pro (Decision CX).
     private def encode_blocks(node : Node, output : MetalBuffer) : Bool
       return false unless node.dtype.f32? && node.srcs.all? { |src| src.ndim <= MAX_DIMS }
       case node.op
@@ -512,11 +512,13 @@ module Tensomite
         dims = Slice[n.to_u32, k.to_u32, bias ? 1_u32 : 0_u32].to_unsafe_bytes
         buffers = [metal(w.node.buffer!), scratch, scratch, scratch, output, bias ? metal(bias.node.buffer!) : output]
         offsets, constants = [0, 0, blocks * 4, blocks * 8, 0, 0], [blocks_args(w), dims, u32(node.size)]
-        if block_mode.lanes?(node.size) && w.dtype.bytes_for(w.view.offset).even?
+        if block_mode.unordered? && w.dtype.bytes_for(w.view.offset).even?
           per = BlockMatMulMode.lane_outputs(node.size >= LANE_GROUPED_FROM ? 4 : 1)
           groups = (node.size + BLOCK_GROUPS * per - 1) // (BLOCK_GROUPS * per)
-          name = block_mode.unordered? ? "block_matmul_unordered_f32" : "block_matmul_lanes_f32"
-          dispatch_groups_at(name, groups, 32 * BLOCK_GROUPS, buffers, offsets, constants + [u32(per)])
+          dispatch_groups_at("block_matmul_unordered_f32", groups, 32 * BLOCK_GROUPS, buffers, offsets, constants + [u32(per)])
+        elsif block_mode.lanes?(node.size)
+          groups = (node.size + BLOCK_GROUPS - 1) // BLOCK_GROUPS
+          dispatch_groups_at("block_matmul_lanes_f32", groups, 32 * BLOCK_GROUPS, buffers, offsets, constants)
         else
           dispatch_at("block_matmul_f32", node.size, buffers, offsets, constants)
         end

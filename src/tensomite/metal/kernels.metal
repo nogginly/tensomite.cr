@@ -794,13 +794,8 @@ kernel void block_matmul_f32(device const uchar* w [[buffer(0)]],
     dst[i] = with_bias(sum, bias, col, dims.z);
 }
 
-// Block-format products on lanes: at most LANE_GROUPS SIMD groups a
-// threadgroup, each computing at most LANE_OUTPUTS outputs, whose
-// contributions it keeps LANE_STRIDE floats apart, so that the lanes adding
-// them read different banks of threadgroup memory.
-#define LANE_GROUPS 4
+// The most outputs a SIMD group of block_matmul_unordered_f32 computes.
 #define LANE_OUTPUTS 8
-#define LANE_STRIDE 33
 
 // A block's 32 quantised activations y, as floats placed and scaled for the
 // nibbles of a 16-bit weight word read in place: y[2i] at v[i], y[2i + 1] /
@@ -848,16 +843,12 @@ static float nibble_contribution(device const uchar* p, Nibbles a, float sx, flo
     return (block_half(p) * sx) * acc + block_half(p + 2) * mx;
 }
 
-// x · wᵀ for a block-format weight with few outputs: `per` consecutive outputs
-// (at most LANE_OUTPUTS) per SIMD group, `groups` a threadgroup (at most
-// LANE_GROUPS). Lane l computes the contributions of blocks l, l + 32 and so
-// on to each of its group's outputs: Q4_0 and Q4_1 weights two bytes at a
-// time, against activations prepared once for the outputs that share a row,
-// and Q8_0 as block_contribution does. For each 32 blocks, the lanes put their
-// contributions in threadgroup memory, and lane r adds those of output r in
-// block order, as the host does. Each output's row and column are found by
-// stepping from the first's, not by dividing. The weights must start at an
-// even byte offset.
+// x · wᵀ for a block-format weight with few outputs: one SIMD group per
+// output, `groups` a threadgroup. Lane l computes the contributions of blocks
+// l, l + 32 and so on, each whole; then, 32 blocks at a time, every lane reads
+// the contributions from their lanes in block order and adds them, as the
+// host does. A group past the last output computes the last one and writes
+// nothing.
 kernel void block_matmul_lanes_f32(device const uchar* w [[buffer(0)]],
                                    device const float* scales [[buffer(1)]],
                                    device const float* sums [[buffer(2)]],
@@ -867,55 +858,39 @@ kernel void block_matmul_lanes_f32(device const uchar* w [[buffer(0)]],
                                    constant Blocks& b [[buffer(6)]],
                                    constant uint3& dims [[buffer(7)]],
                                    constant uint& count [[buffer(8)]],
-                                   constant uint& per [[buffer(9)]],
                                    uint group [[threadgroup_position_in_grid]],
                                    uint simd [[simdgroup_index_in_threadgroup]],
                                    uint groups [[simdgroups_per_threadgroup]],
                                    uint lane [[thread_index_in_simdgroup]]) {
-    threadgroup float parts[LANE_GROUPS * LANE_OUTPUTS * LANE_STRIDE];
+    uint output = group * groups + simd;
+    uint i = output < count ? output : count - 1;
     uint n = dims.x, k = dims.y, blocks = k / 32;
-    uint first = (group * groups + simd) * per;
-    uint mine = simd * LANE_OUTPUTS * LANE_STRIDE;
-    uint lead = min(first, count - 1) / n, lead_col = min(first, count - 1) % n;
-    uint live = first < count ? min(per, count - first) : 0;
+    uint row = i / n, col = i % n;
+    device const uchar* weights = w + b.offset + col * blocks * b.bytes;
     float sum = 0.0f;
     for (uint start = 0; start < blocks; start += 32) {
         uint block = start + lane;
-        if (block < blocks) {
-            Nibbles a;
-            if (b.kind != 0) a = nibbles_at(qs + lead * k + block * 32);
-            uint row = lead, col = lead_col;
-            for (uint r = 0; r < live; r++) {
-                device const uchar* p = w + b.offset + (col * blocks + block) * b.bytes;
-                device const char* qb = qs + row * k + block * 32;
-                uint at = row * blocks + block;
-                float part;
-                if (b.kind == 0) {
-                    part = block_contribution(p, qb, scales[at], sums[at], 0);
-                } else {
-                    Nibbles own = row == lead ? a : nibbles_at(qb);
-                    part = nibble_contribution(p, own, scales[at], sums[at], b.kind);
-                }
-                parts[mine + r * LANE_STRIDE + lane] = part;
-                if (++col == n) col = 0, row++;
-            }
+        float mine = 0.0f;
+        if (block < blocks)
+            mine = block_contribution(weights + block * b.bytes, qs + row * k + block * 32, scales[row * blocks + block],
+                                      sums[row * blocks + block], b.kind);
+        uint run = min(blocks - start, 32u);
+        for (uint j = 0; j < 32; j++) {
+            float value = simd_shuffle(mine, ushort(j));
+            if (j < run) sum += value;
         }
-        simdgroup_barrier(mem_flags::mem_threadgroup);
-        if (lane < per) {
-            uint run = min(blocks - start, 32u);
-            for (uint j = 0; j < run; j++) sum += parts[mine + lane * LANE_STRIDE + j];
-        }
-        simdgroup_barrier(mem_flags::mem_threadgroup);
     }
-    uint output = first + lane;
-    if (lane < per && output < count) dst[output] = with_bias(sum, bias, output % n, dims.z);
+    if (output < count && lane == 0) dst[output] = with_bias(sum, bias, col, dims.z);
 }
 
 #if __METAL_VERSION__ >= 300
-// For measurement only: block_matmul_lanes_f32's work, but each lane keeps one
-// running sum per output over its blocks, and simd_sum adds the lanes' sums
-// in its own order, so the bits can differ from the host's. The loops over
-// outputs are unrolled, so that the sums stay in registers.
+// For measurement only: `per` consecutive outputs (at most LANE_OUTPUTS) per
+// SIMD group, lane l taking blocks l, l + 32 and so on, as in
+// block_matmul_lanes_f32, but each lane keeps one running sum per output over
+// its blocks, and simd_sum adds the lanes' sums in its own order, so the bits
+// can differ from the host's. Q4_0 and Q4_1 weights are read two bytes at a
+// time, against activations prepared once for the outputs that share a row.
+// The loops over outputs are unrolled, so that the sums stay in registers.
 kernel void block_matmul_unordered_f32(device const uchar* w [[buffer(0)]],
                                        device const float* scales [[buffer(1)]],
                                        device const float* sums [[buffer(2)]],
