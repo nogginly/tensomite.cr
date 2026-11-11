@@ -1,7 +1,7 @@
 // Runs the Metal block-format kernels (quantize_rows_q8_f32, block_matmul_f32
 // and gather_blocks_f32) on the CPU, and checks their results against the
 // host's, bit for bit: block_matmul_lanes_f32 as threadgroups of SIMD groups,
-// with 1 to 8 outputs a group, the others one thread at a time. Reads the file blocks_data.cr writes.
+// the others one thread at a time. Reads the file blocks_data.cr writes.
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -24,6 +24,19 @@ template <typename T, typename U> T as_type(U value) {
     std::memcpy(&result, &value, sizeof(T));
     return result;
 }
+// A SIMD group's shuffle: each thread of the threadgroup posts its value, all
+// meet, each reads the value of the lane it asks for in its group of 32, and
+// all meet again before the slots are reused. Every thread of the threadgroup
+// must call it the same number of times, as block_matmul_lanes_f32 ensures.
+static thread_local unsigned int current_thread;
+static float simd_slots[1024];
+static float simd_shuffle(float value, ushort lane) {
+    simd_slots[current_thread] = value;
+    current_barrier->arrive_and_wait();
+    float other = simd_slots[current_thread / 32 * 32 + lane];
+    current_barrier->arrive_and_wait();
+    return other;
+}
 #include "blocks.inc"
 
 // Runs block_matmul_lanes_f32 over `groups` threadgroups of `simds` SIMD groups, each
@@ -36,6 +49,7 @@ static void run_simd_groups(unsigned int groups, unsigned int simds, A... args) 
         std::vector<std::thread> threads;
         for (unsigned int t = 0; t < simds * 32; t++)
             threads.emplace_back([=]() mutable {
+                current_thread = t;
                 block_matmul_lanes_f32(args..., group, t / 32, simds, t % 32);
             });
         for (auto& thread : threads) thread.join();
@@ -93,13 +107,10 @@ int main(int argc, char** argv) {
             block_matmul_f32(w.data(), scales.data(), sums.data(), qs.data(), got.data(), bias.data(), b, dims, count, i);
         snprintf(label, sizeof label, "block_matmul %s", names[f]);
         failures += compare(label, got, want);
-        for (uint per : {1u, 2u, 4u, 7u, 8u}) {
-            std::fill(got.begin(), got.end(), 0.0f);
-            run_simd_groups((count + 4 * per - 1) / (4 * per), 4, w.data(), scales.data(), sums.data(), qs.data(), got.data(),
-                            bias.data(), b, dims, count, per);
-            snprintf(label, sizeof label, "block_matmul_lanes %s, %u per group", names[f], per);
-            failures += compare(label, got, want);
-        }
+        std::fill(got.begin(), got.end(), 0.0f);
+        run_simd_groups((count + 3) / 4, 4, w.data(), scales.data(), sums.data(), qs.data(), got.data(), bias.data(), b, dims, count);
+        snprintf(label, sizeof label, "block_matmul_lanes %s", names[f]);
+        failures += compare(label, got, want);
         int ids[] = {3, 0, 36, 3};
         View vi{};
         vi.ndim = 1; vi.shape[0] = 4; vi.strides[0] = 1; vi.dense = 1;

@@ -21,6 +21,3 @@ using std::min;
 inline std::barrier<>* current_barrier;
 enum class mem_flags { mem_threadgroup };
 inline void threadgroup_barrier(mem_flags) { current_barrier->arrive_and_wait(); }
-// A SIMD group's barrier: here the whole threadgroup's, which every kernel that
-// calls it reaches from every thread the same number of times.
-inline void simdgroup_barrier(mem_flags) { current_barrier->arrive_and_wait(); }
