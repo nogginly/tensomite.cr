@@ -20,7 +20,8 @@ module ProfileBench
     {path, heads, prefill, quantize}
   end
 
-  private def self.option(name : String) : String?
+  # Returns the value given for option *name*, as `--name VALUE`, if any.
+  def self.option(name : String) : String?
     ARGV.index(name).try { |i| ARGV[i + 1]? || abort "#{name} needs a value" }
   end
 
@@ -39,11 +40,11 @@ module ProfileBench
   end
 
   # Runs the workload on *model* and returns its wall seconds, calling *watch*
-  # with true when the measured part starts and false when it ends: DECODE
-  # tokens after a fresh prompt of PROMPT tokens (fewer if the context is
-  # short), or PREFILLS prefills of *prefill*
-  # tokens, each into an empty cache.
-  def self.run(model : M, prefill : Int32?, &watch : Bool ->) : Float64 forall M
+  # with true when the measured part starts and false when it ends: *decode*
+  # tokens after a fresh prompt of *prompt_length* tokens (fewer if the context
+  # is short), or PREFILLS prefills of *prefill* tokens, each into an empty
+  # cache.
+  def self.run(model : M, prefill : Int32?, prompt_length : Int32 = PROMPT, decode : Int32 = DECODE, &watch : Bool ->) : Float64 forall M
     vocab = model.config.vocab
     if prefill
       prompt = Array.new(prefill) { |i| (i * 37) % vocab }
@@ -51,13 +52,13 @@ module ProfileBench
       start = Time.instant
       PREFILLS.times { model.forward(prompt, model.new_cache(prefill)) }
     else
-      length = Math.min(PROMPT, model.config.context - DECODE)
+      length = Math.min(prompt_length, model.config.context - decode)
       prompt = Array.new(length) { |i| (i * 37) % vocab }
-      cache = model.new_cache(length + DECODE)
+      cache = model.new_cache(length + decode)
       model.forward(prompt, cache)
       watch.call(true)
       start = Time.instant
-      DECODE.times { |i| model.forward([i], cache) }
+      decode.times { |i| model.forward([i], cache) }
     end
     (Time.instant - start).total_seconds.tap { watch.call(false) }
   end

@@ -49,3 +49,17 @@ describe "Tensor#to" do
     expect_raises(DeviceError) { tensor(cpu, [1], f32(1)) + tensor(sim, [1], f32(1)) }
   end
 end
+
+describe "HostDevice#op_times" do
+  it "counts and times each op a host device runs while set, and nothing after" do
+    device = CPU.new
+    times = {} of String => {Int32, Float64}
+    device.op_times = times
+    a = Tensor.from([1f32, 2f32], [2], device)
+    ((a + a) * a).to_a(Float32).should eq [2f32, 8f32]
+    device.op_times = nil
+    (a + a).to_a(Float32)
+    times.keys.sort!.should eq ["Add", "Mul"]
+    times.values.map(&.first).should eq [1, 1]
+  end
+end
