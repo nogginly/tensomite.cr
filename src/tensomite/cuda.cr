@@ -100,13 +100,16 @@ module Tensomite
     private ATTENTION_THREADS = 128
     private BLOCK             = 256
     # Warps in each block of a quantised matmul on lanes.
-    private BLOCK_WARPS =   4
-    private COLS        =  32
-    private SLICES      =   8
-    private TILE_PATCH  =   4
-    private DECODE_COLS = 128
-    private DECODE_ROWS =  16
-    private CHUNK       =  64
+    private BLOCK_WARPS = 4
+    # The longest row of activations a quantised matmul quantises in its own
+    # kernel.
+    private ROW_K       = 8192
+    private COLS        =   32
+    private SLICES      =    8
+    private TILE_PATCH  =    4
+    private DECODE_COLS =  128
+    private DECODE_ROWS =   16
+    private CHUNK       =   64
 
     # How `MatMul` divides its work; the kernels are Metal's (see `Metal::MatMulMode`).
     enum MatMulMode
@@ -693,6 +696,23 @@ module Tensomite
       run(kernels["matmul_chunk_sums_f32"], node.size, scratch, output.pointer, bias_pointer(node), m.to_u32, k.to_u32, n.to_u32, node.size.to_u32)
     end
 
+    # Queues a `BlockMatMul` of one row of activations, at most `ROW_K`
+    # elements, on lanes in block order, as one kernel that quantises the row
+    # itself, and returns true; returns false for any other.
+    private def launch_row_product(kernels : Kernels, node : Node, output : CUDABuffer) : Bool
+      x, w = node.srcs[0], node.srcs[1]
+      n, k = w.shape
+      kind, bytes, offset = block_args(w)
+      return false if block_mode.unordered?
+      return false unless x.size == k && k <= ROW_K && block_mode.lanes?(n) && offset.even?
+      per = BlockMatMulMode.lane_outputs(1)
+      groups = (n + BLOCK_WARPS * per - 1) // (BLOCK_WARPS * per)
+      name = k <= 2048 ? "block_matmul_row_2k_f32" : "block_matmul_row_8k_f32"
+      context.launch(kernels[name], groups, 32 * BLOCK_WARPS, pointer(w), pointer(x), output.pointer, bias_pointer(node),
+        view_args(x.view), kind, bytes, offset, n.to_u32, k.to_u32, per.to_u32)
+      true
+    end
+
     # Queues the kernels of an op that reads a block-format tensor and returns
     # true, or returns false for one with none: `BlockMatMul`, as a pass that
     # quantises each block of the activations into scratch memory and then one
@@ -707,6 +727,7 @@ module Tensomite
       when Op::BlockMatMul
         x, w = node.srcs[0], node.srcs[1]
         n, k = w.shape
+        return true if launch_row_product(kernels, node, output)
         blocks = x.size // DType.block_size
         # The scratch memory holds each block's scale, then its d·Σq, then the
         # quantised activations.

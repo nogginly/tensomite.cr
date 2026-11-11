@@ -1096,13 +1096,11 @@ extern "C" __global__ void gather_blocks_f32(const unsigned char* table, const i
     dst[i] = block_value(row, kind, bytes, i % width);
 }
 
-// Quantises each block of 32 activations to 8 bits, as the host's
-// `quantize_activations` does: one thread per block of the rows read through
-// vx, writing the F16-rounded scale, d·Σq rounded to F16, and the values.
-extern "C" __global__ void quantize_rows_q8_f32(const float* x, float* scales, float* sums, signed char* qs,
-                                                View vx, unsigned int blocks) {
-    unsigned int i = thread_index();
-    if (i >= blocks) return;
+// Quantises block i of the activations read through vx to 8 bits, as the
+// host's `quantize_activations` does: the F16-rounded scale into scales[i],
+// d·Σq rounded to F16 into sums[i], and the values into qs.
+__device__ void quantize_block(const float* x, const View& vx, unsigned int i, float* scales, float* sums,
+                               signed char* qs) {
     unsigned int base = i * 32;
     float amax = 0.0f;
     for (unsigned int j = 0; j < 32; j++) amax = fmaxf(amax, fabsf(x[offset_of(vx, base + j)]));
@@ -1116,6 +1114,15 @@ extern "C" __global__ void quantize_rows_q8_f32(const float* x, float* scales, f
     }
     scales[i] = round_to_half(d);
     sums[i] = round_to_half(float(total) * d);
+}
+
+// Quantises each block of 32 activations to 8 bits: one thread per block of
+// the rows read through vx.
+extern "C" __global__ void quantize_rows_q8_f32(const float* x, float* scales, float* sums, signed char* qs,
+                                                View vx, unsigned int blocks) {
+    unsigned int i = thread_index();
+    if (i >= blocks) return;
+    quantize_block(x, vx, i, scales, sums, qs);
 }
 
 // Returns the contribution of one block of a weight row, at p, to an output:
@@ -1195,11 +1202,12 @@ __device__ float wide_contribution(const unsigned char* p, const int* a, float s
 // output r in block order, as the host does, so the result has the host's
 // bits. Each output's row and column are found by stepping from the first's,
 // not by dividing. The weights must start at an even byte offset.
-extern "C" __global__ void block_matmul_lanes_f32(const unsigned char* w, const float* scales, const float* sums,
-                                                  const signed char* qs, float* dst, const float* bias,
-                                                  unsigned int kind, unsigned int bytes, unsigned int offset,
-                                                  unsigned int n, unsigned int k, unsigned int count, unsigned int per) {
-    __shared__ float parts[BLOCK_WARPS * LANE_OUTPUTS * LANE_STRIDE];
+// The work of block_matmul_lanes_f32, for the warps of one block, with its
+// shared memory, parts, passed in.
+__device__ void lanes_products(const unsigned char* w, const float* scales, const float* sums, const signed char* qs,
+                               float* dst, const float* bias, unsigned int kind, unsigned int bytes,
+                               unsigned int offset, unsigned int n, unsigned int k, unsigned int count,
+                               unsigned int per, float* parts) {
     unsigned int lane = threadIdx.x % 32, warp = threadIdx.x / 32;
     unsigned int first = (blockIdx.x * (blockDim.x / 32) + warp) * per;
     unsigned int blocks = k / 32;
@@ -1237,6 +1245,42 @@ extern "C" __global__ void block_matmul_lanes_f32(const unsigned char* w, const 
     }
     unsigned int output = first + lane;
     if (lane < per && output < count) dst[output] = with_bias(sum, bias, output % n);
+}
+
+extern "C" __global__ void block_matmul_lanes_f32(const unsigned char* w, const float* scales, const float* sums,
+                                                  const signed char* qs, float* dst, const float* bias,
+                                                  unsigned int kind, unsigned int bytes, unsigned int offset,
+                                                  unsigned int n, unsigned int k, unsigned int count, unsigned int per) {
+    __shared__ float parts[BLOCK_WARPS * LANE_OUTPUTS * LANE_STRIDE];
+    lanes_products(w, scales, sums, qs, dst, bias, kind, bytes, offset, n, k, count, per, parts);
+}
+
+// block_matmul_lanes_f32 for one row of activations, x through vx, of at most
+// 2048 elements: each block first quantises the row into shared memory, as
+// quantize_rows_q8_f32 does, so that the product needs no pass of its own.
+extern "C" __global__ void block_matmul_row_2k_f32(const unsigned char* w, const float* x, float* dst,
+                                                   const float* bias, View vx, unsigned int kind,
+                                                   unsigned int bytes, unsigned int offset, unsigned int n,
+                                                   unsigned int k, unsigned int per) {
+    __shared__ __align__(16) signed char qs[2048];
+    __shared__ float scales[2048 / 32], sums[2048 / 32];
+    __shared__ float parts[BLOCK_WARPS * LANE_OUTPUTS * LANE_STRIDE];
+    for (unsigned int i = threadIdx.x; i < k / 32; i += blockDim.x) quantize_block(x, vx, i, scales, sums, qs);
+    __syncthreads();
+    lanes_products(w, scales, sums, qs, dst, bias, kind, bytes, offset, n, k, n, per, parts);
+}
+
+// block_matmul_row_2k_f32 for a row of at most 8192 elements.
+extern "C" __global__ void block_matmul_row_8k_f32(const unsigned char* w, const float* x, float* dst,
+                                                   const float* bias, View vx, unsigned int kind,
+                                                   unsigned int bytes, unsigned int offset, unsigned int n,
+                                                   unsigned int k, unsigned int per) {
+    __shared__ __align__(16) signed char qs[8192];
+    __shared__ float scales[8192 / 32], sums[8192 / 32];
+    __shared__ float parts[BLOCK_WARPS * LANE_OUTPUTS * LANE_STRIDE];
+    for (unsigned int i = threadIdx.x; i < k / 32; i += blockDim.x) quantize_block(x, vx, i, scales, sums, qs);
+    __syncthreads();
+    lanes_products(w, scales, sums, qs, dst, bias, kind, bytes, offset, n, k, n, per, parts);
 }
 
 // For measurement only: block_matmul_lanes_f32's work, but each lane keeps one

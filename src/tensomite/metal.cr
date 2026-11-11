@@ -62,11 +62,14 @@ module Tensomite
       Op::Exp => "exp_f32", Op::Log => "log_f32", Op::Tanh => "tanh_f32", Op::Sqrt => "sqrt_f32",
       Op::Copy => "copy_f32",
     }
-    private OTHER    = %w[copy_into_f32 sum_f32 max_f32 sum_short_f32 max_short_f32 gather_f32 fill_zero_f32 scatter_add_f32 scatter_add_column_f32 unview_f32 matmul_f32 matmul_split_f32 matmul_tiled_chunks_64x64_f32 matmul_chunk_sums_f32 matmul_tiled_32x32_f32 matmul_tiled_64x64_f32 matmul_tiled_32x64_f32 dropout_f32 softmax_f32 softmax_scaled_f32 softmax_grad_f32 log_softmax_grad_f32 log_softmax_f32 layernorm_f32 layernorm_grad_f32 rmsnorm_f32 rope_f32 attention_f32 gather_blocks_f32 quantize_rows_q8_f32 block_matmul_f32 block_matmul_lanes_f32]
+    private OTHER    = %w[copy_into_f32 sum_f32 max_f32 sum_short_f32 max_short_f32 gather_f32 fill_zero_f32 scatter_add_f32 scatter_add_column_f32 unview_f32 matmul_f32 matmul_split_f32 matmul_tiled_chunks_64x64_f32 matmul_chunk_sums_f32 matmul_tiled_32x32_f32 matmul_tiled_64x64_f32 matmul_tiled_32x64_f32 dropout_f32 softmax_f32 softmax_scaled_f32 softmax_grad_f32 log_softmax_grad_f32 log_softmax_f32 layernorm_f32 layernorm_grad_f32 rmsnorm_f32 rope_f32 attention_f32 gather_blocks_f32 quantize_rows_q8_f32 block_matmul_f32 block_matmul_lanes_f32 block_matmul_row_2k_f32 block_matmul_row_8k_f32]
     private OPTIONAL = %w[matmul_atomic_f32 block_matmul_unordered_f32]
     private COLS     = 32
     # SIMD groups in each threadgroup of a quantised matmul on lanes.
     private BLOCK_GROUPS = 4
+    # The longest row of activations a quantised matmul quantises in its own
+    # kernel.
+    private ROW_K = 8192
     # Outputs from which an unordered quantised matmul gives each SIMD group four.
     private LANE_GROUPED_FROM = 2048
     private SLICES            =    8
@@ -496,6 +499,21 @@ module Tensomite
       dispatch("matmul_chunk_sums_f32", node.size, [scratch.mtl, output.mtl, bias ? mtl(bias) : output.mtl], [sums, u32(node.size)])
     end
 
+    # Encodes a `BlockMatMul` of one row of activations, at most `ROW_K`
+    # elements, on lanes in block order, as one kernel that quantises the row
+    # itself, and returns true; returns false for any other.
+    private def encode_row_product(node : Node, output : MetalBuffer) : Bool
+      x, w, bias = node.srcs[0], node.srcs[1], node.srcs[2]?
+      n, k = w.shape
+      return false if block_mode.unordered?
+      return false unless x.size == k && k <= ROW_K && block_mode.lanes?(n)
+      name = k <= 2048 ? "block_matmul_row_2k_f32" : "block_matmul_row_8k_f32"
+      dims = Slice[n.to_u32, k.to_u32, bias ? 1_u32 : 0_u32].to_unsafe_bytes
+      dispatch_groups(name, {(n + BLOCK_GROUPS - 1) // BLOCK_GROUPS, 1}, {32 * BLOCK_GROUPS, 1},
+        [mtl(w), mtl(x), output.mtl, bias ? mtl(bias) : output.mtl], [blocks_args(w), dims, view_args(x.view)])
+      true
+    end
+
     # Encodes an op that reads a block-format tensor and returns true, or false
     # for one with no kernel: `BlockMatMul`, as a pass that quantises each block
     # of the activations and then one thread per output or, as `#block_mode`
@@ -509,6 +527,7 @@ module Tensomite
       return false unless node.dtype.f32? && node.srcs.all? { |src| src.ndim <= MAX_DIMS }
       case node.op
       when Op::BlockMatMul
+        return true if encode_row_product(node, output)
         x, w, bias = node.srcs[0], node.srcs[1], node.srcs[2]?
         n, k = w.shape
         blocks = x.size // DType.block_size

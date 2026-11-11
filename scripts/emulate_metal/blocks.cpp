@@ -1,7 +1,7 @@
 // Runs the Metal block-format kernels (quantize_rows_q8_f32, block_matmul_f32
 // and gather_blocks_f32) on the CPU, and checks their results against the
-// host's, bit for bit: block_matmul_lanes_f32 as threadgroups of SIMD groups,
-// the others one thread at a time. Reads the file blocks_data.cr writes.
+// host's, bit for bit: block_matmul_lanes_f32 and block_matmul_row as
+// threadgroups of SIMD groups, the others one thread at a time. Reads the file blocks_data.cr writes.
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -51,6 +51,23 @@ static void run_simd_groups(unsigned int groups, unsigned int simds, A... args) 
             threads.emplace_back([=]() mutable {
                 current_thread = t;
                 block_matmul_lanes_f32(args..., group, t / 32, simds, t % 32);
+            });
+        for (auto& thread : threads) thread.join();
+    }
+}
+
+// Runs a block_matmul_row kernel over `groups` threadgroups of `simds` SIMD
+// groups, as run_simd_groups does.
+template <class K, class... A>
+static void run_row_groups(K fn, unsigned int groups, unsigned int simds, A... args) {
+    for (unsigned int group = 0; group < groups; group++) {
+        std::barrier<> barrier(simds * 32);
+        current_barrier = &barrier;
+        std::vector<std::thread> threads;
+        for (unsigned int t = 0; t < simds * 32; t++)
+            threads.emplace_back([=]() mutable {
+                current_thread = t;
+                fn(args..., group, t / 32, simds, t % 32, t, simds * 32);
             });
         for (auto& thread : threads) thread.join();
     }
@@ -111,6 +128,18 @@ int main(int argc, char** argv) {
         run_simd_groups((count + 3) / 4, 4, w.data(), scales.data(), sums.data(), qs.data(), got.data(), bias.data(), b, dims, count);
         snprintf(label, sizeof label, "block_matmul_lanes %s", names[f]);
         failures += compare(label, got, want);
+        View vrow{};
+        vrow.ndim = 1; vrow.shape[0] = k; vrow.strides[0] = 1; vrow.dense = 1;
+        std::vector<float> first(want.begin(), want.begin() + n);
+        for (int variant = 0; variant < 2; variant++) {
+            std::vector<float> row_got(n);
+            if (variant == 0)
+                run_row_groups(block_matmul_row<2048>, (n + 3) / 4, 4, w.data(), x.data(), row_got.data(), bias.data(), b, dims, vrow);
+            else
+                run_row_groups(block_matmul_row<8192>, (n + 3) / 4, 4, w.data(), x.data(), row_got.data(), bias.data(), b, dims, vrow);
+            snprintf(label, sizeof label, "block_matmul_row_%s %s", variant == 0 ? "2k" : "8k", names[f]);
+            failures += compare(label, row_got, first);
+        }
         int ids[] = {3, 0, 36, 3};
         View vi{};
         vi.ndim = 1; vi.shape[0] = 4; vi.strides[0] = 1; vi.dense = 1;

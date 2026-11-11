@@ -28,6 +28,7 @@ static std::barrier<>* block_barrier = nullptr;
 #define __global__
 #define __device__ static
 #define __shared__ static
+#define __align__(n) __attribute__((aligned(n)))
 #define __syncthreads() block_barrier->arrive_and_wait()
 
 static int atomicAdd(int* address, int value) { return __atomic_fetch_add(address, value, __ATOMIC_RELAXED); }

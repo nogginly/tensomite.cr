@@ -724,17 +724,12 @@ kernel void gather_blocks_f32(device const uchar* table [[buffer(0)]],
     dst[i] = block_value(row, b, i % width);
 }
 
-// Quantises each block of 32 activations to 8 bits, as the host's
-// `quantize_activations` does: one thread per block of the rows read through
-// vx, writing the F16-rounded scale, d·Σq rounded to F16, and the values.
-kernel void quantize_rows_q8_f32(device const float* x [[buffer(0)]],
-                                 device float* scales [[buffer(1)]],
-                                 device float* sums [[buffer(2)]],
-                                 device char* qs [[buffer(3)]],
-                                 constant View& vx [[buffer(4)]],
-                                 constant uint& blocks [[buffer(5)]],
-                                 uint i [[thread_position_in_grid]]) {
-    if (i >= blocks) return;
+// Quantises block i of the activations read through vx to 8 bits, as the
+// host's `quantize_activations` does: the F16-rounded scale into scales[i],
+// d·Σq rounded to F16 into sums[i], and the values into qs, in device or
+// threadgroup memory.
+template <typename F, typename Q>
+static void quantize_block(device const float* x, constant View& vx, uint i, F scales, F sums, Q qs) {
     uint base = i * 32;
     float amax = 0.0f;
     for (uint j = 0; j < 32; j++) amax = max(amax, fabs(x[offset_of(vx, base + j)]));
@@ -750,11 +745,25 @@ kernel void quantize_rows_q8_f32(device const float* x [[buffer(0)]],
     sums[i] = float(half(float(total) * d));
 }
 
+// Quantises each block of 32 activations to 8 bits: one thread per block of
+// the rows read through vx.
+kernel void quantize_rows_q8_f32(device const float* x [[buffer(0)]],
+                                 device float* scales [[buffer(1)]],
+                                 device float* sums [[buffer(2)]],
+                                 device char* qs [[buffer(3)]],
+                                 constant View& vx [[buffer(4)]],
+                                 constant uint& blocks [[buffer(5)]],
+                                 uint i [[thread_position_in_grid]]) {
+    if (i >= blocks) return;
+    quantize_block(x, vx, i, scales, sums, qs);
+}
+
 // Returns the contribution of one block of a weight row, at p, to an output:
 // its integer dot product with the block's quantised activations, qb, times
 // both scales, plus m · d·Σq for Q4_1, with the host's expressions, so that
 // adding the contributions in block order gives the host's bits.
-static float block_contribution(device const uchar* p, device const char* qb, float sx, float mx, uint kind) {
+template <typename Q>
+static float block_contribution(device const uchar* p, Q qb, float sx, float mx, uint kind) {
     if (kind == 0) {
         int total = 0;
         for (uint j = 0; j < 32; j++) total += int(as_type<char>(p[2 + j])) * int(qb[j]);
@@ -851,22 +860,15 @@ static float nibble_contribution(device const uchar* p, Nibbles a, float sx, flo
 // the contributions from their lanes in block order and adds them, as the
 // host does. A group past the last output computes the last one and writes
 // nothing.
-kernel void block_matmul_lanes_f32(device const uchar* w [[buffer(0)]],
-                                   device const float* scales [[buffer(1)]],
-                                   device const float* sums [[buffer(2)]],
-                                   device const char* qs [[buffer(3)]],
-                                   device float* dst [[buffer(4)]],
-                                   device const float* bias [[buffer(5)]],
-                                   constant Blocks& b [[buffer(6)]],
-                                   constant uint3& dims [[buffer(7)]],
-                                   constant uint& count [[buffer(8)]],
-                                   uint group [[threadgroup_position_in_grid]],
-                                   uint simd [[simdgroup_index_in_threadgroup]],
-                                   uint groups [[simdgroups_per_threadgroup]],
-                                   uint lane [[thread_index_in_simdgroup]]) {
+// The work of block_matmul_lanes_f32 for SIMD group `simd` of threadgroup
+// `group`, from quantised activations in device or threadgroup memory.
+template <typename F, typename Q>
+static void lanes_products(device const uchar* w, F scales, F sums, Q qs, device float* dst, device const float* bias,
+                           constant Blocks& b, uint n, uint k, uint biased, uint count, uint group, uint simd,
+                           uint groups, uint lane) {
     uint output = group * groups + simd;
     uint i = output < count ? output : count - 1;
-    uint n = dims.x, k = dims.y, blocks = k / 32;
+    uint blocks = k / 32;
     uint row = i / n, col = i % n;
     device const uchar* weights = w + b.offset + col * blocks * b.bytes;
     float sum = 0.0f;
@@ -882,8 +884,55 @@ kernel void block_matmul_lanes_f32(device const uchar* w [[buffer(0)]],
             if (j < run) sum += value;
         }
     }
-    if (output < count && lane == 0) dst[output] = with_bias(sum, bias, col, dims.z);
+    if (output < count && lane == 0) dst[output] = with_bias(sum, bias, col, biased);
 }
+
+kernel void block_matmul_lanes_f32(device const uchar* w [[buffer(0)]],
+                                   device const float* scales [[buffer(1)]],
+                                   device const float* sums [[buffer(2)]],
+                                   device const char* qs [[buffer(3)]],
+                                   device float* dst [[buffer(4)]],
+                                   device const float* bias [[buffer(5)]],
+                                   constant Blocks& b [[buffer(6)]],
+                                   constant uint3& dims [[buffer(7)]],
+                                   constant uint& count [[buffer(8)]],
+                                   uint group [[threadgroup_position_in_grid]],
+                                   uint simd [[simdgroup_index_in_threadgroup]],
+                                   uint groups [[simdgroups_per_threadgroup]],
+                                   uint lane [[thread_index_in_simdgroup]]) {
+    lanes_products(w, scales, sums, qs, dst, bias, b, dims.x, dims.y, dims.z, count, group, simd, groups, lane);
+}
+
+// block_matmul_lanes_f32 for one row of activations, x through vx, of at most
+// K elements: each threadgroup first quantises the row into threadgroup
+// memory, as quantize_rows_q8_f32 does, so that the product needs no pass of
+// its own.
+template <uint K>
+kernel void block_matmul_row(device const uchar* w [[buffer(0)]],
+                             device const float* x [[buffer(1)]],
+                             device float* dst [[buffer(2)]],
+                             device const float* bias [[buffer(3)]],
+                             constant Blocks& b [[buffer(4)]],
+                             constant uint3& dims [[buffer(5)]],
+                             constant View& vx [[buffer(6)]],
+                             uint group [[threadgroup_position_in_grid]],
+                             uint simd [[simdgroup_index_in_threadgroup]],
+                             uint groups [[simdgroups_per_threadgroup]],
+                             uint lane [[thread_index_in_simdgroup]],
+                             uint t [[thread_index_in_threadgroup]],
+                             uint threads [[threads_per_threadgroup]]) {
+    threadgroup char qs[K];
+    threadgroup float scales[K / 32];
+    threadgroup float sums[K / 32];
+    for (uint i = t; i < dims.y / 32; i += threads) quantize_block(x, vx, i, scales, sums, qs);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    lanes_products(w, scales, sums, qs, dst, bias, b, dims.x, dims.y, dims.z, dims.x, group, simd, groups, lane);
+}
+
+typedef decltype(block_matmul_row<2048>) block_matmul_row_2k_t;
+typedef decltype(block_matmul_row<8192>) block_matmul_row_8k_t;
+template [[host_name("block_matmul_row_2k_f32")]] kernel block_matmul_row_2k_t block_matmul_row<2048>;
+template [[host_name("block_matmul_row_8k_f32")]] kernel block_matmul_row_8k_t block_matmul_row<8192>;
 
 #if __METAL_VERSION__ >= 300
 // For measurement only: `per` consecutive outputs (at most LANE_OUTPUTS) per

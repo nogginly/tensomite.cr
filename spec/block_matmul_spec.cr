@@ -147,6 +147,21 @@ describe "Tensor#linear with block-format weights" do
       end
     end
 
+    [1280, 4096, 8224].each do |long|
+      it "gives the host's sums on #{gpu.class} for one row of #{long} activations, quantised in the product's kernel" do
+        xs, ws = random_values(long, 6), random_values(37 * long, 7)
+        BLOCK_FORMATS.each do |dtype|
+          expected = Tensor.from(xs, [1, long]).linear(Tensor.from(ws, [37, long]).quantize(dtype)).to_a(Float32)
+          got = Tensor.from(xs, [1, long], gpu).linear(Tensor.from(ws, [37, long], gpu).quantize(dtype)).to_a(Float32)
+          if bit_exact?(gpu)
+            got.should eq expected
+          else
+            got.zip(expected) { |a, e| a.should be_close(e, 1e-2 * Math.max(1f32, e.abs)) }
+          end
+        end
+      end
+    end
+
     [1, 2, 4, 7, 8].each do |per|
       it "gives the host's sums on #{gpu.class} on lanes of #{per} outputs, groups straddling rows" do
         long = 1280
