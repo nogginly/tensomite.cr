@@ -166,9 +166,9 @@ module Tensomite
     end
 
     # The threads quantised products run on: `TENSOMITE_THREADS`, or the
-    # machine's CPU count. Setting it after the first product has shared its
+    # machine's CPU count when it is unset or not positive. Setting it after the first product has shared its
     # work changes how many spans products are cut into, not the pool's size.
-    class_property threads : Int32 = ENV["TENSOMITE_THREADS"]?.try(&.to_i?).try(&.clamp(1, 1024)) || System.cpu_count.to_i.clamp(1, 1024)
+    class_property threads : Int32 = ENV["TENSOMITE_THREADS"]?.try(&.to_i?).try { |count| count.clamp(1, 1024) if count > 0 } || System.cpu_count.to_i.clamp(1, 1024)
 
     # The fewest weight bytes worth a thread of their own.
     private PARALLEL_BYTES = 64 * 1024
