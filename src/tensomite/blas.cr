@@ -38,7 +38,7 @@ module Tensomite
 
     def execute(node : Node, output : Buffer) : Nil
       if node.op == Op::MatMul && node.dtype.f32?
-        sgemm(node, own(output).bytes.unsafe_slice_of(Float32))
+        timed(node) { sgemm(node, own(output).bytes.unsafe_slice_of(Float32)) }
       else
         super
       end
