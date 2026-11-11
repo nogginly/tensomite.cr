@@ -917,10 +917,13 @@ extern "C" __global__ void rmsnorm_f32(const float* a, const float* w, float* ds
 // matmul kernels sum, into shared memory. The block finds the scores' maximum;
 // threads take the exponentials in chunks of REDUCE_CHUNK, which one thread
 // adds in chunk order, as the softmax kernels do; each score becomes its
-// exponential over the sum. Then thread d adds `weight · v` over the
-// positions, again in chunks of CHUNK, for output columns d, d + threads and
-// so on. q is `[items, width]` and k and v `[heads, positions, width]` through
-// their views, items = heads × rows; at most ATTENTION_POSITIONS positions.
+// exponential over the sum. Then the threads take the output columns, each
+// `threads / out_width` threads to a column taking a chunk of CHUNK positions
+// at a time, and the column's first thread adds the chunks' sums of
+// `weight · v` in chunk order. q is `[items, width]` and k and v `[heads,
+// positions, width]` through their views, items = heads × rows; each head's
+// keys and values are found once and stepped through by their views' strides.
+// At most ATTENTION_POSITIONS positions and ATTENTION_THREADS output columns.
 extern "C" __global__ void attention_f32(const float* q, const float* k, const float* v, const float* m, float* dst,
                                          View vq, View vk, View vv, View vm, unsigned int rows,
                                          unsigned int positions, unsigned int width, unsigned int out_width,
@@ -932,15 +935,17 @@ extern "C" __global__ void attention_f32(const float* q, const float* k, const f
     int pq = offset_of(vq, int(item * width)), sq = run_stride(vq);
     int sk = run_stride(vk), sv = run_stride(vv), sm = masked ? run_stride(vm) : 0;
     int pm = masked ? offset_of(vm, int(item * positions)) : 0;
+    int pk = offset_of(vk, int(head * positions * width)), tk = stride_of(vk, vk.ndim - 2);
+    int pv = offset_of(vv, int(head * positions * out_width)), tv = stride_of(vv, vv.ndim - 2);
     float top = -3.402823466e38f;
     for (unsigned int p = t; p < positions; p += threads) {
-        int pk = offset_of(vk, int((head * positions + p) * width));
+        int row = pk + int(p) * tk;
         float dot = 0.0f;
         for (unsigned int c = 0; c * CHUNK < width; c++) {
             float acc = 0.0f;
             unsigned int stop = min(width, (c + 1) * CHUNK);
             for (unsigned int d = c * CHUNK; d < stop; d++) {
-                float product = q[pq + int(d) * sq] * k[pk + int(d) * sk];
+                float product = q[pq + int(d) * sq] * k[row + int(d) * sk];
                 acc = acc + product;
             }
             dot = dot + acc;
@@ -977,22 +982,30 @@ extern "C" __global__ void attention_f32(const float* q, const float* k, const f
     }
     __syncthreads();
     float total = partial[0];
+    __syncthreads();
     for (unsigned int p = t; p < positions; p += threads) scores[p] = scores[p] / total;
     __syncthreads();
-    for (unsigned int d = t; d < out_width; d += threads) {
-        float out = 0.0f;
-        for (unsigned int c = 0; c * CHUNK < positions; c++) {
-            float acc = 0.0f;
+    unsigned int lanes = threads / out_width, col = t % out_width, slot = t / out_width;
+    unsigned int spans = (positions + CHUNK - 1) / CHUNK;
+    float out = 0.0f;
+    for (unsigned int first = 0; first < spans; first += lanes) {
+        unsigned int c = first + slot;
+        float acc = 0.0f;
+        if (slot < lanes && c < spans) {
             unsigned int stop = min(positions, (c + 1) * CHUNK);
             for (unsigned int p = c * CHUNK; p < stop; p++) {
-                int pv = offset_of(vv, int((head * positions + p) * out_width));
-                float product = scores[p] * v[pv + int(d) * sv];
+                float product = scores[p] * v[pv + int(p) * tv + int(col) * sv];
                 acc = acc + product;
             }
-            out = out + acc;
         }
-        dst[item * out_width + d] = out;
+        partial[t] = acc;
+        __syncthreads();
+        if (slot == 0) {
+            for (unsigned int j = 0; j < lanes && first + j < spans; j++) out = out + partial[j * out_width + col];
+        }
+        __syncthreads();
     }
+    if (slot == 0) dst[item * out_width + col] = out;
 }
 
 // Rotary embeddings: one thread per element, `x · cos + rotate_half(x) · sin`,

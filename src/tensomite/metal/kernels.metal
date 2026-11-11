@@ -1321,10 +1321,13 @@ kernel void rmsnorm_f32(device const float* a [[buffer(0)]],
 // matmul kernels sum, into threadgroup memory. The threadgroup finds the scores' maximum;
 // threads take the exponentials in chunks of REDUCE_CHUNK, which one thread
 // adds in chunk order, as the softmax kernels do; each score becomes its
-// exponential over the sum. Then thread d adds `weight · v` over the
-// positions, again in chunks of CHUNK, for output columns d, d + threads and
-// so on. q is `[items, width]` and k and v `[heads, positions, width]` through
-// their views, items = heads × rows; at most ATTENTION_POSITIONS positions.
+// exponential over the sum. Then the threads take the output columns, each
+// `threads / out_width` threads to a column taking a chunk of CHUNK positions
+// at a time, and the column's first thread adds the chunks' sums of
+// `weight · v` in chunk order. q is `[items, width]` and k and v `[heads,
+// positions, width]` through their views, items = heads × rows; each head's
+// keys and values are found once and stepped through by their views' strides.
+// At most ATTENTION_POSITIONS positions and ATTENTION_THREADS output columns.
 kernel void attention_f32(device const float* q [[buffer(0)]],
                           device const float* k [[buffer(1)]],
                           device const float* v [[buffer(2)]],
@@ -1350,15 +1353,17 @@ kernel void attention_f32(device const float* q [[buffer(0)]],
     int pq = offset_of(vq, int(item * width)), sq = run_stride(vq);
     int sk = run_stride(vk), sv = run_stride(vv), sm = masked ? run_stride(vm) : 0;
     int pm = masked ? offset_of(vm, int(item * positions)) : 0;
+    int pk = offset_of(vk, int(head * positions * width)), tk = vk.strides[vk.ndim - 2];
+    int pv = offset_of(vv, int(head * positions * out_width)), tv = vv.strides[vv.ndim - 2];
     float top = -3.402823466e38f;
     for (uint p = t; p < positions; p += threads) {
-        int pk = offset_of(vk, int((head * positions + p) * width));
+        int row = pk + int(p) * tk;
         float dot = 0.0f;
         for (uint c = 0; c * CHUNK < width; c++) {
             float acc = 0.0f;
             uint stop = min(width, (c + 1) * CHUNK);
             for (uint d = c * CHUNK; d < stop; d++) {
-                float product = q[pq + int(d) * sq] * k[pk + int(d) * sk];
+                float product = q[pq + int(d) * sq] * k[row + int(d) * sk];
                 acc = acc + product;
             }
             dot = dot + acc;
@@ -1395,22 +1400,30 @@ kernel void attention_f32(device const float* q [[buffer(0)]],
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     float total = partial[0];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
     for (uint p = t; p < positions; p += threads) scores[p] = scores[p] / total;
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (uint d = t; d < out_width; d += threads) {
-        float out = 0.0f;
-        for (uint c = 0; c * CHUNK < positions; c++) {
-            float acc = 0.0f;
+    uint lanes = threads / out_width, col = t % out_width, slot = t / out_width;
+    uint spans = (positions + CHUNK - 1) / CHUNK;
+    float out = 0.0f;
+    for (uint first = 0; first < spans; first += lanes) {
+        uint c = first + slot;
+        float acc = 0.0f;
+        if (slot < lanes && c < spans) {
             uint stop = min(positions, (c + 1) * CHUNK);
             for (uint p = c * CHUNK; p < stop; p++) {
-                int pv = offset_of(vv, int((head * positions + p) * out_width));
-                float product = scores[p] * v[pv + int(d) * sv];
+                float product = scores[p] * v[pv + int(p) * tv + int(col) * sv];
                 acc = acc + product;
             }
-            out = out + acc;
         }
-        dst[item * out_width + d] = out;
+        partial[t] = acc;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (slot == 0) {
+            for (uint j = 0; j < lanes && first + j < spans; j++) out = out + partial[j * out_width + col];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
     }
+    if (slot == 0) dst[item * out_width + col] = out;
 }
 
 // Rotary embeddings: one thread per element, `x · cos + rotate_half(x) · sin`,

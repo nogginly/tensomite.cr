@@ -110,10 +110,11 @@ module Tensomite
       self / ((self * self).mean(-1, keepdims: true) + eps).sqrt * weight
     end
 
-    # The most query rows per head, and cached positions, that `.attention`
-    # fuses.
+    # The most query rows per head, cached positions, and value columns that
+    # `.attention` fuses.
     ATTENTION_ROWS      =    8
     ATTENTION_POSITIONS = 4096
+    ATTENTION_COLUMNS   =  128
 
     # Returns attention: `softmax(q · kᵀ · scale + mask) · v`, for queries *q*
     # `[..., rows, width]`, keys *k* `[..., positions, width]` and values *v*
@@ -121,10 +122,12 @@ module Tensomite
     # rows, positions]`.
     #
     # On a device that `Device#fuses_attention?`, with `F32` data, at most
-    # `ATTENTION_ROWS` rows per head and `ATTENTION_POSITIONS` positions, as
-    # decoding has, it is one op (`Op::Attention`), whose scores never leave
-    # the GPU; its results are within rounding of the composite's. Otherwise it
-    # is the composite: a matmul, a fused softmax and a matmul.
+    # `ATTENTION_ROWS` rows per head, `ATTENTION_POSITIONS` positions and
+    # `ATTENTION_COLUMNS` value columns, as decoding has, it is one op
+    # (`Op::Attention`), whose scores never leave the GPU; it adds in the
+    # composite's orders, so on a shape-invariant device it has the
+    # composite's bits. Otherwise it is the composite: a matmul, a fused
+    # softmax and a matmul.
     def self.attention(q : Tensor, k : Tensor, v : Tensor, *, scale : Number, mask : Tensor? = nil) : Tensor
       if attention_fusable?(q, k, v, mask)
         q.check_compatible("attention", mask ? [k, v, mask] : [k, v])
@@ -140,7 +143,7 @@ module Tensomite
     private def self.attention_fusable?(q : Tensor, k : Tensor, v : Tensor, mask : Tensor?) : Bool
       return false unless q.device.fuses_attention? && {q, k, v}.all?(&.dtype.f32?) && mask.try(&.dtype.f32?) != false
       return false unless attention_shapes?(q, k, v)
-      return false unless q.shape[-2] <= ATTENTION_ROWS && 0 < k.shape[-2] <= ATTENTION_POSITIONS
+      return false unless q.shape[-2] <= ATTENTION_ROWS && 0 < k.shape[-2] <= ATTENTION_POSITIONS && v.shape[-1] <= ATTENTION_COLUMNS
       scores = q.shape[0...-1] + [k.shape[-2]]
       mask.nil? || View.broadcast_shape(scores, mask.shape) == scores
     end
