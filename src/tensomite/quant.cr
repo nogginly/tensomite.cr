@@ -91,7 +91,8 @@ module Tensomite
 
     # Writes `x · wᵀ` into *dst*, `[rows, n]`, for *x*, `rows` rows of *k*
     # values, and *w*, `n` rows of *k* values in *dtype*, as ggml's reference
-    # dot products compute it.
+    # dot products compute it: the naive oracle `#matmul` is checked against,
+    # and gives the bits of.
     #
     # 1. Quantises each row of *x* once, block by block: to `Q8_0` for `Q8_0`
     #    and `Q4_0` weights, and to `Q8_1` (which also keeps `d · Σq` in `F16`)
@@ -103,7 +104,7 @@ module Tensomite
     #
     # Each output depends only on its own row and column, so the bits do not
     # change with the number of rows.
-    def matmul(dtype : DType, x : Slice(Float32), w : Bytes, rows : Int32, n : Int32, k : Int32, dst : Slice(Float32)) : Nil
+    def matmul_reference(dtype : DType, x : Slice(Float32), w : Bytes, rows : Int32, n : Int32, k : Int32, dst : Slice(Float32)) : Nil
       blocks = k // DType.block_size
       row_bytes = dtype.bytes_for(k)
       scales = Slice(Float32).new(blocks)
@@ -123,6 +124,106 @@ module Tensomite
                                end
         end
       end
+    end
+
+    # Writes `x · wᵀ` into *dst* as `#matmul_reference` does, with its bits,
+    # faster:
+    #
+    # 1. Quantises each row of *x* once, as the reference does, and also keeps
+    #    each block's integer sum of quantised values.
+    # 2. For each output, sums the blocks in order. A block's integer dot
+    #    product is taken in wrapping arithmetic, which LLVM vectorises; for
+    #    `Q4_0` it is `Σq·y - 8·Σy`, the same integer as the reference's
+    #    `Σ(q - 8)·y`. Scales are read through a table of every `F16`'s value.
+    #    The floating-point expressions after it are the reference's.
+    def matmul(dtype : DType, x : Slice(Float32), w : Bytes, rows : Int32, n : Int32, k : Int32, dst : Slice(Float32)) : Nil
+      blocks = k // DType.block_size
+      row_bytes = dtype.bytes_for(k)
+      scales = Slice(Float32).new(blocks)
+      sums = Slice(Float32).new(blocks)
+      totals = Slice(Int32).new(blocks)
+      qs = Slice(Int8).new(k)
+      raise ArgumentError.new("#{w.size} bytes do not hold #{n} rows of #{k} #{dtype} values") unless w.size == n * row_bytes
+      raise ArgumentError.new("#{x.size} values are not #{rows} rows of #{k}") unless x.size == rows * k && dst.size == rows * n
+      rows.times do |row|
+        quantize_activations(x[row * k, k], scales, sums, qs, with_sums: dtype.q4_1?)
+        blocks.times { |block| totals[block] = block_total(qs.to_unsafe + block * 32) }
+        n.times do |col|
+          weight = w.to_unsafe + col * row_bytes
+          dst[row * n + col] = case dtype
+                               when .q8_0? then fast_q8_0(weight, scales, qs, blocks)
+                               when .q4_0? then fast_q4_0(weight, scales, totals, qs, blocks)
+                               when .q4_1? then fast_q4_1(weight, scales, sums, qs, blocks)
+                               else             raise DTypeError.new("#{dtype} is not a block format")
+                               end
+        end
+      end
+    end
+
+    # Returns the sum of a block's 32 quantised values.
+    private def block_total(qb : Int8*) : Int32
+      total = 0
+      32.times { |j| total &+= qb[j].to_i32 }
+      total
+    end
+
+    # The value of every `F16`, by its bits.
+    private HALVES = Slice(Float32).new(65536) { |bits| F16.from_bits(bits.to_u16!).to_f32 }
+
+    private def fast_half(at : UInt8*) : Float32
+      HALVES.unsafe_fetch(at[0].to_i32 | at[1].to_i32 << 8)
+    end
+
+    private def fast_q8_0(w : UInt8*, scales : Slice(Float32), qs : Slice(Int8), blocks : Int32) : Float32
+      sum = 0.0_f32
+      sp, qp = scales.to_unsafe, qs.to_unsafe
+      blocks.times do |block|
+        base = w + block * 34
+        values = (base + 2).as(Int8*)
+        qb = qp + block * 32
+        total = 0
+        32.times { |j| total &+= values[j].to_i32 &* qb[j].to_i32 }
+        sum += total.to_f32 * (fast_half(base) * sp[block])
+      end
+      sum
+    end
+
+    # Returns the integer dot product of a block's 32 nibbles, at *packed*, low
+    # halves first, with its 32 quantised activations: the nibbles are
+    # unpacked into bytes, then multiplied in one loop LLVM vectorises.
+    private def nibble_dot(packed : UInt8*, qb : Int8*) : Int32
+      values = uninitialized StaticArray(Int8, 32)
+      16.times do |j|
+        values[j] = (packed[j] & 0x0f).to_i8!
+        values[j + 16] = (packed[j] >> 4).to_i8!
+      end
+      total = 0
+      32.times { |j| total &+= values[j].to_i32 &* qb[j].to_i32 }
+      total
+    end
+
+    private def fast_q4_0(w : UInt8*, scales : Slice(Float32), totals : Slice(Int32), qs : Slice(Int8), blocks : Int32) : Float32
+      sum = 0.0_f32
+      sp, tp, qp = scales.to_unsafe, totals.to_unsafe, qs.to_unsafe
+      blocks.times do |block|
+        base = w + block * 18
+        qb = qp + block * 32
+        total = nibble_dot(base + 2, qb)
+        sum += (total &- 8 &* tp[block]).to_f32 * fast_half(base) * sp[block]
+      end
+      sum
+    end
+
+    private def fast_q4_1(w : UInt8*, scales : Slice(Float32), sums : Slice(Float32), qs : Slice(Int8), blocks : Int32) : Float32
+      sum = 0.0_f32
+      sp, mp, qp = scales.to_unsafe, sums.to_unsafe, qs.to_unsafe
+      blocks.times do |block|
+        base = w + block * 20
+        qb = qp + block * 32
+        total = nibble_dot(base + 4, qb)
+        sum += (fast_half(base) * sp[block]) * total.to_f32 + fast_half(base + 2) * mp[block]
+      end
+      sum
     end
 
     # Writes rows *ids* of *table*, rows of *width* values in *dtype*, into
