@@ -61,13 +61,32 @@ module Tensomite
       own(buffer).bytes.copy_to(data)
     end
 
+    # The time each op takes, in milliseconds, and how many ran, by op name,
+    # while set; `nil`, the default, times nothing. See
+    # `bench/profile_decode_cpu.cr`.
+    property op_times : Hash(String, {Int32, Float64})? = nil
+
     def execute(node : Node, output : Buffer) : Nil
-      case node.dtype
-      in .f32? then execute(Float32, node, output)
-      in .i32? then execute(Int32, node, output)
-      in .q8_0?, .q4_0?, .q4_1?
-        raise DTypeError.new("no op computes #{node.dtype} values")
+      timed(node) do
+        case node.dtype
+        in .f32? then execute(Float32, node, output)
+        in .i32? then execute(Int32, node, output)
+        in .q8_0?, .q4_0?, .q4_1?
+          raise DTypeError.new("no op computes #{node.dtype} values")
+        end
       end
+    end
+
+    # Runs the block, adding its time to *node*'s op in `#op_times` when that
+    # is set.
+    protected def timed(node : Node, &) : Nil
+      times = op_times
+      return yield unless times
+      start = Time.instant
+      yield
+      label = node.op.to_s
+      count, total = times[label]? || {0, 0.0}
+      times[label] = {count + 1, total + (Time.instant - start).total_milliseconds}
     end
 
     def sync : Nil
