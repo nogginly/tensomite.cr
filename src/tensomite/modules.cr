@@ -317,8 +317,9 @@ module Tensomite
     # 4. Stacks each group's query heads as rows, `[batch, kv_heads, group *
     #    length, head width]`, so that one batched matmul scores them all
     #    against their shared keys, with *mask* repeated for each head.
-    # 5. Normalises the scores with softmax, averages the values, and
-    #    projects the heads' joined outputs back to the width.
+    # 5. Normalises the scores with softmax and averages the values, as one
+    #    op on a GPU while decoding (see `Tensor.attention`), and projects the
+    #    heads' joined outputs back to the width.
     def forward(x : Tensor, mask : Tensor, rope : RotaryEmbedding, cache : CausalSelfAttention::Cache? = nil) : Tensor
       rows = x.shape[0]
       length = mask.shape[0]
@@ -332,8 +333,7 @@ module Tensomite
       k, v = cache.append(k, v) if cache
       grouped = q.reshape([batch, kv_heads, group * length, head_width])
       masks = group == 1 ? mask : mask.expand([group] + mask.shape).reshape([group * length, mask.shape[1]])
-      weights = grouped.matmul(k.transpose).softmax(scale: 1 / Math.sqrt(head_width), mask: masks)
-      attended = weights.matmul(v).reshape([batch, heads, length, head_width])
+      attended = Tensor.attention(grouped, k, v, scale: 1 / Math.sqrt(head_width), mask: masks).reshape([batch, heads, length, head_width])
       o_proj.call(attended.permute([0, 2, 1, 3]).reshape([rows, heads * head_width]))
     end
 

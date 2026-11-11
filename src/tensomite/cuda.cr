@@ -96,7 +96,9 @@ module Tensomite
     private REDUCE_THREADS = 256
     private REDUCE_CHUNK   =  16
     private NORM_THREADS   = 512
-    private BLOCK          = 256
+    # Threads in each block of fused attention, one block per query row.
+    private ATTENTION_THREADS = 128
+    private BLOCK             = 256
     # Warps in each block of a quantised matmul on lanes.
     private BLOCK_WARPS =   4
     private COLS        =  32
@@ -232,6 +234,11 @@ module Tensomite
 
     # How a quantised matmul divides its work; see `BlockMatMulMode`.
     property block_mode = BlockMatMulMode.from_env
+
+    # Fused attention runs in one kernel per op (see `Tensor.attention`).
+    def fuses_attention? : Bool
+      true
+    end
 
     # The block size of the tiled matmul; see `MatMulTile`.
     property matmul_tile = MatMulTile::T64x64
@@ -490,9 +497,24 @@ module Tensomite
       when Op::MatMul                                                                                                      then launch_matmul(kernels, node, output)
       when Op::Softmax, Op::SoftmaxGrad, Op::LogSoftmax, Op::LogSoftmaxGrad, Op::LayerNorm, Op::LayerNormGrad, Op::RMSNorm then launch_row_op(kernels, node, output)
       when Op::Kernel, Op::Dropout, Op::Rope                                                                               then launch_pointwise(kernels, node, output)
+      when Op::Attention                                                                                                   then launch_attention(kernels, node, output)
       else                                                                                                                      return launch_elementwise(kernels, node, output)
       end
       true
+    end
+
+    # Fused attention: one block of `ATTENTION_THREADS` per query row of a head.
+    private def launch_attention(kernels : Kernels, node : Node, output : CUDABuffer) : Nil
+      q, k, v = node.srcs
+      mask = node.srcs[3]?
+      width = q.shape[-1]
+      items = q.size // width
+      return if items == 0
+      scale = node.scale || raise Error.new("attention needs a scale")
+      context.launch(kernels["attention_f32"], items, ATTENTION_THREADS, pointer(q), pointer(k), pointer(v),
+        mask ? pointer(mask) : pointer(q), output.pointer, view_args(q.view), view_args(k.view), view_args(v.view),
+        view_args((mask || q).view), q.shape[-2].to_u32, k.shape[-2].to_u32, width.to_u32, v.shape[-1].to_u32,
+        scale, mask ? 1_u32 : 0_u32)
     end
 
     # Kernels from `Tensomite.kernel`, dropout and rotary embeddings, each one

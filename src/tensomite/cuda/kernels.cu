@@ -70,6 +70,8 @@ extern "C" __global__ void copy_into_f32(const float* src, float* dst, View vs, 
 #define REDUCE_THREADS 256
 #define REDUCE_CHUNK 16
 #define NORM_THREADS 512
+#define ATTENTION_THREADS 128
+#define ATTENTION_POSITIONS 4096
 // Block-format products on lanes: BLOCK_WARPS warps a block, each computing at
 // most LANE_OUTPUTS outputs, whose contributions it keeps LANE_STRIDE floats
 // apart, so that the lanes adding them read different banks of shared memory.
@@ -906,6 +908,104 @@ extern "C" __global__ void rmsnorm_f32(const float* a, const float* w, float* ds
         float scaled = a[start + int(s) * stride] / root;
         dst[base + s] = scaled * w[wstart + int(s) * wstride];
     }
+}
+
+// Attention for a few query rows: one block per query row of a head, of
+// ATTENTION_THREADS threads, adding in the orders the composite's kernels add
+// in, so that it has their bits. Thread t scores positions t, t + threads and
+// so on, `q · k · scale + mask`, the dot product in chunks of CHUNK as the
+// matmul kernels sum, into shared memory. The block finds the scores' maximum;
+// threads take the exponentials in chunks of REDUCE_CHUNK, which one thread
+// adds in chunk order, as the softmax kernels do; each score becomes its
+// exponential over the sum. Then the threads take the output columns, each
+// `threads / out_width` threads to a column taking a chunk of CHUNK positions
+// at a time, and the column's first thread adds the chunks' sums of
+// `weight · v` in chunk order. q is `[items, width]` and k and v `[heads,
+// positions, width]` through their views, items = heads × rows; each head's
+// keys and values are found once and stepped through by their views' strides.
+// At most ATTENTION_POSITIONS positions and ATTENTION_THREADS output columns.
+extern "C" __global__ void attention_f32(const float* q, const float* k, const float* v, const float* m, float* dst,
+                                         View vq, View vk, View vv, View vm, unsigned int rows,
+                                         unsigned int positions, unsigned int width, unsigned int out_width,
+                                         float scale, unsigned int masked) {
+    __shared__ float scores[ATTENTION_POSITIONS];
+    __shared__ float partial[ATTENTION_THREADS];
+    __shared__ float sums[ATTENTION_POSITIONS / REDUCE_CHUNK];
+    unsigned int item = blockIdx.x, head = item / rows, t = threadIdx.x, threads = blockDim.x;
+    int pq = offset_of(vq, int(item * width)), sq = run_stride(vq);
+    int sk = run_stride(vk), sv = run_stride(vv), sm = masked ? run_stride(vm) : 0;
+    int pm = masked ? offset_of(vm, int(item * positions)) : 0;
+    int pk = offset_of(vk, int(head * positions * width)), tk = stride_of(vk, vk.ndim - 2);
+    int pv = offset_of(vv, int(head * positions * out_width)), tv = stride_of(vv, vv.ndim - 2);
+    float top = -3.402823466e38f;
+    for (unsigned int p = t; p < positions; p += threads) {
+        int row = pk + int(p) * tk;
+        float dot = 0.0f;
+        for (unsigned int c = 0; c * CHUNK < width; c++) {
+            float acc = 0.0f;
+            unsigned int stop = min(width, (c + 1) * CHUNK);
+            for (unsigned int d = c * CHUNK; d < stop; d++) {
+                float product = q[pq + int(d) * sq] * k[row + int(d) * sk];
+                acc = acc + product;
+            }
+            dot = dot + acc;
+        }
+        float x = dot * scale;
+        if (masked) x = x + m[pm + int(p) * sm];
+        scores[p] = x;
+        top = x > top ? x : top;
+    }
+    partial[t] = top;
+    __syncthreads();
+    for (unsigned int half_count = threads / 2; half_count > 0; half_count /= 2) {
+        if (t < half_count) partial[t] = partial[t + half_count] > partial[t] ? partial[t + half_count] : partial[t];
+        __syncthreads();
+    }
+    top = partial[0];
+    __syncthreads();
+    unsigned int chunks = (positions + REDUCE_CHUNK - 1) / REDUCE_CHUNK;
+    for (unsigned int c = t; c < chunks; c += threads) {
+        float acc = 0.0f;
+        unsigned int stop = min(positions, (c + 1) * REDUCE_CHUNK);
+        for (unsigned int p = c * REDUCE_CHUNK; p < stop; p++) {
+            float e = expf(scores[p] - top);
+            scores[p] = e;
+            acc = acc + e;
+        }
+        sums[c] = acc;
+    }
+    __syncthreads();
+    if (t == 0) {
+        float total = 0.0f;
+        for (unsigned int c = 0; c < chunks; c++) total = total + sums[c];
+        partial[0] = total;
+    }
+    __syncthreads();
+    float total = partial[0];
+    __syncthreads();
+    for (unsigned int p = t; p < positions; p += threads) scores[p] = scores[p] / total;
+    __syncthreads();
+    unsigned int lanes = threads / out_width, col = t % out_width, slot = t / out_width;
+    unsigned int spans = (positions + CHUNK - 1) / CHUNK;
+    float out = 0.0f;
+    for (unsigned int first = 0; first < spans; first += lanes) {
+        unsigned int c = first + slot;
+        float acc = 0.0f;
+        if (slot < lanes && c < spans) {
+            unsigned int stop = min(positions, (c + 1) * CHUNK);
+            for (unsigned int p = c * CHUNK; p < stop; p++) {
+                float product = scores[p] * v[pv + int(p) * tv + int(col) * sv];
+                acc = acc + product;
+            }
+        }
+        partial[t] = acc;
+        __syncthreads();
+        if (slot == 0) {
+            for (unsigned int j = 0; j < lanes && first + j < spans; j++) out = out + partial[j * out_width + col];
+        }
+        __syncthreads();
+    }
+    if (slot == 0) dst[item * out_width + col] = out;
 }
 
 // Rotary embeddings: one thread per element, `x · cos + rotate_half(x) · sin`,

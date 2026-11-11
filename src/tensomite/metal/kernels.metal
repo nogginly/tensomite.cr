@@ -96,6 +96,8 @@ kernel void copy_into_f32(device const float* src [[buffer(0)]],
 #define REDUCE_THREADS 256
 #define REDUCE_CHUNK 16
 #define NORM_THREADS 512
+#define ATTENTION_THREADS 128
+#define ATTENTION_POSITIONS 4096
 
 // Returns the position of element s of the run that starts at logical index base.
 static int run_position(constant View& v, int start, uint walk, uint base, uint s) {
@@ -1310,6 +1312,118 @@ kernel void rmsnorm_f32(device const float* a [[buffer(0)]],
         float scaled = a[start + int(s) * stride] / root;
         dst[base + s] = scaled * w[wstart + int(s) * wstride];
     }
+}
+
+// Attention for a few query rows: one threadgroup per query row of a head, of
+// ATTENTION_THREADS threads, adding in the orders the composite's kernels add
+// in, so that it has their bits. Thread t scores positions t, t + threads and
+// so on, `q · k · scale + mask`, the dot product in chunks of CHUNK as the
+// matmul kernels sum, into threadgroup memory. The threadgroup finds the scores' maximum;
+// threads take the exponentials in chunks of REDUCE_CHUNK, which one thread
+// adds in chunk order, as the softmax kernels do; each score becomes its
+// exponential over the sum. Then the threads take the output columns, each
+// `threads / out_width` threads to a column taking a chunk of CHUNK positions
+// at a time, and the column's first thread adds the chunks' sums of
+// `weight · v` in chunk order. q is `[items, width]` and k and v `[heads,
+// positions, width]` through their views, items = heads × rows; each head's
+// keys and values are found once and stepped through by their views' strides.
+// At most ATTENTION_POSITIONS positions and ATTENTION_THREADS output columns.
+kernel void attention_f32(device const float* q [[buffer(0)]],
+                          device const float* k [[buffer(1)]],
+                          device const float* v [[buffer(2)]],
+                          device const float* m [[buffer(3)]],
+                          device float* dst [[buffer(4)]],
+                          constant View& vq [[buffer(5)]],
+                          constant View& vk [[buffer(6)]],
+                          constant View& vv [[buffer(7)]],
+                          constant View& vm [[buffer(8)]],
+                          constant uint& rows [[buffer(9)]],
+                          constant uint& positions [[buffer(10)]],
+                          constant uint& width [[buffer(11)]],
+                          constant uint& out_width [[buffer(12)]],
+                          constant float& scale [[buffer(13)]],
+                          constant uint& masked [[buffer(14)]],
+                          uint item [[threadgroup_position_in_grid]],
+                          uint t [[thread_position_in_threadgroup]],
+                          uint threads [[threads_per_threadgroup]]) {
+    threadgroup float scores[ATTENTION_POSITIONS];
+    threadgroup float partial[ATTENTION_THREADS];
+    threadgroup float sums[ATTENTION_POSITIONS / REDUCE_CHUNK];
+    uint head = item / rows;
+    int pq = offset_of(vq, int(item * width)), sq = run_stride(vq);
+    int sk = run_stride(vk), sv = run_stride(vv), sm = masked ? run_stride(vm) : 0;
+    int pm = masked ? offset_of(vm, int(item * positions)) : 0;
+    int pk = offset_of(vk, int(head * positions * width)), tk = vk.strides[vk.ndim - 2];
+    int pv = offset_of(vv, int(head * positions * out_width)), tv = vv.strides[vv.ndim - 2];
+    float top = -3.402823466e38f;
+    for (uint p = t; p < positions; p += threads) {
+        int row = pk + int(p) * tk;
+        float dot = 0.0f;
+        for (uint c = 0; c * CHUNK < width; c++) {
+            float acc = 0.0f;
+            uint stop = min(width, (c + 1) * CHUNK);
+            for (uint d = c * CHUNK; d < stop; d++) {
+                float product = q[pq + int(d) * sq] * k[row + int(d) * sk];
+                acc = acc + product;
+            }
+            dot = dot + acc;
+        }
+        float x = dot * scale;
+        if (masked) x = x + m[pm + int(p) * sm];
+        scores[p] = x;
+        top = x > top ? x : top;
+    }
+    partial[t] = top;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint half_count = threads / 2; half_count > 0; half_count /= 2) {
+        if (t < half_count) partial[t] = partial[t + half_count] > partial[t] ? partial[t + half_count] : partial[t];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    top = partial[0];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    uint chunks = (positions + REDUCE_CHUNK - 1) / REDUCE_CHUNK;
+    for (uint c = t; c < chunks; c += threads) {
+        float acc = 0.0f;
+        uint stop = min(positions, (c + 1) * REDUCE_CHUNK);
+        for (uint p = c * REDUCE_CHUNK; p < stop; p++) {
+            float e = precise::exp(scores[p] - top);
+            scores[p] = e;
+            acc = acc + e;
+        }
+        sums[c] = acc;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (t == 0) {
+        float total = 0.0f;
+        for (uint c = 0; c < chunks; c++) total = total + sums[c];
+        partial[0] = total;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float total = partial[0];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint p = t; p < positions; p += threads) scores[p] = scores[p] / total;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    uint lanes = threads / out_width, col = t % out_width, slot = t / out_width;
+    uint spans = (positions + CHUNK - 1) / CHUNK;
+    float out = 0.0f;
+    for (uint first = 0; first < spans; first += lanes) {
+        uint c = first + slot;
+        float acc = 0.0f;
+        if (slot < lanes && c < spans) {
+            uint stop = min(positions, (c + 1) * CHUNK);
+            for (uint p = c * CHUNK; p < stop; p++) {
+                float product = scores[p] * v[pv + int(p) * tv + int(col) * sv];
+                acc = acc + product;
+            }
+        }
+        partial[t] = acc;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (slot == 0) {
+            for (uint j = 0; j < lanes && first + j < spans; j++) out = out + partial[j * out_width + col];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (slot == 0) dst[item * out_width + col] = out;
 }
 
 // Rotary embeddings: one thread per element, `x · cos + rotate_half(x) · sin`,

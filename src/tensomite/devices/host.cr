@@ -118,7 +118,8 @@ module Tensomite
       in Op::Rope         then rope(node, Slice.new(dst.to_unsafe.as(Float32*), dst.size))
       in Op::Softmax, Op::SoftmaxGrad, Op::LogSoftmax, Op::LogSoftmaxGrad, Op::LayerNorm, Op::LayerNormGrad, Op::RMSNorm
         rows(node, Slice.new(dst.to_unsafe.as(Float32*), dst.size))
-      in Op::Dropout then dropout(node, Slice.new(dst.to_unsafe.as(Float32*), dst.size))
+      in Op::Dropout   then dropout(node, Slice.new(dst.to_unsafe.as(Float32*), dst.size))
+      in Op::Attention then attention(node, Slice.new(dst.to_unsafe.as(Float32*), dst.size))
       in Op::Kernel
         kernel = node.kernel || raise Error.new("kernel node without a kernel")
         kernel.host(Slice.new(dst.to_unsafe.as(Float32*), dst.size), node.srcs.map { |src| elements(Float32, src) }, node.srcs.map(&.view))
@@ -374,6 +375,44 @@ module Tensomite
       root = Math.sqrt(squares / n.to_f32 + epsilon)
       row_out = dst.to_unsafe + base
       n.times { |j| row_out[j] = xs[pos + j * stride] / root * ws[pw + j * sw] }
+    end
+
+    # Writes attention for each query row: its scores `q · k · scale + mask`
+    # against every position, their softmax, and the values weighted by it,
+    # each sum in index order. The host makes no `Attention` nodes itself (see
+    # `Tensor.attention`); this computes one a GPU leaves to it.
+    private def attention(node : Node, dst : Slice(Float32)) : Nil
+      q, k, v = node.srcs
+      mask = node.srcs[3]?
+      qs, ks, vs = elements(Float32, q), elements(Float32, k), elements(Float32, v)
+      ms = mask ? elements(Float32, mask) : qs
+      width, positions, out_width = q.shape[-1], k.shape[-2], v.shape[-1]
+      rows = q.shape[-2]
+      scale = node.scale || raise Error.new("attention needs a scale")
+      scores = Slice(Float32).new(positions)
+      (q.size // width).times do |item|
+        head = item // rows
+        top = Float32::MIN
+        positions.times do |position|
+          dot = 0f32
+          width.times do |col|
+            dot += qs[q.view.offset_of(item * width + col)] * ks[k.view.offset_of((head * positions + position) * width + col)]
+          end
+          x = dot * scale
+          x = x + ms[mask.view.offset_of(item * positions + position)] if mask
+          scores[position] = x
+          top = x if position == 0 || x > top
+        end
+        total = 0f32
+        positions.times { |position| total += (scores[position] = Maths.exp(scores[position] - top)) }
+        out_width.times do |col|
+          acc = 0f32
+          positions.times do |position|
+            acc += scores[position] / total * vs[v.view.offset_of((head * positions + position) * out_width + col)]
+          end
+          dst[item * out_width + col] = acc
+        end
+      end
     end
 
     # Writes `x · cos + rotate_half(x) · sin` for each element, where

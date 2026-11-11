@@ -62,7 +62,7 @@ module Tensomite
       Op::Exp => "exp_f32", Op::Log => "log_f32", Op::Tanh => "tanh_f32", Op::Sqrt => "sqrt_f32",
       Op::Copy => "copy_f32",
     }
-    private OTHER    = %w[copy_into_f32 sum_f32 max_f32 sum_short_f32 max_short_f32 gather_f32 fill_zero_f32 scatter_add_f32 scatter_add_column_f32 unview_f32 matmul_f32 matmul_split_f32 matmul_tiled_chunks_64x64_f32 matmul_chunk_sums_f32 matmul_tiled_32x32_f32 matmul_tiled_64x64_f32 matmul_tiled_32x64_f32 dropout_f32 softmax_f32 softmax_scaled_f32 softmax_grad_f32 log_softmax_grad_f32 log_softmax_f32 layernorm_f32 layernorm_grad_f32 rmsnorm_f32 rope_f32 gather_blocks_f32 quantize_rows_q8_f32 block_matmul_f32 block_matmul_lanes_f32]
+    private OTHER    = %w[copy_into_f32 sum_f32 max_f32 sum_short_f32 max_short_f32 gather_f32 fill_zero_f32 scatter_add_f32 scatter_add_column_f32 unview_f32 matmul_f32 matmul_split_f32 matmul_tiled_chunks_64x64_f32 matmul_chunk_sums_f32 matmul_tiled_32x32_f32 matmul_tiled_64x64_f32 matmul_tiled_32x64_f32 dropout_f32 softmax_f32 softmax_scaled_f32 softmax_grad_f32 log_softmax_grad_f32 log_softmax_f32 layernorm_f32 layernorm_grad_f32 rmsnorm_f32 rope_f32 attention_f32 gather_blocks_f32 quantize_rows_q8_f32 block_matmul_f32 block_matmul_lanes_f32]
     private OPTIONAL = %w[matmul_atomic_f32 block_matmul_unordered_f32]
     private COLS     = 32
     # SIMD groups in each threadgroup of a quantised matmul on lanes.
@@ -73,6 +73,8 @@ module Tensomite
     private REDUCE_THREADS    =  256
     private REDUCE_CHUNK      =   16
     private NORM_THREADS      =  512
+    # Threads in each threadgroup of fused attention, one per query row.
+    private ATTENTION_THREADS = 128
 
     # How `MatMul` divides its work.
     enum MatMulMode
@@ -161,6 +163,11 @@ module Tensomite
 
     # How a quantised matmul divides its work; see `BlockMatMulMode`.
     property block_mode = BlockMatMulMode.from_env
+
+    # Fused attention runs in one kernel per op (see `Tensor.attention`).
+    def fuses_attention? : Bool
+      true
+    end
 
     # The block size of the tiled matmul; see `MatMulTile`.
     property matmul_tile = MatMulTile::T64x64
@@ -377,6 +384,7 @@ module Tensomite
       when Op::Unview                                                                                                      then return encode_unview(node, output)
       when Op::MatMul                                                                                                      then encode_matmul(node, output)
       when Op::Kernel, Op::Dropout, Op::Rope                                                                               then encode_pointwise(node, output)
+      when Op::Attention                                                                                                   then encode_attention(node, output)
       when Op::Softmax, Op::SoftmaxGrad, Op::LogSoftmax, Op::LogSoftmaxGrad, Op::LayerNorm, Op::LayerNormGrad, Op::RMSNorm then encode_row_op(node, output)
       else                                                                                                                      return encode_elementwise(node, output)
       end
@@ -673,6 +681,19 @@ module Tensomite
         dispatch("rope_f32", node.size, [mtl(x), mtl(cos), mtl(sin), output.mtl],
           [view_args(x.view), view_args(cos.view), view_args(sin.view), u32(node.shape.last), u32(node.size)])
       end
+    end
+
+    # Fused attention: one threadgroup of `ATTENTION_THREADS` per query row of a
+    # head.
+    private def encode_attention(node : Node, output : MetalBuffer) : Nil
+      q, k, v = node.srcs
+      mask = node.srcs[3]?
+      width = q.shape[-1]
+      scale = node.scale || raise Error.new("attention needs a scale")
+      dispatch_groups("attention_f32", {q.size // width, 1}, {ATTENTION_THREADS, 1},
+        [mtl(q), mtl(k), mtl(v), mtl(mask || q), output.mtl],
+        [view_args(q.view), view_args(k.view), view_args(v.view), view_args((mask || q).view), u32(q.shape[-2]),
+         u32(k.shape[-2]), u32(width), u32(v.shape[-1]), Slice[scale].to_unsafe_bytes, u32(mask ? 1 : 0)])
     end
 
     # Returns the threads RMSNorm's kernel gives a row of *n*: the smallest power

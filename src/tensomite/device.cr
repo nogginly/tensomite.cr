@@ -58,5 +58,12 @@ module Tensomite
     # Returns true when a result's bits never depend on the shape of the computation
     # around it, such as batch size or prompt chunking (level 2 of Decision K).
     abstract def shape_invariant? : Bool
+
+    # Returns true when the device computes `Op::Attention` itself, so that
+    # `Tensor.attention` makes one; host devices compute attention as its
+    # composite.
+    def fuses_attention? : Bool
+      false
+    end
   end
 end
