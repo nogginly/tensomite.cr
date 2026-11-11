@@ -1,5 +1,3 @@
-require "wait_group"
-
 module Tensomite
   # Quantises and dequantises rows in ggml's block formats on the host, giving
   # the bytes and values of ggml's reference code (`quantize_row_*_ref` and
@@ -170,31 +168,93 @@ module Tensomite
     # work changes how many spans products are cut into, not the pool's size.
     class_property threads : Int32 = ENV["TENSOMITE_THREADS"]?.try(&.to_i?).try { |count| count.clamp(1, 1024) if count > 0 } || System.cpu_count.to_i.clamp(1, 1024)
 
-    # The fewest weight bytes worth a thread of their own.
+    # The fewest weight bytes worth a span of their own.
     private PARALLEL_BYTES = 64 * 1024
 
-    @@pool : Fiber::ExecutionContext::Parallel? = nil
+    # Spans per thread, so that faster cores take more of them.
+    private SPANS_PER_THREAD = 4
+
+    @@pool : SpinPool? = nil
 
     # Runs the block on spans `first...stop` that cover `0...count` in order:
     # one span on the calling thread when the work, *bytes* of weights, is too
-    # small to share, or up to `.threads` spans on the pool's threads
-    # otherwise, returning when all have finished. Each index falls in exactly
-    # one span, so the results do not depend on the number of threads.
+    # small to share, or up to `SPANS_PER_THREAD` spans per thread, taken in
+    # turn by the calling thread and the pool's, otherwise; returns when all
+    # have finished. Each index falls in exactly one span, so the results do
+    # not depend on the number of threads.
     protected def self.in_parallel(count : Int32, bytes : Int32, &block : Int32, Int32 ->) : Nil
-      spans = Math.min(threads, Math.min(count, bytes // PARALLEL_BYTES))
-      return block.call(0, count) if spans <= 1
+      spans = Math.min(threads * SPANS_PER_THREAD, Math.min(count, bytes // PARALLEL_BYTES))
+      return block.call(0, count) if spans <= 1 || threads <= 1
       HALVES.size
-      pool = @@pool ||= Fiber::ExecutionContext::Parallel.new("tensomite", threads)
-      done = WaitGroup.new(spans)
-      spans.times do |span|
-        first, stop = count * span // spans, count * (span + 1) // spans
-        pool.spawn do
-          block.call(first, stop)
-        ensure
-          done.done
+      pool = @@pool ||= SpinPool.new(threads - 1)
+      pool.run(spans, count, block)
+    end
+
+    # Worker threads that wait for work by spinning, so that a product's spans
+    # start within a microsecond rather than when a sleeping thread wakes.
+    # Each runs in its own isolated execution context; with the calling
+    # thread, they are as many as `Quant.threads`, so that no thread spinning
+    # waits for a core. A worker that has seen no work for a while naps
+    # between checks.
+    private class SpinPool
+      @generation = Atomic(Int64).new(0)
+      @next = Atomic(Int32).new(0)
+      @done = Atomic(Int32).new(0)
+      @spans = 0
+      @count = 0
+      @job : Proc(Int32, Int32, Nil)? = nil
+
+      def initialize(workers : Int32)
+        workers.times do |index|
+          Fiber::ExecutionContext::Isolated.new("tensomite-#{index}") { work }
         end
       end
-      done.wait
+
+      # Runs *job* on *spans* spans of `0...count`: publishes it, takes spans
+      # alongside the workers, then waits until every span has finished.
+      #
+      # The job, span count and counters are written before the generation
+      # moves on, so a worker that sees the new generation sees them too.
+      # Every span of the previous job finished before this one started, so a
+      # worker still leaving it can only take spans of this one.
+      def run(spans : Int32, count : Int32, job : Proc(Int32, Int32, Nil)) : Nil
+        @job, @spans, @count = job, spans, count
+        @done.set(0)
+        @next.set(0)
+        @generation.add(1)
+        help
+        until @done.get == spans
+          Intrinsics.pause
+        end
+      end
+
+      # Waits for each new generation, spinning, then napping after about a
+      # million idle checks, and takes its spans.
+      private def work : Nil
+        seen = 0_i64
+        loop do
+          idle = 0
+          while (current = @generation.get) == seen
+            idle += 1
+            if idle < 1_000_000
+              Intrinsics.pause
+            else
+              sleep 100.microseconds
+            end
+          end
+          seen = current
+          help
+        end
+      end
+
+      # Takes spans until none are left, running the job on each.
+      private def help : Nil
+        while (span = @next.add(1)) < @spans
+          spans, count = @spans, @count
+          @job.try &.call(count * span // spans, count * (span + 1) // spans)
+          @done.add(1)
+        end
+      end
     end
 
     # Returns the sum of a block's 32 quantised values.
