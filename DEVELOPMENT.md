@@ -25,10 +25,13 @@ Lint                  |`bin/ameba src/ spec/ bench/ examples/ apps/`            
 Check formatting      |`crystal tool format --check src spec bench examples apps`|                                                        
 Fix formatting        |`crystal tool format src spec bench examples apps`        |                                                        
 Build the apps        |`shards build --release`, into `bin/`                     |`ops br` into `bin/release/`, `ops bd` into `bin/debug/`
+Build for this CPU    |`shards build --release --mcpu=native`, into `bin/`       |`ops bn` into `bin/native/`                             
 Run the server app    |`bin/release/server …`                                    |`ops run-server …` builds, then runs it                 
 Everything before a PR|all of the above but building                             |`ops test` (specs, apps' specs and lint)                
 
 All three must be clean before a PR.
+
+**Building for this CPU.** Builds are portable by default: they run on any CPU of the target's architecture. `--mcpu=native` lets LLVM use every instruction, and tune for the core, of the machine that builds, so the binary may not run on an older CPU of the same architecture. On SmolLM2-1.7B at Q4_0, it decodes on the CPU 11% faster on the GB10 and 17% faster on the M5 Pro, with all threads (Decision DE). `ops bn` builds the apps so into `bin/native/`, `ops run-native-server` builds and runs the server so, and `ops run-native` runs a source file so, as `ops run-native bench/profile_decode_cpu.cr -- MODEL`.
 
 Benchmarks live in `bench/` and examples in `examples/`. Both run in release mode, for example `crystal run --release bench/matmul.cr`. CI type-checks, formats and lints them with everything else, but does not run them. `bench/train_gpt2.cr` fine-tunes a pretrained GPT-2 on a text file for a few steps and reports a step's milliseconds, tokens a second and memory, with `--profile N` on Metal or CUDA. `bench/code_eval.cr` compares GPT-2 models on completing methods held out of a `finetune` run on a code corpus (see `apps/finetune/README.md`), and `scripts/compare_first_lines.py` lists the methods where two models' first lines differ in its `--verbose` output. Apps live in `apps/`, each with its own specs, which CI runs: `crystal spec apps/server/spec apps/finetune/spec`. Each is a `shards` target in `shard.yml`, so `shards build` builds it into `bin/`; with `ops`, release builds go to `bin/release/` and debug builds to `bin/debug/`.
 

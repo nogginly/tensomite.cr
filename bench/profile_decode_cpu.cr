@@ -8,7 +8,8 @@
 # the prompt's length (16 by default) and the tokens decoded after it (8 by
 # default): fewer than the GPU profilers', since host kernels are slower. The
 # workload runs twice: once for the wall time per token, then with each op
-# timed, by op.
+# timed, by op. `crystal run --release --mcpu=native` (`ops run-native`)
+# builds for this machine's CPU only, which is faster (see DEVELOPMENT.md).
 require "../src/tensomite/blas"
 require "./profile_load"
 
