@@ -27,6 +27,25 @@ describe Quant do
     end
   end
 
+  {DType::Q8_0, DType::Q4_0, DType::Q4_1}.each do |dtype|
+    it "multiplies #{dtype} weights as the reference does, bit for bit" do
+      rng = Random.new(11)
+      [{1, 37, 64}, {3, 5, 1280}, {2, 9, 4096}].each do |(count, n, k)|
+        values = Array.new(n * k) { rng.rand(-2.0..2.0).to_f32 }
+        values[0, 32].fill(0f32)
+        values[32 * 3] = 50f32
+        x = Array.new(count * k) { rng.rand(-3.0..3.0).to_f32 }
+        x[k, 32].fill(0f32) if count > 1
+        weights = Quant.quantize(dtype, Slice.new(values.to_unsafe, values.size))
+        fast, reference = Slice(Float32).new(count * n), Slice(Float32).new(count * n)
+        xs = Slice.new(x.to_unsafe, x.size)
+        Quant.matmul(dtype, xs, weights, count, n, k, fast)
+        Quant.matmul_reference(dtype, xs, weights, count, n, k, reference)
+        fast.to_a.map(&.unsafe_as(UInt32)).should eq reference.to_a.map(&.unsafe_as(UInt32))
+      end
+    end
+  end
+
   it "sizes blocks" do
     DType::Q8_0.bytes_for(64).should eq 68
     DType::Q4_0.bytes_for(64).should eq 36
