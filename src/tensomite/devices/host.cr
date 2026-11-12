@@ -437,17 +437,25 @@ module Tensomite
     # Writes `x · cos + rotate_half(x) · sin` for each element, where
     # `rotate_half(x)` at a column of the first half is the element half a row
     # on, times -1, and at a column of the second half the element half a row
-    # back, as the composite's ops compute it.
+    # back, as the composite's ops compute it. Each row's starts are found
+    # once, and its elements read along their views' last strides.
     private def rope(node : Node, dst : Slice(Float32)) : Nil
       x, cos, sin = node.srcs
       xs, cs, ss = elements(Float32, x), elements(Float32, cos), elements(Float32, sin)
       n = node.shape.last
       half = n // 2
-      dst.size.times do |i|
-        col = i % n
-        partner = xs[x.view.offset_of(col < half ? i + half : i - half)]
-        rotated = col < half ? partner * -1f32 : partner
-        dst[i] = xs[x.view.offset_of(i)] * cs[cos.view.offset_of(i)] + rotated * ss[sin.view.offset_of(i)]
+      sx, sc, ssn = x.view.run_stride, cos.view.run_stride, sin.view.run_stride
+      (dst.size // n).times do |row|
+        base = row * n
+        px, pc, ps = x.view.offset_of(base), cos.view.offset_of(base), sin.view.offset_of(base)
+        HostDevice.check_run(px, n, sx, xs.size) { describe(node) }
+        HostDevice.check_run(pc, n, sc, cs.size) { describe(node) }
+        HostDevice.check_run(ps, n, ssn, ss.size) { describe(node) }
+        n.times do |col|
+          partner = xs.unsafe_fetch(px + (col < half ? col + half : col - half) * sx)
+          rotated = col < half ? partner * -1f32 : partner
+          dst[base + col] = xs.unsafe_fetch(px + col * sx) * cs.unsafe_fetch(pc + col * sc) + rotated * ss.unsafe_fetch(ps + col * ssn)
+        end
       end
     end
 
