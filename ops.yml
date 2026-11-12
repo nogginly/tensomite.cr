@@ -5,12 +5,16 @@ dependencies:
     - shards check || (shards install && mkdir -p bin && cp lib/ameba/bin/ameba.cr bin && crystal build -Dpreview_mt -o bin/ameba bin/ameba.cr)
 hooks:
   before:
-    - mkdir -p bin/release bin/debug
+    - mkdir -p bin/release bin/debug bin/native
 actions:
   build-release:
     command: SHARDS_BIN_PATH=bin/release shards build --release
     description: Build for release
     alias: br
+  build-native:
+    command: SHARDS_BIN_PATH=bin/native shards build --release --mcpu=native
+    description: Build for release for this machine's CPU only (not portable)
+    alias: bn
   build-debug:
     command: SHARDS_BIN_PATH=bin/debug shards build --debug
     description: Build for development (debugging)
@@ -18,8 +22,11 @@ actions:
   run:
     command: crystal run
     description: Compile and run the source file
+  run-native:
+    command: crystal run --release --mcpu=native
+    description: Compile for release for this machine's CPU only (not portable) and run the source file
   clean:
-    command: rm -rf bin/debug/* && rm -rf bin/release/*
+    command: rm -rf bin/debug/* && rm -rf bin/release/* && rm -rf bin/native/*
     description: Clear prior builds
   wipe:
     command: crystal clear_cache && ops clean
@@ -37,6 +44,8 @@ actions:
     description: Run all tests and linter
   run-server:
     command: ops br server && bin/release/server
+  run-native-server:
+    command: ops bn server && bin/native/server
   run-debug-server:
     command: ops bd server && bin/debug/server
   run-finetune:
