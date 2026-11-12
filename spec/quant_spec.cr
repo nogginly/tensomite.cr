@@ -46,6 +46,30 @@ describe Quant do
     end
   end
 
+  it "gives the same bits on any number of threads" do
+    rng = Random.new(12)
+    n, k = 301, 2048
+    values = Array.new(n * k) { rng.rand(-2.0..2.0).to_f32 }
+    x = Array.new(k) { rng.rand(-3.0..3.0).to_f32 }
+    xs = Slice.new(x.to_unsafe, x.size)
+    {DType::Q8_0, DType::Q4_0, DType::Q4_1}.each do |dtype|
+      weights = Quant.quantize(dtype, Slice.new(values.to_unsafe, values.size))
+      reference = Slice(Float32).new(n)
+      Quant.matmul_reference(dtype, xs, weights, 1, n, k, reference)
+      saved = Quant.threads
+      begin
+        [1, 3, 8].each do |threads|
+          Quant.threads = threads
+          got = Slice(Float32).new(n)
+          Quant.matmul(dtype, xs, weights, 1, n, k, got)
+          got.to_a.map(&.unsafe_as(UInt32)).should eq reference.to_a.map(&.unsafe_as(UInt32))
+        end
+      ensure
+        Quant.threads = saved
+      end
+    end
+  end
+
   it "sizes blocks" do
     DType::Q8_0.bytes_for(64).should eq 68
     DType::Q4_0.bytes_for(64).should eq 36
