@@ -2,6 +2,16 @@ require "./spec_helper"
 
 DEVICES.each do |device|
   describe "Tensor on #{device.class}" do
+    it "reads dense, offset, strided, broadcast and empty views in row-major order" do
+      t = Tensor.from((0...24).map(&.to_f32), [4, 6], device)
+      t.to_a(Float32).should eq (0...24).map(&.to_f32)
+      t.slice(0, 2, 4).to_a(Float32).should eq (12...24).map(&.to_f32)
+      t.transpose.to_a(Float32).should eq (0...6).flat_map { |col| (0...4).map { |row| (row * 6 + col).to_f32 } }
+      t.slice(1, 1, 3).to_a(Float32).should eq [1, 2, 7, 8, 13, 14, 19, 20].map(&.to_f32)
+      Tensor.from([5f32], [1], device).expand([3]).to_a(Float32).should eq [5f32, 5f32, 5f32]
+      t.slice(0, 2, 2).to_a(Float32).should be_empty
+    end
+
     # a = [[1, 2, 3],
     #      [4, 5, 6]]
     a = tensor(device, [2, 3], f32(1, 2, 3, 4, 5, 6))
