@@ -188,6 +188,8 @@ module Tensomite
     protected def self.in_parallel(count : Int32, bytes : Int32, &block : Int32, Int32 ->) : Nil
       spans = Math.min(threads * SPANS_PER_THREAD, Math.min(count, bytes // PARALLEL_BYTES))
       return block.call(0, count) if spans <= 1 || threads <= 1
+      # Builds the `F16` table on this thread, before the workers read it.
+      HALVES.size
       pool = @@pool ||= SpinPool.new(threads - 1)
       pool.run(spans, count, block)
     end
@@ -310,9 +312,14 @@ module Tensomite
       end
     end
 
+    # The value of every `F16`, by its bits. A lookup measured faster than
+    # widening in registers: a model's scales take few distinct values, so
+    # the entries in use stay in cache.
+    private HALVES = Slice(Float32).new(65536) { |bits| F16.from_bits(bits.to_u16!).to_f32 }
+
     @[AlwaysInline]
     private def fast_half(at : UInt8*) : Float32
-      F16.from_bits(at[0].to_u16 | at[1].to_u16 << 8).to_f32
+      HALVES.unsafe_fetch(at[0].to_i32 | at[1].to_i32 << 8)
     end
 
     # The products of two weight rows, at *w0* and *w1*, with one row of
