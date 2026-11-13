@@ -58,7 +58,7 @@ describe Quant do
       Quant.matmul_reference(dtype, xs, weights, 1, n, k, reference)
       saved = Quant.threads
       begin
-        [1, 3, 8].each do |threads|
+        [1, 8, 3].each do |threads|
           Quant.threads = threads
           got = Slice(Float32).new(n)
           Quant.matmul(dtype, xs, weights, 1, n, k, got)
@@ -67,6 +67,32 @@ describe Quant do
       ensure
         Quant.threads = saved
       end
+    end
+  end
+
+  it "gives every product its own spans when products of few and many spans alternate" do
+    rng = Random.new(13)
+    k = 2048
+    x = Array.new(k) { rng.rand(-3.0..3.0).to_f32 }
+    xs = Slice.new(x.to_unsafe, x.size)
+    products = [61, 1201].map do |outputs|
+      values = Array.new(outputs * k) { rng.rand(-2.0..2.0).to_f32 }
+      weights = Quant.quantize(DType::Q8_0, Slice.new(values.to_unsafe, values.size))
+      reference = Slice(Float32).new(outputs)
+      Quant.matmul_reference(DType::Q8_0, xs, weights, 1, outputs, k, reference)
+      {outputs, weights, reference.to_a.map(&.unsafe_as(UInt32))}
+    end
+    saved = Quant.threads
+    begin
+      Quant.threads = 8
+      2000.times do |i|
+        n, weights, bits = products[i % 2]
+        got = Slice(Float32).new(n)
+        Quant.matmul(DType::Q8_0, xs, weights, 1, n, k, got)
+        got.to_a.map(&.unsafe_as(UInt32)).should eq bits
+      end
+    ensure
+      Quant.threads = saved
     end
   end
 
