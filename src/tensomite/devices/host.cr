@@ -612,12 +612,32 @@ module Tensomite
       x, w = node.srcs[0], node.srcs[1]
       n, k = w.shape
       rows = x.size // k
-      xs = elements(Float32, x)
-      values = Slice(Float32).new(x.size) { |i| xs[x.view.offset_of(i)] }
+      values = activations(node, x)
       weights = own(w.node.buffer!).bytes
       start = w.dtype.bytes_for(w.view.offset)
       Quant.matmul(w.dtype, values, weights[start, w.dtype.bytes_for(w.size)], rows, n, k, dst)
       add_bias(Float32, node, dst)
+    end
+
+    # Returns *x*'s values in row-major order: its buffer in place when the
+    # view is dense, or a copy walked in runs (see `View.run_length`).
+    private def activations(node : Node, x : Tensor) : Slice(Float32)
+      xs = elements(Float32, x)
+      view = x.view
+      if view.dense?
+        HostDevice.check_run(view.offset, x.size, 1, xs.size) { describe(node) }
+        return xs[view.offset, x.size]
+      end
+      run, stride = View.run_length(x.size, {view}), view.run_stride
+      values = Slice(Float32).new(x.size)
+      dst = values.to_unsafe
+      (x.size // run).times do |index|
+        start = view.offset_of(index * run)
+        HostDevice.check_run(start, run, stride, xs.size) { describe(node) }
+        src = xs.to_unsafe + start
+        run.times { |j| dst[index * run + j] = src[j * stride] }
+      end
+      values
     end
 
     # Computes each output as a dot product over `k`, added in index order.
