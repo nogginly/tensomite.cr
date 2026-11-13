@@ -1,8 +1,4 @@
 module Tensomite
-  lib LibHalf
-    fun to_f32 = "llvm.convert.from.fp16.f32"(bits : UInt16) : Float32
-  end
-
   # Quantises and dequantises rows in ggml's block formats on the host, giving
   # the bytes and values of ggml's reference code (`quantize_row_*_ref` and
   # `dequantize_row_*`).
@@ -192,7 +188,6 @@ module Tensomite
     protected def self.in_parallel(count : Int32, bytes : Int32, &block : Int32, Int32 ->) : Nil
       spans = Math.min(threads * SPANS_PER_THREAD, Math.min(count, bytes // PARALLEL_BYTES))
       return block.call(0, count) if spans <= 1 || threads <= 1
-      HALVES.size
       pool = @@pool ||= SpinPool.new(threads - 1)
       pool.run(spans, count, block)
     end
@@ -315,18 +310,9 @@ module Tensomite
       end
     end
 
-    # The value of every `F16`, by its bits.
-    private HALVES = Slice(Float32).new(65536) { |bits| F16.from_bits(bits.to_u16!).to_f32 }
-
-    # Returns the `F16` at *at* as a `Float32`: one `fcvt` on ARM, a lookup
-    # in `HALVES` elsewhere, where a conversion without F16C is a call.
     @[AlwaysInline]
     private def fast_half(at : UInt8*) : Float32
-      {% if flag?(:aarch64) %}
-        LibHalf.to_f32(at.as(UInt16*).value)
-      {% else %}
-        HALVES.unsafe_fetch(at[0].to_i32 | at[1].to_i32 << 8)
-      {% end %}
+      F16.from_bits(at[0].to_u16 | at[1].to_u16 << 8).to_f32
     end
 
     # The products of two weight rows, at *w0* and *w1*, with one row of
