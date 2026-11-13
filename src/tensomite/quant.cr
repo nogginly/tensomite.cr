@@ -195,10 +195,18 @@ module Tensomite
     # Each runs in its own isolated execution context; with the calling
     # thread, they are as many as `Quant.threads`, so that no thread spinning
     # waits for a core. A worker that has seen no work for a while naps
-    # between checks.
+    # between checks, each nap twice the last, up to `LONGEST_NAP`.
     private class SpinPool
-      @generation = Atomic(Int64).new(0)
-      @next = Atomic(Int32).new(0)
+      # Checks a worker spins through before it starts to nap.
+      SPINS = 1_000_000
+
+      FIRST_NAP   = 100.microseconds
+      LONGEST_NAP = 10.milliseconds
+
+      # The current product's generation in the high 32 bits and its next
+      # unclaimed span in the low 32: a span is claimed by compare-and-set,
+      # so a claim made for one product fails once the next has started.
+      @claim = Atomic(Int64).new(0)
       @done = Atomic(Int32).new(0)
       @spans = 0
       @count = 0
@@ -213,45 +221,56 @@ module Tensomite
       # Runs *job* on *spans* spans of `0...count`: publishes it, takes spans
       # alongside the workers, then waits until every span has finished.
       #
-      # The job, span count and counters are written before the generation
-      # moves on, so a worker that sees the new generation sees them too.
-      # Every span of the previous job finished before this one started, so a
-      # worker still leaving it can only take spans of this one.
+      # The job, span count and counters are written before the claim moves
+      # to the new generation, so a worker that sees the generation sees them
+      # too.
       def run(spans : Int32, count : Int32, job : Proc(Int32, Int32, Nil)) : Nil
         @job, @spans, @count = job, spans, count
         @done.set(0)
-        @next.set(0)
-        @generation.add(1)
-        help
+        generation = (@claim.get >> 32) &+ 1
+        @claim.set(generation << 32)
+        help(generation)
         until @done.get == spans
           Intrinsics.pause
         end
       end
 
-      # Waits for each new generation, spinning, then napping after about a
-      # million idle checks, and takes its spans.
+      # Waits for each new generation, spinning, then napping, and takes its
+      # spans.
       private def work : Nil
         seen = 0_i64
         loop do
           idle = 0
-          while (current = @generation.get) == seen
-            idle += 1
-            if idle < 1_000_000
+          nap = FIRST_NAP
+          while (current = @claim.get >> 32) == seen
+            if idle < SPINS
+              idle += 1
               Intrinsics.pause
             else
-              sleep 100.microseconds
+              sleep nap
+              nap = Math.min(nap * 2, LONGEST_NAP)
             end
           end
           seen = current
-          help
+          help(current)
         end
       end
 
-      # Takes spans until none are left, running the job on each.
-      private def help : Nil
-        while (span = @next.add(1)) < @spans
-          spans, count = @spans, @count
-          @job.try &.call(count * span // spans, count * (span + 1) // spans)
+      # Takes spans of product *generation* until none are left, running the
+      # job on each.
+      #
+      # A claim succeeds only while the product is unfinished, so the next
+      # product has not been published, and the span count, count and job
+      # read before it are this product's.
+      private def help(generation : Int64) : Nil
+        loop do
+          claim = @claim.get
+          return unless claim >> 32 == generation
+          span = (claim & 0xffff_ffff).to_i32
+          spans, count, job = @spans, @count, @job
+          return unless span < spans
+          next unless @claim.compare_and_set(claim, claim + 1)[1]
+          job.try &.call(count * span // spans, count * (span + 1) // spans)
           @done.add(1)
         end
       end
