@@ -36,6 +36,7 @@ describe Quant do
         values[32 * 3] = 50f32
         x = Array.new(count * k) { rng.rand(-3.0..3.0).to_f32 }
         x[k, 32].fill(0f32) if count > 1
+        x[2 * k, 32] = Array.new(32) { |j| j == 0 ? 127f32 : j - 15.5f32 } if count > 2
         weights = Quant.quantize(dtype, Slice.new(values.to_unsafe, values.size))
         fast, reference = Slice(Float32).new(count * n), Slice(Float32).new(count * n)
         xs = Slice.new(x.to_unsafe, x.size)

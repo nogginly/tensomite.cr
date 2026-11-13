@@ -146,8 +146,7 @@ module Tensomite
       raise ArgumentError.new("#{w.size} bytes do not hold #{n} rows of #{k} #{dtype} values") unless w.size == n * row_bytes
       raise ArgumentError.new("#{x.size} values are not #{rows} rows of #{k}") unless x.size == rows * k && dst.size == rows * n
       rows.times do |row|
-        quantize_activations(x[row * k, k], scales, sums, qs, with_sums: dtype.q4_1?)
-        blocks.times { |block| totals[block] = block_total(qs.to_unsafe + block * 32) }
+        fast_quantize(x[row * k, k].to_unsafe, scales, sums, totals, qs, with_sums: dtype.q4_1?)
         out = dst[row * n, n]
         Quant.in_parallel(n, n * row_bytes) do |first, stop|
           (first...stop).each do |col|
@@ -276,11 +275,36 @@ module Tensomite
       end
     end
 
-    # Returns the sum of a block's 32 quantised values.
-    private def block_total(qb : Int8*) : Int32
-      total = 0
-      32.times { |j| total &+= qb[j].to_i32 }
-      total
+    # Returns *value* rounded to the nearest integer, ties away from zero, as
+    # `round(:ties_away)` does for every value within `Int32`'s range, without
+    # a call to `roundf`, so that loops of it vectorise: truncates, then steps
+    # away from zero when the fraction dropped is at least a half.
+    @[AlwaysInline]
+    private def round_away(value : Float32) : Int32
+      whole = value.to_i32!
+      fraction = value - whole.to_f32
+      whole &+ (fraction >= 0.5_f32 ? 1 : 0) &- (fraction <= -0.5_f32 ? 1 : 0)
+    end
+
+    # Quantises *x* as `#quantize_activations` does, with its bits, through
+    # pointers, and also writes each block's integer sum of quantised values
+    # to *totals*. The caller has checked that *x* holds `qs.size` values.
+    private def fast_quantize(x : Float32*, scales : Slice(Float32), sums : Slice(Float32), totals : Slice(Int32), qs : Slice(Int8), with_sums : Bool) : Nil
+      sp, mp, tp, qp = scales.to_unsafe, sums.to_unsafe, totals.to_unsafe, qs.to_unsafe
+      scales.size.times do |block|
+        values = x + block * 32
+        top = values[0].abs
+        1.upto(31) { |j| top = values[j].abs if values[j].abs > top }
+        d = top / 127.0_f32
+        id = d == 0 ? 0.0_f32 : 1.0_f32 / d
+        qb = qp + block * 32
+        32.times { |j| qb[j] = round_away(values[j] * id).to_i8! }
+        total = 0
+        32.times { |j| total &+= qb[j].to_i32 }
+        tp[block] = total
+        sp[block] = F16.new(d).to_f32
+        mp[block] = F16.new(total.to_f32 * d).to_f32 if with_sums
+      end
     end
 
     # The value of every `F16`, by its bits.

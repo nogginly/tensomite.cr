@@ -178,6 +178,7 @@ describe "Tensor#linear with block-format weights" do
     viewed = Tensor.from(x, [k, rows]).transpose
     expected = viewed.contiguous.linear(q).to_a(Float32)
     viewed.linear(q).to_a(Float32).should eq expected
+    xt.slice(0, 1, rows).linear(q).to_a(Float32).should eq xt.linear(q).to_a(Float32)[n..]
     xt.linear(q.slice(0, 2, 5)).to_a(Float32).should eq xt.linear(q).to_a(Float32).each_slice(n).to_a.flat_map(&.[2...5])
   end
 
