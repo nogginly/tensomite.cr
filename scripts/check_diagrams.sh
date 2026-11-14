@@ -2,7 +2,7 @@
 # Renders every Mermaid block in the given Markdown files with mermaid-cli and
 # reports each one that fails to parse. Exits non-zero if any fail.
 #
-#     scripts/check_diagrams.sh [FILE.md ...]   # default: every *.md at the root
+#     scripts/check_diagrams.sh [FILE.md ...]   # default: every *.md at the root and in faq/
 #
 # Set PUPPETEER_EXECUTABLE_PATH to use an installed Chromium instead of the one
 # puppeteer downloads, e.g. /opt/pw-browsers/chromium in Claude Code's cloud
@@ -10,7 +10,7 @@
 set -eu
 work=$(mktemp -d)
 trap 'rm -rf "${work:?}"' EXIT
-[ "$#" -gt 0 ] || set -- *.md
+[ "$#" -gt 0 ] || set -- *.md faq/*.md
 
 python3 - "$work" "$@" <<'PY'
 import pathlib, re, sys
@@ -18,7 +18,7 @@ work, files = pathlib.Path(sys.argv[1]), sys.argv[2:]
 for path in files:
     blocks = re.findall(r"```mermaid\n(.*?)```", pathlib.Path(path).read_text(), re.S)
     for n, block in enumerate(blocks, 1):
-        (work / f"{pathlib.Path(path).stem}-{n:02}.mmd").write_text(block)
+        (work / f"{str(pathlib.Path(path).with_suffix('')).replace('/', '-')}-{n:02}.mmd").write_text(block)
 PY
 
 config="$work/puppeteer.json"

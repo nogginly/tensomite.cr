@@ -301,7 +301,7 @@ flowchart TD
 - **Diagrams** are Mermaid, embedded where they explain the design better than prose. Decision nodes use the hexagon `{{"question?"}}`, not the diamond. Emphasis uses a coloured border only (`stroke`), never a fill.
 - **Check both before a PR** that touches documents:
   - `python3 scripts/format_tables.py DESIGN.md DEVELOPMENT.md PLAN.md HANDOFF.md` pads tables in place, and changes nothing when they are already right.
-  - `scripts/check_diagrams.sh` renders every Mermaid block with mermaid-cli (through `npx`) and lists any that fail to parse.
+  - `scripts/check_diagrams.sh` renders every Mermaid block in the root's and `faq/`'s Markdown files with mermaid-cli (through `npx`) and lists any that fail to parse.
 
 ## Workflow
 
