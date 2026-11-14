@@ -70,7 +70,7 @@ Nothing persists between containers except what is pushed. Setting one up from s
 
 ### Maintainer's machine
 
-A MacBook Pro with an M5 Pro, using Accelerate, and Homebrew's Crystal 1.22.2. Its LLVM rejects some intrinsics that CI's Crystal 1.22.0 accepts, such as `llvm.convert.from.fp16`; a cross-compile in the container doesn't link, so it can't catch that, and only a build on the Mac can. Its benchmark results are in "Performance baselines" in `DESIGN.md`. A Python venv there must also use 3.13 or older until PyTorch supports newer releases.
+A MacBook Pro with an M5 Pro, using Accelerate, and Homebrew's Crystal 1.22.2. Its LLVM rejects some intrinsics that CI's Crystal 1.22.0 accepts, such as `llvm.convert.from.fp16`; a cross-compile in the container doesn't link, so it can't catch that, and only a build on the Mac can. Its current benchmark results are in "Performance baselines" in `DESIGN.md`. A Python venv there must also use 3.13 or older until PyTorch supports newer releases.
 
 An NVIDIA DGX Spark for CUDA: a GB10 on ARM64, its GPU sharing 128 GB with the CPU, running headless Ubuntu Server with NVIDIA's compute-only driver 595 (CUDA 13.2) and Crystal 1.22.1. Nothing graphical is to be installed on it, which is why Vulkan waits (Decision AT). NVRTC is Ubuntu's `cuda-nvrtc-13-1` and `cuda-nvrtc-dev-13-1`, in `/usr/local/cuda-13.1/targets/sbsa-linux/lib`, added to the loader's path with a file in `/etc/ld.so.conf.d`; the linker still needs `LIBRARY_PATH` set to that directory. The maintainer runs CUDA specs and examples there, as with Metal on the Mac.
 
