@@ -10,12 +10,24 @@ module Tensomite
   # - *host_ops* holds the count and wall seconds of each op run on the host.
   # - *kernels* holds the count and GPU seconds of each op from another run that
   #   timed each op alone, keyed by its name and shapes, as
-  #   `MatMul [64,768]·[768,2304]`. They are listed by op, then the *top*
-  #   largest by op and shape, a matmul with its rate: the weights read per
-  #   second when it has one row, as in decoding a token, and the flops
-  #   otherwise.
+  #   `MatMul [64,768]·[768,2304]` or `BlockMatMul Q4_0 [1,2048]·[8192,2048]`
+  #   (see `.label`). They are listed by op, then the *top* largest by op and
+  #   shape, a matmul with its rate: the weights read per second when it has
+  #   one row, as in decoding a token, and the flops otherwise; a quantised
+  #   product, the bytes of its weight read per second.
   struct ProfileReport
     alias Totals = Hash(String, {Int32, Float64})
+
+    # Returns the label a per-kernel profile records *node* under, with
+    # *shapes*: the op, then a matmul's two sources' shapes, a quantised
+    # product's weight format and shapes, or the output's shape.
+    def self.label(node : Node, shapes : Bool) : String
+      return node.op.to_s unless shapes
+      op = node.op
+      dims = op.try { |kind| kind.mat_mul? || kind.block_mat_mul? } ? node.srcs.first(2).map(&.shape) : [node.shape]
+      format = op.try(&.block_mat_mul?) ? " #{node.srcs[1].dtype}" : ""
+      "#{op}#{format} #{dims.map { |shape| "[#{shape.join(',')}]" }.join('·')}"
+    end
 
     def initialize(@device : String, @unit : String, @runs : Int32, @wall : Float64,
                    @parts : Array({String, Float64}), @counts : Array(String),
@@ -74,8 +86,14 @@ module Tensomite
     end
 
     # Returns a matmul's rate from its label, `MatMul [..., M, K]·[..., K, N]`:
-    # 2·M·K·N flops per batch matrix, or with one row K·N weights read.
+    # 2·M·K·N flops per batch matrix, or with one row K·N weights read. A
+    # quantised product's, `BlockMatMul Q4_0 [M, K]·[N, K]`, is its weight's
+    # bytes read, which bounds it whatever its rows.
     private def rate(name : String, count : Int32, seconds : Float64) : String
+      if match = name.match(/^BlockMatMul (\w+) \[[\d,]+\]·\[(\d+),(\d+)\]/)
+        bytes = DType.parse(match[1]).bytes_for(match[2].to_i * match[3].to_i)
+        return "%.1f GB/s" % (bytes.to_f * count / seconds / 1e9)
+      end
       return "" unless name.starts_with?("MatMul") && (dims = name.scan(/\d+/).map(&.[0].to_i)).size >= 4
       a, b = dims[0, dims.size // 2], dims[dims.size // 2..]
       if a[-2] == 1

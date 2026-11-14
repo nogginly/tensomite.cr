@@ -477,9 +477,7 @@ module Tensomite
     end
 
     private def profile_label(node : Node, profile : Profile) : String
-      return node.op.to_s unless profile.shapes?
-      shapes = node.op.try(&.mat_mul?) ? node.srcs.first(2).map(&.shape) : [node.shape]
-      "#{node.op} #{shapes.map { |shape| "[#{shape.join(',')}]" }.join('·')}"
+      ProfileReport.label(node, profile.shapes?)
     end
 
     # Queues the kernel for *node* and returns true, or returns false when it has

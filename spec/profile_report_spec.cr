@@ -35,4 +35,20 @@ describe Tensomite::ProfileReport do
     report.should contain "MatMul [2,4]·[4,8]|1.0|0.002|50%|0.1 GFLOP/s\n"
     report.should_not contain "Add [2,8]|"
   end
+
+  it "gives a quantised product its weight's bytes read per second" do
+    # 2,048 × 1,024 Q4_0 values are 65,536 blocks of 18 bytes: 1,179,648 bytes,
+    # read 3 times in 0.001 s over 1 run.
+    quantised = Tensomite::ProfileReport.new("GPU", "token", 1, 0.010, [] of {String, Float64}, [] of String,
+      totals.call([] of {String, Int32, Float64}), totals.call([{"BlockMatMul Q4_0 [1,1024]·[2048,1024]", 3, 0.001}])).to_s
+    quantised.should contain "BlockMatMul Q4_0 [1,1024]·[2048,1024]|3.0|1.000|100%|3.5 GB/s\n"
+  end
+
+  it "labels a quantised product with its weight's format and both shapes" do
+    w = Tensor.from(Array.new(64 * 32) { |i| (i % 7).to_f32 }, [64, 32]).quantize(DType::Q4_0)
+    x = Tensor.zeros([2, 32])
+    node = x.linear(w).node
+    Tensomite::ProfileReport.label(node, shapes: true).should eq "BlockMatMul Q4_0 [2,32]·[64,32]"
+    Tensomite::ProfileReport.label(node, shapes: false).should eq "BlockMatMul"
+  end
 end
