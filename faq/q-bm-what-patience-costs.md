@@ -1,6 +1,6 @@
 # Q-BM: Why did early stopping run 1,500 steps past the best?
 
-*[Fine-tuning](README.md#fine-tuning) · previous: [Q-BD](q-bd-testing-for-memorised-passages.md) · last in the theme*
+*[Fine-tuning](README.md#fine-tuning) · previous: [Q-BD](q-bd-testing-for-memorised-passages.md) · next: [Q-BP](q-bp-more-from-xl.md)*
 
 ## The question
 

@@ -1,6 +1,6 @@
 # Q-AT: Why write every chunk sum rather than one per run?
 
-*[Order of addition and determinism](README.md#order-of-addition-and-determinism) · previous: [Q-AR](q-ar-splitting-a-sum.md) · last in the theme*
+*[Order of addition and determinism](README.md#order-of-addition-and-determinism) · previous: [Q-AR](q-ar-splitting-a-sum.md) · next: [Q-BX](q-bx-scaling-by-a-power-of-two.md)*
 
 ## The question
 
