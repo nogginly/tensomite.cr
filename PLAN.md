@@ -278,6 +278,9 @@ Recorded in full, with their reasoning and measurements, in [`DECISIONS.md`](DEC
 - [DG](DECISIONS.md#decision-dg): after M11 (decided).
 - [DH](DECISIONS.md#decision-dh): the understanding checks since Q-BO (decided).
 - [DI](DECISIONS.md#decision-di): what the design keeps of its history (decided).
+- [DJ](DECISIONS.md#decision-dj): the order of generation and the server's issues (decided).
+- [DK](DECISIONS.md#decision-dk): delegating to a cheaper model (decided).
+- [DL](DECISIONS.md#decision-dl): the subagent's standing brief (decided).
 
 ## Risks
 
