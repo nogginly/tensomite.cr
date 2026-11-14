@@ -69,6 +69,11 @@ describe "GPT-2 on the tiny reference model" do
         model.generate(expected.prompt_ids, expected.greedy.size).should eq expected.greedy
       end
 
+      it "stops generating after a stop token, and returns it last" do
+        stop = expected.greedy[3]
+        model.generate(expected.prompt_ids, 20, stop: [stop]).should eq expected.greedy[0..expected.greedy.index!(stop)]
+      end
+
       if device.shape_invariant?
         it "gives a batch's logits, row by row, as each sequence's own prefill" do
           first, second = expected.prompt_ids.first(10), expected.prompt_ids.last(10)

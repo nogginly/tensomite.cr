@@ -30,6 +30,7 @@ require "./tensomite/gguf"
 require "./tensomite/bpe"
 require "./tensomite/sampler"
 require "./tensomite/profile_report"
+require "./tensomite/models/generative"
 require "./tensomite/models/gpt2"
 require "./tensomite/models/llama"
 

@@ -873,7 +873,7 @@ flowchart LR
 
 ### GPT-2
 
-`GPT2.load(path, heads, device)` reads every size except the number of heads from the weight shapes. `forward(ids, cache)` runs new positions after those in the cache and returns their logits:
+`GPT2.load(path, heads, device)` reads every size except the number of heads from the weight shapes. `forward(ids, cache)`, which `GPT2` and `Llama` share through `Generative` with the cache and `generate`, runs new positions after those in the cache and returns their logits:
 
 ```mermaid
 flowchart TD
