@@ -281,6 +281,8 @@ Recorded in full, with their reasoning and measurements, in [`DECISIONS.md`](DEC
 - [DJ](DECISIONS.md#decision-dj): the order of generation and the server's issues (decided).
 - [DK](DECISIONS.md#decision-dk): delegating to a cheaper model (decided).
 - [DL](DECISIONS.md#decision-dl): the subagent's standing brief (decided).
+- [DM](DECISIONS.md#decision-dm): skills, then Metal's quantised products (decided).
+- [DN](DECISIONS.md#decision-dn): the fixed cost of a quantised product on Metal (decided).
 
 ## Risks
 

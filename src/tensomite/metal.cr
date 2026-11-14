@@ -515,8 +515,9 @@ module Tensomite
         # The scratch buffer holds each block's scale, then its d·Σq, then the
         # quantised activations.
         scratch = scratch(blocks * 8 + x.size)
-        dispatch_at("quantize_rows_q8_f32", blocks, [metal(x.node.buffer!), scratch, scratch, scratch],
+        dispatch_at("quantize_rows_q8_f32", x.size, [metal(x.node.buffer!), scratch, scratch, scratch],
           [0, 0, blocks * 4, blocks * 8], [view_args(x.view), u32(blocks)])
+        @profile.try { |profile| flush(quantize_label(x, profile)) if profile.per_kernel? }
         dims = Slice[n.to_u32, k.to_u32, bias ? 1_u32 : 0_u32].to_unsafe_bytes
         buffers = [metal(w.node.buffer!), scratch, scratch, scratch, output, bias ? metal(bias.node.buffer!) : output]
         offsets, constants = [0, 0, blocks * 4, blocks * 8, 0, 0], [blocks_args(w), dims, u32(node.size)]
@@ -923,6 +924,17 @@ module Tensomite
       @encoder
     end
 
+    # With a per-kernel profile, the label of *node*'s GPU time.
+    private def profile_label(node : Node, profile : Profile) : String
+      ProfileReport.label(node, profile.shapes?)
+    end
+
+    # With a per-kernel profile, the label of quantising *x*'s activations for a
+    # quantised product, so that the product's own time and rate stand apart.
+    private def quantize_label(x : Tensor, profile : Profile) : String
+      profile.shapes? ? "Quantize Q8_0 [#{x.shape.join(',')}]" : "Quantize"
+    end
+
     # Commits the open command buffer, if any, and waits for every command buffer
     # in flight, in order. Then it moves retired buffers into the pool, and raises
     # `ExecutionError` if the GPU reported a failure or a kernel reported an index
@@ -930,10 +942,6 @@ module Tensomite
     #
     # With a per-kernel profile, *label* names the op whose work the command
     # buffers hold, and their GPU time is recorded under it.
-    private def profile_label(node : Node, profile : Profile) : String
-      ProfileReport.label(node, profile.shapes?)
-    end
-
     private def flush(label : String? = nil) : Nil
       commit
       return if @in_flight.empty?
