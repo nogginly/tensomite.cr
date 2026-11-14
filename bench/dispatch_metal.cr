@@ -4,8 +4,10 @@
 #
 #     crystal run --release bench/dispatch_metal.cr
 #
-# Each timing realises its tensors at once, as a model does, in the normal
-# batched mode. Apple Silicon only.
+# Each timing realises REPEATS rounds of its tensors at once, in the normal
+# batched mode, after WARMUPS untimed runs, so that the GPU stays busy and its
+# clock up, and a realise's own wait is shared among many dispatches. Apple
+# Silicon only.
 require "../src/tensomite"
 {% if flag?(:darwin) && flag?(:aarch64) %}
   require "../src/tensomite/metal"
@@ -13,9 +15,11 @@ require "../src/tensomite"
 
 include Tensomite
 
-RUNS     =  9
-CHAIN    = 96
-PRODUCTS = 24
+RUNS     =   9
+WARMUPS  =   3
+REPEATS  =  10
+CHAIN    = 960
+PRODUCTS =  24
 
 def random_values(count : Int32, seed : Int32) : Array(Float32)
   rng = Random.new(seed)
@@ -27,10 +31,10 @@ def random(device : Device, shape : Array(Int32), seed : Int32) : Tensor
 end
 
 # Returns the median time in microseconds of realising the tensors that the
-# block builds. The block runs once first to warm up, and again before each
+# block builds. The block runs WARMUPS times first, and again before each
 # timed run, so that only `Tensor.realize` is timed.
 def median_us(& : -> Array(Tensor)) : Float64
-  Tensor.realize(yield)
+  WARMUPS.times { Tensor.realize(yield) }
   times = Array(Float64).new(RUNS) do
     outputs = yield
     start = Time.instant
@@ -40,15 +44,15 @@ def median_us(& : -> Array(Tensor)) : Float64
   times.sort[RUNS // 2]
 end
 
-# Prints a row for PRODUCTS products of a [1, k] row by a Q4_0 weight of
-# [n, k], each with its own buffer, and returns the weight's bytes and the
+# Prints a row for REPEATS rounds of PRODUCTS products of a [1, k] row by a
+# Q4_0 weight of [n, k], each weight with its own buffer, and returns the weight's bytes and the
 # microseconds each product took.
 def product_row(device : Device, n : Int32, k : Int32) : {Float64, Float64}
   values = random_values(n * k, n + k)
   weights = Array.new(PRODUCTS) { Tensor.from(values, [n, k], device).quantize(DType::Q4_0).realize }
   x = random(device, [1, k], 7).realize
   bytes = DType::Q4_0.bytes_for(n * k).to_f64
-  each = median_us { weights.map { |weight| x.linear(weight) } } / PRODUCTS
+  each = median_us { Array.new(REPEATS) { weights.map { |weight| x.linear(weight) } }.flatten } / (PRODUCTS * REPEATS)
   puts "#{n}|#{k}|%.2f|%.2f|%.0f" % {bytes / 1e6, each, bytes / (each * 1e-6) / 1e9}
   {bytes, each}
 end
