@@ -177,7 +177,19 @@ module Tensomite
       # allocate, or a collection could recycle the memory while it is read.
       result = Array(T).new(size, T.zero)
       xs = realize.host_bytes.unsafe_slice_of(T)
-      size.times { |i| result[i] = xs[view.offset_of(i)] }
+      return result if size == 0
+      if view.dense?
+        xs[view.offset, size].copy_to(result.to_unsafe, size)
+        return result
+      end
+      run, stride = View.run_length(size, {view}), view.run_stride
+      dst = result.to_unsafe
+      (size // run).times do |index|
+        start = view.offset_of(index * run)
+        HostDevice.check_run(start, run, stride, xs.size) { "#{shape} view #{view.inspect}" }
+        src = xs.to_unsafe + start
+        run.times { |j| dst[index * run + j] = src[j * stride] }
+      end
       result
     end
 
