@@ -100,7 +100,7 @@ src/tensomite/metal.cr      opt-in Metal device (Apple Silicon); not required by
 src/tensomite/metal/        objc.cr (Objective-C runtime calls), kernels.metal and prelude.metal (MSL source)
 src/tensomite/mapped_file.cr, safetensors.cr, gguf.cr   weight loading
 src/tensomite/bpe.cr, sampler.cr               tokeniser and sampling
-src/tensomite/models/       one file per model architecture
+src/tensomite/models/       one file per model architecture, and generative.cr: the cache, forward and generate they share
 spec/                       specs, one file per type or kind of op
 spec/fixtures/              reference outputs and small reference files (see below)
 scripts/                    fixture generation, model download, document checks, emulate_metal/ (Metal kernels on the CPU) and cuda_stub/ (CUDA builds without a driver)

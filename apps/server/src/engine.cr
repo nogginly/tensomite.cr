@@ -36,12 +36,12 @@ module Server
     abstract def context : Int32
 
     # Returns a function that runs the next ids of a new sequence, with room for
-    # *capacity* positions, and returns their logits.
+    # *capacity* positions, and returns the logits of the last of them, `[1, vocab]`.
     abstract def session(capacity : Int32) : Proc(Array(Int32), Tensomite::Tensor)
   end
 
   # A `Decoder` for a model with `config.context`, `new_cache(capacity)` and
-  # `forward(ids, cache)`, as `GPT2` and `Llama` have.
+  # `forward_last(ids, cache)`, as `GPT2` and `Llama` have (`Tensomite::Generative`).
   class ModelDecoder(M) < Decoder
     def initialize(@model : M)
     end
@@ -52,7 +52,7 @@ module Server
 
     def session(capacity : Int32) : Proc(Array(Int32), Tensomite::Tensor)
       cache = @model.new_cache(capacity)
-      ->(ids : Array(Int32)) { @model.forward(ids, cache) }
+      ->(ids : Array(Int32)) { @model.forward_last(ids, cache) }
     end
   end
 
@@ -179,7 +179,7 @@ module Server
       bytes = IO::Memory.new
       text, sent, count, reason, cut_at_stop = "", 0, 0, "length", false
       while count < limit
-        token = sampler.pick(logits.slice(0, logits.shape[0] - 1, logits.shape[0]).to_a(Float32))
+        token = sampler.pick(logits.to_a(Float32))
         if @end_tokens.includes?(token)
           reason = "stop"
           break

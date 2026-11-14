@@ -44,22 +44,10 @@ module Tensomite
       end
     end
 
-    # Keys and values of every position run so far, one `CausalSelfAttention::Cache` per block.
-    class Cache
-      getter layers : Array(CausalSelfAttention::Cache)
+    include Generative
 
-      # Returns the number of positions held.
-      getter length = 0
-
-      # A cache of *count* layers, each holding up to *capacity* positions.
-      def initialize(count : Int32, capacity : Int32? = nil)
-        @layers = Array.new(count) { CausalSelfAttention::Cache.new(capacity) }
-      end
-
-      protected def advance(count : Int32) : Nil
-        @length += count
-      end
-    end
+    # The cache `Generative` keeps: see `Generative::Cache`.
+    alias Cache = Generative::Cache
 
     # Tensors in Hugging Face's file that are not weights: each block's stored causal mask.
     IGNORED = /\.attn\.(masked_)?bias$/
@@ -97,25 +85,6 @@ module Tensomite
       @ln_f = build.layernorm(config.width)
     end
 
-    # Returns an empty cache for this model, holding up to *capacity* positions
-    # in place, by default its context.
-    def new_cache(capacity : Int32 = config.context) : Cache
-      Cache.new(config.layers, capacity)
-    end
-
-    # Runs *ids* at the positions following those in *cache*, appends their keys and
-    # values to *cache*, and returns realised logits of shape `[ids.size, vocab]`.
-    #
-    # 1. Embeds tokens and positions.
-    # 2. Runs each block: attention then MLP, each after a layer norm and added
-    #    back to the residual stream.
-    # 3. Applies the final layer norm and projects onto the token embeddings.
-    def forward(ids : Array(Int32), cache : Cache) : Tensor
-      result = logits(ids, cache).realize
-      cache.advance(count: ids.size)
-      result
-    end
-
     # Returns lazy logits `[batch * length, vocab]` for *ids*, `[batch, length]`
     # token ids, each row its own sequence from position 0, without a cache: the
     # forward pass of training. With *dropout*, it applies after the embeddings,
@@ -147,24 +116,6 @@ module Tensomite
       logits(ids, new_cache)
     end
 
-    # Returns *count* tokens generated after *prompt*, each chosen by *sampler* from
-    # the logits of the last position, yielding each as it is chosen.
-    def generate(prompt : Array(Int32), count : Int32, sampler : Sampler = Sampler.greedy, & : Int32 ->) : Array(Int32)
-      cache = new_cache
-      logits = forward(prompt, cache)
-      Array(Int32).new(count) do |i|
-        token = sampler.pick(logits.slice(0, logits.shape[0] - 1, logits.shape[0]).to_a(Float32))
-        yield token
-        logits = forward([token], cache) if i < count - 1
-        token
-      end
-    end
-
-    # :ditto:
-    def generate(prompt : Array(Int32), count : Int32, sampler : Sampler = Sampler.greedy) : Array(Int32)
-      generate(prompt, count, sampler) { }
-    end
-
     # Returns the embeddings of positions `start...start + count`: a slice of
     # the table, or, when it is quantised, a lookup that dequantises its rows.
     private def positions(start : Int32, count : Int32) : Tensor
@@ -175,7 +126,12 @@ module Tensomite
 
     # Returns the logits of *ids* after the positions in *cache*, unrealised, and
     # appends their keys and values to it; `#forward` advances it after realising.
-    private def logits(ids : Array(Int32), cache : Cache) : Tensor
+    #
+    # 1. Embeds tokens and positions.
+    # 2. Runs each block: attention then MLP, each after a layer norm and added
+    #    back to the residual stream.
+    # 3. Applies the final layer norm and projects onto the token embeddings.
+    private def logits(ids : Array(Int32), cache : Cache, last : Bool = false) : Tensor
       count, past = ids.size, cache.length
       raise ShapeError.new("forward of no tokens") if count == 0
       if past + count > config.context
@@ -186,6 +142,7 @@ module Tensomite
       end
       mask = Tensor.causal_mask(count, past + count, device).named("causal mask")
       @h.each_with_index { |block, layer| x = block.call(x, mask, cache.layers[layer]) }
+      x = x.slice(0, count - 1, count) if last
       Tensomite.scope("head") { @ln_f.call(x).linear(@wte.weight.value) }
     end
   end
