@@ -320,7 +320,7 @@ flowchart LR
 - **Keep the documents current in the same PR as the code:**
   - `DESIGN.md` whenever the design as built changes.
   - `DEVELOPMENT.md` whenever a convention, command or gotcha is learned.
-  - `PLAN.md` when a decision or milestone changes.
+  - `DECISIONS.md` when a decision is taken or revised, with its line in `PLAN.md`'s index; `PLAN.md` when a milestone changes.
   - `GUIDE.md` whenever the public API changes, with every example run and its output shown; `TUTORIAL.md` and `examples/multiply.cr` together.
   - `HANDOFF.md` at the end of each PR, rewritten rather than appended to: where things stand, working agreements, follow-ups, environment and concepts covered.
 - **AI use** follows `DISCLOSURE.md`: generated code is reviewed until it is understood as if written by hand.
