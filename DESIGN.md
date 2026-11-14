@@ -1,6 +1,6 @@
 # Tensomite: design
 
-This document describes the design as it is built today, currently through milestone 5, with milestone 6 (Metal) under way. `PLAN.md` holds where the design is going and why. `DEVELOPMENT.md` covers how to work on the code.
+This document describes the design as it is built today, through milestone 11 (fast quantised CPU kernels); M8's run on a discrete GPU is still to do. `PLAN.md` holds where the design is going and why. `DEVELOPMENT.md` covers how to work on the code.
 
 ## Overview
 
@@ -21,38 +21,51 @@ flowchart TD
     Host --> Sim["SimDiscrete: hidden memory (test device)"]
     Host --> BLAS["BLAS: F32 matmul by cblas_sgemm (opt-in)"]
     BLAS -. "FFI" .-> Lib["Accelerate / OpenBLAS"]
-    Host --> Metal["Metal: MSL kernels on the GPU, host kernels for the rest (opt-in)"]
+    Host --> Metal["Metal: MSL kernels on Apple GPUs (opt-in)"]
     Metal -. "objc_msgSend" .-> MetalFw["Metal framework"]
+    Host --> Cuda["CUDA: CUDA C++ kernels on NVIDIA GPUs (opt-in)"]
+    Cuda -. "FFI" .-> Driver["libcuda / NVRTC"]
+    Host --> Quant["Quant: block formats, threaded quantised matmul"]
     style CPU stroke:#2b8a3e,stroke-width:3px
     style Lib stroke:#d9480f,stroke-width:3px
+    style Driver stroke:#d9480f,stroke-width:3px
 ```
 
 ## Core types
 
-Type            |File                      |Role                                                                                                                     
-----------------|--------------------------|-------------------------------------------------------------------------------------------------------------------------
-`DType`         |`dtype.cr`                |Runtime element type: `F32`, `I32`. `DType.of(Float32)` maps a Crystal type to it; `bytes_for(count)` gives storage size.
-`View`          |`view.cr`                 |Shape, strides and offset, counted in elements. Pure metadata.                                                           
-`Buffer`        |`device.cr`               |An opaque allocation owned by one device, which it names.                                                                
-`Device`        |`device.cr`               |Where buffers live and kernels run.                                                                                      
-`Op`            |`node.cr`                 |The primitive operations devices implement.                                                                              
-`Node`          |`node.cr`                 |A graph vertex producing one contiguous array.                                                                           
-`Tensor`        |`tensor.cr`, `tensor/*.cr`|The user-facing value: a `View` over a `Node`. Its ops are grouped by kind in `tensor/`.                                 
-`Scheduler`     |`scheduler.cr`            |Turns unrealised nodes into kernel runs.                                                                                 
-`Tensomite.grad`|`autograd.cr`             |Builds the backward graph of a loss: lazy gradients for a list of params.                                                
-`Optimizer`     |`optim.cr`                |`SGD` and `AdamW`: new params from params and gradients.                                                                 
-`Kernel`        |`kernel.cr`, `kernels.cr` |A fused elementwise kernel made by the `Tensomite.kernel` macro, with its gradient kernels.                              
-`BufferPool`    |`buffer_pool.cr`          |Freed device memory kept for reuse, by exact size.                                                                       
-`HostDevice`    |`devices/host.cr`         |Abstract device whose kernels run on the host CPU; holds `HostBuffer`s.                                                  
-`CPU`           |`devices/cpu.cr`          |The reference device: host kernels on host-visible memory.                                                               
-`SimDiscrete`   |`devices/sim_discrete.cr` |A test device: host kernels on memory the host cannot map.                                                               
-`BLAS`          |`blas.cr`                 |Opt-in: host kernels with `F32` matmul by the platform BLAS.                                                             
-`Metal`         |`metal.cr`, `metal/`      |Opt-in, Apple Silicon: MSL kernels on the GPU over shared memory, host kernels for unported ops.                         
-`MappedFile`    |`mapped_file.cr`          |A read-only memory mapping of a file, unmapped when collected.                                                           
-`SafeTensors`   |`safetensors.cr`          |Reads tensors from a safetensors file, zero-copy on host devices.                                                        
-`BPE`           |`bpe.cr`                  |GPT-2's byte-level byte-pair-encoding tokeniser.                                                                         
-`Sampler`       |`sampler.cr`              |Picks the next token: greedy, or seeded temperature and top-k sampling.                                                  
-`GPT2`          |`models/gpt2.cr`          |The GPT-2 decoder with a KV cache.                                                                                       
+Type            |File                      |Role                                                                                                                                                                      
+----------------|--------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+`DType`         |`dtype.cr`                |Runtime element type: `F32`, `I32`, and the block formats `Q8_0`, `Q4_0` and `Q4_1`. `DType.of(Float32)` maps a Crystal type to it; `bytes_for(count)` gives storage size.
+`View`          |`view.cr`                 |Shape, strides and offset, counted in elements. Pure metadata.                                                                                                            
+`Buffer`        |`device.cr`               |An opaque allocation owned by one device, which it names.                                                                                                                 
+`Device`        |`device.cr`               |Where buffers live and kernels run.                                                                                                                                       
+`Op`            |`node.cr`                 |The primitive operations devices implement.                                                                                                                               
+`Node`          |`node.cr`                 |A graph vertex producing one contiguous array.                                                                                                                            
+`Tensor`        |`tensor.cr`, `tensor/*.cr`|The user-facing value: a `View` over a `Node`. Its ops are grouped by kind in `tensor/`.                                                                                  
+`Scheduler`     |`scheduler.cr`            |Turns unrealised nodes into kernel runs.                                                                                                                                  
+`Tensomite.grad`|`autograd.cr`             |Builds the backward graph of a loss: lazy gradients for a list of params.                                                                                                 
+`Optimizer`     |`optim.cr`                |`SGD` and `AdamW`: new params from params and gradients.                                                                                                                  
+`Kernel`        |`kernel.cr`, `kernels.cr` |A fused elementwise kernel made by the `Tensomite.kernel` macro, with its gradient kernels.                                                                               
+`BufferPool`    |`buffer_pool.cr`          |Freed device memory kept for reuse, by exact size.                                                                                                                        
+`RetiredList`   |`buffer_pool.cr`          |Buffers freed by finalizers, queued without allocating or locking until a pool takes them.                                                                                
+`HostDevice`    |`devices/host.cr`         |Abstract device whose kernels run on the host CPU; holds `HostBuffer`s.                                                                                                   
+`CPU`           |`devices/cpu.cr`          |The reference device: host kernels on host-visible memory.                                                                                                                
+`SimDiscrete`   |`devices/sim_discrete.cr` |A test device: host kernels on memory the host cannot map.                                                                                                                
+`BLAS`          |`blas.cr`                 |Opt-in: host kernels with `F32` matmul by the platform BLAS.                                                                                                              
+`Metal`         |`metal.cr`, `metal/`      |Opt-in, Apple Silicon: MSL kernels on the GPU over shared memory, one for every op.                                                                                       
+`CUDA`          |`cuda.cr`, `cuda/`        |Opt-in (`-Dcuda`), NVIDIA: CUDA C++ kernels compiled by NVRTC, copies between host and device memory.                                                                     
+`Quant`         |`quant.cr`                |Quantises and dequantises ggml's block formats, and multiplies by them on the host, threaded, with the oracle's bits.                                                     
+`MappedFile`    |`mapped_file.cr`          |A read-only memory mapping of a file, unmapped when collected.                                                                                                            
+`SafeTensors`   |`safetensors.cr`          |Reads tensors from a safetensors file, zero-copy on host devices.                                                                                                         
+`GGUF`          |`gguf.cr`                 |Reads tensors and metadata from a GGUF file, block formats included.                                                                                                      
+`F16`, `BF16`   |`f16.cr`, `bf16.cr`       |Half-precision values as `UInt16`-backed structs, widened to `F32` as weights load.                                                                                       
+`Module`        |`module.cr`, `modules.cr` |Models as classes of named `Parameter`s and child modules; `Linear`, `Embedding`, `LayerNorm` and others are built in.                                                    
+`Builder`       |`builder.cr`              |Builds built-in modules with shared settings, as the model DSL.                                                                                                           
+`Dropout`       |`dropout.cr`              |Seeded dropout masks for one forward pass, the same on every device.                                                                                                      
+`BPE`           |`bpe.cr`                  |GPT-2's byte-level byte-pair-encoding tokeniser.                                                                                                                          
+`Sampler`       |`sampler.cr`              |Picks the next token: greedy, or seeded temperature and top-k sampling.                                                                                                   
+`GPT2`          |`models/gpt2.cr`          |The GPT-2 decoder with a KV cache.                                                                                                                                        
+`Llama`         |`models/llama.cr`         |Llama-family decoders (RoPE, RMSNorm, SwiGLU, grouped-query attention), from safetensors or GGUF.                                                                         
 
 ```mermaid
 classDiagram
@@ -109,6 +122,7 @@ classDiagram
     HostDevice <|-- SimDiscrete
     HostDevice <|-- BLAS
     HostDevice <|-- Metal
+    HostDevice <|-- CUDA
     Buffer <|-- HostBuffer
     HostBuffer <|-- MetalBuffer
 ```
@@ -1308,12 +1322,11 @@ Allocation, with `GC_UNMAP_THRESHOLD` unset|3.6 s              |0.9 s, with `GC_
 
 - **Metal matmuls with few output blocks are slower than Accelerate.** A prefill's products with 768 output columns run at about 950 GFLOP/s against Accelerate's 1.5–1.8 TFLOP/s, though prefill as a whole is 2.7 times as fast (see "Performance baselines").
 - **Element counts and offsets are `Int32`,** following Crystal's `Slice` indexing. That caps one buffer at about 2 GB.
-- **Only `F32` and `I32`.** No type promotion: operands must have the same dtype.
+- **Computation is in `F32` and `I32`.** No type promotion: operands must have the same dtype. The block formats are storage for weights (below).
 - **BLAS covers `F32` matmul only.** See "Performance baselines" for how far the oracle is behind it.
-- **Model weights compute in `F32` only.** `BF16` and `F16` weights are widened to `F32` as they load, which doubles their memory. Quantised weights load in their block formats (`Q8_0`, `Q4_0`, `Q4_1`), and only `BlockMatMul` (`Tensor#linear`) and `Gather` read them. Metal and CUDA have their own kernels for both: a pass that quantises each block of activations, then one thread per output or, for products of fewer than 65,536 outputs, 32 lanes per output (a warp on CUDA, a SIMD group on Metal) that each take whole blocks; either way the blocks' contributions are added in the host's order (`BlockMatMulMode`). CUDA's give the host's bits; Metal's division may differ from the host's in the last bit, so its results may differ by a step of a block's scale.
+- **Model weights compute in `F32` only.** `BF16` and `F16` weights are widened to `F32` as they load, which doubles their memory. Quantised weights load in their block formats (`Q8_0`, `Q4_0`, `Q4_1`), and only `BlockMatMul` (`Tensor#linear`) and `Gather` read them. Metal and CUDA have their own kernels for both: a pass that quantises each block of activations, then one thread per output or, for products of fewer than 65,536 outputs, 32 lanes per output (a warp on CUDA, a SIMD group on Metal) that each take whole blocks; either way the blocks' contributions are added in the host's order (`BlockMatMulMode`). CUDA's give the host's bits; Metal's division may differ from the host's in the last bit, so its results may differ by a step of a block's scale. On host devices, `Quant.matmul` shares each product's outputs among `TENSOMITE_THREADS` threads (all cores by default), with the bits of `Quant.matmul_reference`, the oracle.
 - **One device per op.** Moving data needs an explicit `to`, which goes through host memory.
-- **Only what is written as a kernel or a fused row op is fused.** `gelu`, `softmax`, `log_softmax` and `layernorm` are one op each; the attention's scale and mask, residual adds and biases are still separate primitives, until the models move onto kernels (M7 part 6).
-- **Each scalar operand is a new leaf,** uploaded to the device once per use.
-- **Buffer reuse waits for the collector.** A freed buffer returns to its pool only when the collector finalizes it, so a loop that does not collect between steps reuses less (see "Buffer pool").
+- **Only what is written as a kernel, a fused row op or a fused composite is fused.** `gelu`, `softmax` (with its scale and mask), `log_softmax`, `layernorm`, `rmsnorm`, RoPE, attention on GPUs for decoding's few rows, and bias adds into `MatMul` are one op each; residual adds are still separate primitives.
+- **Inference releases buffers only through the collector.** A training step gives each intermediate buffer back as soon as its last reader has run (Decision CD); a forward pass outside training returns its buffers to the pool when the collector finalizes them.
 - **Gradients of gradients** are built by the same rules, but are not tested.
 - **`grad` needs an unrealised graph.** Realise the loss after calling `grad`, or together with the gradients.

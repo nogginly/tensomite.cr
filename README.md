@@ -2,7 +2,9 @@
 
 A small pure-Crystal tensor maths runtime with a minimal native seam to BLAS and the GPU.
 
-Tensomite gives Crystal lazy tensors with automatic gradients, for training models and running them. Its kernels are written in Crystal: they run on the CPU, through BLAS (Accelerate or OpenBLAS), or on an Apple GPU through Metal, and repeat their results exactly from run to run. It loads GPT-2 from Hugging Face's safetensors files.
+Tensomite gives Crystal lazy tensors with automatic gradients, for training models and running them. Its kernels run on the CPU, written in Crystal, through BLAS (Accelerate or OpenBLAS), on Apple GPUs through Metal, or on NVIDIA GPUs through CUDA, and repeat their results exactly from run to run.
+
+It loads GPT-2 and Llama-family models, such as SmolLM2, from Hugging Face's safetensors files (`F32`, `F16` or `BF16`, with `tokenizer.json`) and from GGUF files. Weights can be quantised to `Q8_0`, `Q4_0` or `Q4_1`, with ggml's bytes, and multiplied in those formats on every device; on the CPU, quantised decoding runs on all cores.
 
 ```crystal
 require "tensomite"
@@ -18,6 +20,8 @@ Tensomite.grad(loss, [x]).first.to_a(Float32)   # => [2.0, 4.0, 6.0]
 - [User's guide](GUIDE.md): the API, with small examples.
 - [Tutorial](TUTORIAL.md): train a tiny network to multiply, then use it.
 - `examples/shakespeare.cr` trains a character-level GPT; `examples/gpt2_diagram.cr` draws GPT-2's structure.
+- [`apps/server`](apps/server/README.md) serves GPT-2 and Llama-family models over HTTP, in an OpenAI-style API, and chats in the terminal.
+- [`apps/finetune`](apps/finetune/README.md) fine-tunes GPT-2 on a text, with checkpoints that resume bit for bit.
 
 ## Working on it
 
@@ -25,5 +29,6 @@ Tensomite.grad(loss, [x]).first.to_a(Float32)   # => [2.0, 4.0, 6.0]
 - [`DESIGN.md`](DESIGN.md): how it works, and its measured performance.
 - [`DEVELOPMENT.md`](DEVELOPMENT.md): setup, commands, conventions and workflow.
 - [`HANDOFF.md`](HANDOFF.md): where things stand, for the next session.
+- [`faq/`](faq/README.md): short questions and answers on how and why it works, grouped by theme.
 
 Licensed under the MPL-2.0.

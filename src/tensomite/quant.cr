@@ -1,15 +1,4 @@
 module Tensomite
-  # Quantises and dequantises rows in ggml's block formats on the host, giving
-  # the bytes and values of ggml's reference code (`quantize_row_*_ref` and
-  # `dequantize_row_*`).
-  #
-  # Each block holds 32 consecutive values:
-  #
-  # - `Q8_0`: a scale `d` (`F16`), then 32 signed bytes; `x = q · d`.
-  # - `Q4_0`: `d` (`F16`), then 16 bytes, each holding element `j` in its low
-  #   nibble and element `j + 16` in its high one; `x = (q - 8) · d`.
-  # - `Q4_1`: `d` and a minimum `m` (both `F16`), then nibbles as in `Q4_0`;
-  #   `x = q · d + m`.
   # How a GPU divides the work of a quantised matmul (`Tensor#linear` with a
   # block-format weight). Every mode but `Unordered` gives the host's bits;
   # they differ only in speed.
@@ -55,6 +44,20 @@ module Tensomite
     end
   end
 
+  # Quantises and dequantises rows in ggml's block formats on the host, giving
+  # the bytes and values of ggml's reference code (`quantize_row_*_ref` and
+  # `dequantize_row_*`).
+  #
+  # Each block holds 32 consecutive values:
+  #
+  # - `Q8_0`: a scale `d` (`F16`), then 32 signed bytes; `x = q · d`.
+  # - `Q4_0`: `d` (`F16`), then 16 bytes, each holding element `j` in its low
+  #   nibble and element `j + 16` in its high one; `x = (q - 8) · d`.
+  # - `Q4_1`: `d` and a minimum `m` (both `F16`), then nibbles as in `Q4_0`;
+  #   `x = q · d + m`.
+  #
+  # It also multiplies by them: `#matmul_reference`, the oracle, and `#matmul`,
+  # which gives its bits faster, on `.threads` threads.
   module Quant
     extend self
 
@@ -167,8 +170,9 @@ module Tensomite
     end
 
     # The threads quantised products run on: `TENSOMITE_THREADS`, or the
-    # machine's CPU count when it is unset or not positive. Setting it after the first product has shared its
-    # work changes how many spans products are cut into, not the pool's size.
+    # machine's CPU count when it is unset or not positive. Setting it after
+    # the first product has shared its work changes how many spans products
+    # are cut into, not the pool's size.
     class_property threads : Int32 = ENV["TENSOMITE_THREADS"]?.try(&.to_i?).try { |count| count.clamp(1, 1024) if count > 0 } || System.cpu_count.to_i.clamp(1, 1024)
 
     # The fewest weight bytes worth a span of their own.

@@ -148,18 +148,19 @@ a.matmul(w, Tensor.from([0.5f32, -1f32], [2])).to_a(Float32)   # => [4.5, 4.0, 1
 
 ## Neural-network building blocks
 
-Method                               |Use                                                                                                                                                
--------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------
-`gelu`                               |the GELU activation (tanh approximation), as in GPT-2                                                                                              
-`softmax(axis = -1)`                 |turns scores into probabilities that sum to 1                                                                                                      
-`softmax(scale: s, mask: m)`         |the softmax of `x · s + m`, as attention takes it, in one fused op                                                                                 
-`log_softmax(axis = -1)`             |the log of `softmax`, computed stably                                                                                                              
-`layernorm(weight, bias, eps = 1e-5)`|normalises each row to mean 0 and variance 1, then scales and shifts                                                                               
-`rmsnorm(weight, eps = 1e-5)`        |divides each row by its root mean square, then scales, as in Llama, in one fused op                                                                
-`silu`, `swiglu(up)`                 |SiLU, `x · sigmoid(x)`, and Llama's gate `silu(x) · up`, each one fused kernel                                                                     
-`rotate_half`, `rope(cos, sin)`      |swaps the last axis's halves and negates the first, `[x₁, x₂] → [-x₂, x₁]`; and `x · cos + rotate_half(x) · sin`, rotary embeddings in one fused op
-`cross_entropy(targets)`             |the mean loss of `[n, classes]` scores against `[n]` `I32` class indices                                                                           
-`Tensor.causal_mask(rows, cols)`     |0 where a position may look, -∞ where it may not, for attention                                                                                    
+Method                                        |Use                                                                                                                                                
+----------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------
+`gelu`                                        |the GELU activation (tanh approximation), as in GPT-2                                                                                              
+`softmax(axis = -1)`                          |turns scores into probabilities that sum to 1                                                                                                      
+`softmax(scale: s, mask: m)`                  |the softmax of `x · s + m`, as attention takes it, in one fused op                                                                                 
+`log_softmax(axis = -1)`                      |the log of `softmax`, computed stably                                                                                                              
+`layernorm(weight, bias, eps = 1e-5)`         |normalises each row to mean 0 and variance 1, then scales and shifts                                                                               
+`rmsnorm(weight, eps = 1e-5)`                 |divides each row by its root mean square, then scales, as in Llama, in one fused op                                                                
+`silu`, `swiglu(up)`                          |SiLU, `x · sigmoid(x)`, and Llama's gate `silu(x) · up`, each one fused kernel                                                                     
+`rotate_half`, `rope(cos, sin)`               |swaps the last axis's halves and negates the first, `[x₁, x₂] → [-x₂, x₁]`; and `x · cos + rotate_half(x) · sin`, rotary embeddings in one fused op
+`cross_entropy(targets)`                      |the mean loss of `[n, classes]` scores against `[n]` `I32` class indices                                                                           
+`Tensor.causal_mask(rows, cols)`              |0 where a position may look, -∞ where it may not, for attention                                                                                    
+`Tensor.attention(q, k, v, scale: s, mask: m)`|`softmax(q · kᵀ · s + m) · v`; on a GPU, for decoding's few rows, one fused op whose scores stay on the GPU                                        
 
 ```crystal
 logits = Tensor.from([1, 2, 3].map(&.to_f32), [1, 3])
@@ -346,7 +347,7 @@ Each tensor lives on a device, given by the `device:` argument when it is create
 
 Device       |How to get it                                  |Use                                                                                                                                                                  
 -------------|-----------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------
-`CPU`        |built in; the default                          |correct and simple, the reference the others are tested against; slow for large matrices                                                                             
+`CPU`        |built in; the default                          |correct and simple, the reference the others are tested against; slow for large `F32` matrices, fast for quantised ones (below)                                      
 `BLAS`       |`require "tensomite/blas"`                     |the CPU with matrix products from Accelerate (macOS) or OpenBLAS (Linux): far faster for real models                                                                 
 `Metal`      |`require "tensomite/metal"`, on Apple Silicon  |the GPU; `Metal.available?` says whether there is one                                                                                                                
 `CUDA`       |`require "tensomite/cuda"`, built with `-Dcuda`|an NVIDIA GPU; `CUDA.available?` says whether there is one. Every `F32` op GPT-2 uses runs on the GPU; integer ops run on the CPU, with data kept in the GPU's memory
@@ -514,7 +515,7 @@ GPT-2, matrices at Q4_0, embeddings at Q8_0|124.3     |0.132
 
 Embeddings are the most sensitive part. GPT-2's token table doubles as its output head: at Q8_0 it adds about 0.05 to the KL divergence, and at Q4_0 it sends perplexity into the thousands. So `quantize` leaves embeddings alone unless asked, as llama.cpp keeps them at 8 bits or more.
 
-
+**Speed on the CPU.** On `CPU` and `BLAS`, a quantised product shares its outputs among all the machine's cores, with the same bits however many there are. `TENSOMITE_THREADS` sets the number of threads, and 1 runs on the calling thread alone. Building with `--mcpu=native` lets the compiler use the CPU's 8-bit dot-product instructions, for about 11–13% more on Apple Silicon and the GB10, but the program may then not run on an older CPU of the same architecture; `ops bn` and `ops run-native` build that way (see `DEVELOPMENT.md`). SmolLM2-1.7B at Q4_0 decodes in about 7 ms a token on an M5 Pro, portably, and 6.4 natively.
 
 llama.cpp's converter reorders each head's query and key rows, so that its rotary embeddings rotate adjacent features, `(2i, 2i + 1)`. `Llama.load` reorders them back to Hugging Face's halves, `(i, i + width/2)`, so a GGUF at F32 gives exactly the logits of the safetensors model it came from.
 
@@ -531,7 +532,7 @@ All of them are subclasses of `Tensomite::Error`.
 
 ## Current limits
 
-- **Two dtypes:** `F32` and `I32`. Half precision and quantised weights are planned.
+- **Two dtypes to compute in:** `F32` and `I32`. `F16` and `BF16` weights widen to `F32` as they load, which doubles their memory; quantised weights stay in their block formats, but only `linear` and `gather` read them, and gradients do not pass through them.
 - **Numbers go on the right** of an operator: `x * 2` works, `2 * x` does not.
 - **One device per operation.** Move tensors with `to` first.
 - **A tensor holds at most about 2 GB,** because element counts are `Int32`.
