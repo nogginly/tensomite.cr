@@ -931,9 +931,7 @@ module Tensomite
     # With a per-kernel profile, *label* names the op whose work the command
     # buffers hold, and their GPU time is recorded under it.
     private def profile_label(node : Node, profile : Profile) : String
-      return node.op.to_s unless profile.shapes?
-      shapes = node.op.try(&.mat_mul?) ? node.srcs.first(2).map(&.shape) : [node.shape]
-      "#{node.op} #{shapes.map { |shape| "[#{shape.join(',')}]" }.join('·')}"
+      ProfileReport.label(node, profile.shapes?)
     end
 
     private def flush(label : String? = nil) : Nil
