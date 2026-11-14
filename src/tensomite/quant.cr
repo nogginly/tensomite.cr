@@ -131,11 +131,12 @@ module Tensomite
     #
     # 1. Quantises each row of *x* once, as the reference does, and also keeps
     #    each block's integer sum of quantised values.
-    # 2. For each output, sums the blocks in order. A block's integer dot
-    #    product is taken in wrapping arithmetic, which LLVM vectorises; for
-    #    `Q4_0` it is `Σq·y - 8·Σy`, the same integer as the reference's
-    #    `Σ(q - 8)·y`. Scales are read through a table of every `F16`'s value.
-    #    The floating-point expressions after it are the reference's.
+    # 2. For each pair of outputs, sums the blocks in order, sharing each load
+    #    of the activations. A block's integer dot product is taken in
+    #    wrapping arithmetic on signed bytes, which LLVM vectorises, as `sdot`
+    #    where the target has it: nibbles are unpacked less 8, so for `Q4_1`
+    #    it is `Σ(q - 8)·y + 8·Σy`, the same integer as the reference's
+    #    `Σq·y`. The floating-point expressions after it are the reference's.
     def matmul(dtype : DType, x : Slice(Float32), w : Bytes, rows : Int32, n : Int32, k : Int32, dst : Slice(Float32)) : Nil
       blocks = k // DType.block_size
       row_bytes = dtype.bytes_for(k)
@@ -146,18 +147,20 @@ module Tensomite
       raise ArgumentError.new("#{w.size} bytes do not hold #{n} rows of #{k} #{dtype} values") unless w.size == n * row_bytes
       raise ArgumentError.new("#{x.size} values are not #{rows} rows of #{k}") unless x.size == rows * k && dst.size == rows * n
       rows.times do |row|
-        quantize_activations(x[row * k, k], scales, sums, qs, with_sums: dtype.q4_1?)
-        blocks.times { |block| totals[block] = block_total(qs.to_unsafe + block * 32) }
+        fast_quantize(x[row * k, k].to_unsafe, scales, sums, totals, qs, with_sums: dtype.q4_1?)
         out = dst[row * n, n]
         Quant.in_parallel(n, n * row_bytes) do |first, stop|
-          (first...stop).each do |col|
-            weight = w.to_unsafe + col * row_bytes
-            out[col] = case dtype
-                       when .q8_0? then fast_q8_0(weight, scales, qs, blocks)
-                       when .q4_0? then fast_q4_0(weight, scales, totals, qs, blocks)
-                       when .q4_1? then fast_q4_1(weight, scales, sums, qs, blocks)
-                       else             raise DTypeError.new("#{dtype} is not a block format")
-                       end
+          first.step(to: stop - 1, by: 2) do |col|
+            w0 = w.to_unsafe + col * row_bytes
+            w1 = col + 1 < stop ? w0 + row_bytes : w0
+            a, b = case dtype
+                   when .q8_0? then fast_q8_0(w0, w1, scales, qs, blocks)
+                   when .q4_0? then fast_q4_0(w0, w1, scales, qs, blocks)
+                   when .q4_1? then fast_q4_1(w0, w1, scales, sums, totals, qs, blocks)
+                   else             raise DTypeError.new("#{dtype} is not a block format")
+                   end
+            out[col] = a
+            out[col + 1] = b if col + 1 < stop
           end
         end
       end
@@ -185,6 +188,7 @@ module Tensomite
     protected def self.in_parallel(count : Int32, bytes : Int32, &block : Int32, Int32 ->) : Nil
       spans = Math.min(threads * SPANS_PER_THREAD, Math.min(count, bytes // PARALLEL_BYTES))
       return block.call(0, count) if spans <= 1 || threads <= 1
+      # Builds the `F16` table on this thread, before the workers read it.
       HALVES.size
       pool = @@pool ||= SpinPool.new(threads - 1)
       pool.run(spans, count, block)
@@ -195,10 +199,18 @@ module Tensomite
     # Each runs in its own isolated execution context; with the calling
     # thread, they are as many as `Quant.threads`, so that no thread spinning
     # waits for a core. A worker that has seen no work for a while naps
-    # between checks.
+    # between checks, each nap twice the last, up to `LONGEST_NAP`.
     private class SpinPool
-      @generation = Atomic(Int64).new(0)
-      @next = Atomic(Int32).new(0)
+      # Checks a worker spins through before it starts to nap.
+      SPINS = 1_000_000
+
+      FIRST_NAP   = 100.microseconds
+      LONGEST_NAP = 10.milliseconds
+
+      # The current product's generation in the high 32 bits and its next
+      # unclaimed span in the low 32: a span is claimed by compare-and-set,
+      # so a claim made for one product fails once the next has started.
+      @claim = Atomic(Int64).new(0)
       @done = Atomic(Int32).new(0)
       @spans = 0
       @count = 0
@@ -213,114 +225,170 @@ module Tensomite
       # Runs *job* on *spans* spans of `0...count`: publishes it, takes spans
       # alongside the workers, then waits until every span has finished.
       #
-      # The job, span count and counters are written before the generation
-      # moves on, so a worker that sees the new generation sees them too.
-      # Every span of the previous job finished before this one started, so a
-      # worker still leaving it can only take spans of this one.
+      # The job, span count and counters are written before the claim moves
+      # to the new generation, so a worker that sees the generation sees them
+      # too.
       def run(spans : Int32, count : Int32, job : Proc(Int32, Int32, Nil)) : Nil
         @job, @spans, @count = job, spans, count
         @done.set(0)
-        @next.set(0)
-        @generation.add(1)
-        help
+        generation = (@claim.get >> 32) &+ 1
+        @claim.set(generation << 32)
+        help(generation)
         until @done.get == spans
           Intrinsics.pause
         end
       end
 
-      # Waits for each new generation, spinning, then napping after about a
-      # million idle checks, and takes its spans.
+      # Waits for each new generation, spinning, then napping, and takes its
+      # spans.
       private def work : Nil
         seen = 0_i64
         loop do
           idle = 0
-          while (current = @generation.get) == seen
-            idle += 1
-            if idle < 1_000_000
+          nap = FIRST_NAP
+          while (current = @claim.get >> 32) == seen
+            if idle < SPINS
+              idle += 1
               Intrinsics.pause
             else
-              sleep 100.microseconds
+              sleep nap
+              nap = Math.min(nap * 2, LONGEST_NAP)
             end
           end
           seen = current
-          help
+          help(current)
         end
       end
 
-      # Takes spans until none are left, running the job on each.
-      private def help : Nil
-        while (span = @next.add(1)) < @spans
-          spans, count = @spans, @count
-          @job.try &.call(count * span // spans, count * (span + 1) // spans)
+      # Takes spans of product *generation* until none are left, running the
+      # job on each.
+      #
+      # A claim succeeds only while the product is unfinished, so the next
+      # product has not been published, and the span count, count and job
+      # read before it are this product's.
+      private def help(generation : Int64) : Nil
+        loop do
+          claim = @claim.get
+          return unless claim >> 32 == generation
+          span = (claim & 0xffff_ffff).to_i32
+          spans, count, job = @spans, @count, @job
+          return unless span < spans
+          next unless @claim.compare_and_set(claim, claim + 1)[1]
+          job.try &.call(count * span // spans, count * (span + 1) // spans)
           @done.add(1)
         end
       end
     end
 
-    # Returns the sum of a block's 32 quantised values.
-    private def block_total(qb : Int8*) : Int32
-      total = 0
-      32.times { |j| total &+= qb[j].to_i32 }
-      total
+    # Returns *value* rounded to the nearest integer, ties away from zero, as
+    # `round(:ties_away)` does for every value within `Int32`'s range, without
+    # a call to `roundf`, so that loops of it vectorise: truncates, then steps
+    # away from zero when the fraction dropped is at least a half.
+    @[AlwaysInline]
+    private def round_away(value : Float32) : Int32
+      whole = value.to_i32!
+      fraction = value - whole.to_f32
+      whole &+ (fraction >= 0.5_f32 ? 1 : 0) &- (fraction <= -0.5_f32 ? 1 : 0)
     end
 
-    # The value of every `F16`, by its bits.
+    # Quantises *x* as `#quantize_activations` does, with its bits, through
+    # pointers, and also writes each block's integer sum of quantised values
+    # to *totals*. The caller has checked that *x* holds `qs.size` values.
+    private def fast_quantize(x : Float32*, scales : Slice(Float32), sums : Slice(Float32), totals : Slice(Int32), qs : Slice(Int8), with_sums : Bool) : Nil
+      sp, mp, tp, qp = scales.to_unsafe, sums.to_unsafe, totals.to_unsafe, qs.to_unsafe
+      scales.size.times do |block|
+        values = x + block * 32
+        top = values[0].abs
+        1.upto(31) { |j| top = values[j].abs if values[j].abs > top }
+        d = top / 127.0_f32
+        id = d == 0 ? 0.0_f32 : 1.0_f32 / d
+        qb = qp + block &* 32
+        32.times { |j| qb[j] = round_away(values[j] * id).to_i8! }
+        total = 0
+        32.times { |j| total &+= qb[j].to_i32 }
+        tp[block] = total
+        sp[block] = F16.new(d).to_f32
+        mp[block] = F16.new(total.to_f32 * d).to_f32 if with_sums
+      end
+    end
+
+    # The value of every `F16`, by its bits. A lookup measured faster than
+    # widening in registers: a model's scales take few distinct values, so
+    # the entries in use stay in cache.
     private HALVES = Slice(Float32).new(65536) { |bits| F16.from_bits(bits.to_u16!).to_f32 }
 
+    @[AlwaysInline]
     private def fast_half(at : UInt8*) : Float32
       HALVES.unsafe_fetch(at[0].to_i32 | at[1].to_i32 << 8)
     end
 
-    private def fast_q8_0(w : UInt8*, scales : Slice(Float32), qs : Slice(Int8), blocks : Int32) : Float32
-      sum = 0.0_f32
+    # The products of two weight rows, at *w0* and *w1*, with one row of
+    # quantised activations, each output's blocks summed in order as the
+    # reference sums them. The two rows share each load of the activations.
+    private def fast_q8_0(w0 : UInt8*, w1 : UInt8*, scales : Slice(Float32), qs : Slice(Int8), blocks : Int32) : {Float32, Float32}
+      sum0 = sum1 = 0.0_f32
       sp, qp = scales.to_unsafe, qs.to_unsafe
       blocks.times do |block|
-        base = w + block * 34
-        values = (base + 2).as(Int8*)
-        qb = qp + block * 32
-        total = 0
-        32.times { |j| total &+= values[j].to_i32 &* qb[j].to_i32 }
-        sum += total.to_f32 * (fast_half(base) * sp[block])
+        base0, base1 = w0 + block &* 34, w1 + block &* 34
+        v0, v1 = (base0 + 2).as(Int8*), (base1 + 2).as(Int8*)
+        qb = qp + block &* 32
+        total0 = total1 = 0
+        32.times do |j|
+          y = qb[j].to_i32
+          total0 &+= v0[j].to_i32 &* y
+          total1 &+= v1[j].to_i32 &* y
+        end
+        sum0 += total0.to_f32 * (fast_half(base0) * sp[block])
+        sum1 += total1.to_f32 * (fast_half(base1) * sp[block])
       end
-      sum
+      {sum0, sum1}
     end
 
-    # Returns the integer dot product of a block's 32 nibbles, at *packed*, low
-    # halves first, with its 32 quantised activations: the nibbles are
-    # unpacked into bytes, then multiplied in one loop LLVM vectorises.
-    private def nibble_dot(packed : UInt8*, qb : Int8*) : Int32
-      values = uninitialized StaticArray(Int8, 32)
+    # Returns the integer dot products of two blocks' 32 nibbles less 8, at
+    # *p0* and *p1*, low halves first, with the same 32 quantised
+    # activations. Both sides are signed bytes, so LLVM turns each loop into
+    # `sdot` where the target has it.
+    @[AlwaysInline]
+    private def nibble_dot(p0 : UInt8*, p1 : UInt8*, qb : Int8*) : {Int32, Int32}
+      total0 = total1 = 0
       16.times do |j|
-        values[j] = (packed[j] & 0x0f).to_i8!
-        values[j + 16] = (packed[j] >> 4).to_i8!
+        y = qb[j].to_i32
+        total0 &+= ((p0[j] & 0x0f).to_i8! &- 8).to_i32 &* y
+        total1 &+= ((p1[j] & 0x0f).to_i8! &- 8).to_i32 &* y
       end
-      total = 0
-      32.times { |j| total &+= values[j].to_i32 &* qb[j].to_i32 }
-      total
+      16.times do |j|
+        y = qb[j + 16].to_i32
+        total0 &+= ((p0[j] >> 4).to_i8! &- 8).to_i32 &* y
+        total1 &+= ((p1[j] >> 4).to_i8! &- 8).to_i32 &* y
+      end
+      {total0, total1}
     end
 
-    private def fast_q4_0(w : UInt8*, scales : Slice(Float32), totals : Slice(Int32), qs : Slice(Int8), blocks : Int32) : Float32
-      sum = 0.0_f32
-      sp, tp, qp = scales.to_unsafe, totals.to_unsafe, qs.to_unsafe
+    private def fast_q4_0(w0 : UInt8*, w1 : UInt8*, scales : Slice(Float32), qs : Slice(Int8), blocks : Int32) : {Float32, Float32}
+      sum0 = sum1 = 0.0_f32
+      sp, qp = scales.to_unsafe, qs.to_unsafe
       blocks.times do |block|
-        base = w + block * 18
-        qb = qp + block * 32
-        total = nibble_dot(base + 2, qb)
-        sum += (total &- 8 &* tp[block]).to_f32 * fast_half(base) * sp[block]
+        base0, base1 = w0 + block &* 18, w1 + block &* 18
+        qb = qp + block &* 32
+        total0, total1 = nibble_dot(base0 + 2, base1 + 2, qb)
+        sum0 += total0.to_f32 * fast_half(base0) * sp[block]
+        sum1 += total1.to_f32 * fast_half(base1) * sp[block]
       end
-      sum
+      {sum0, sum1}
     end
 
-    private def fast_q4_1(w : UInt8*, scales : Slice(Float32), sums : Slice(Float32), qs : Slice(Int8), blocks : Int32) : Float32
-      sum = 0.0_f32
-      sp, mp, qp = scales.to_unsafe, sums.to_unsafe, qs.to_unsafe
+    private def fast_q4_1(w0 : UInt8*, w1 : UInt8*, scales : Slice(Float32), sums : Slice(Float32), totals : Slice(Int32), qs : Slice(Int8), blocks : Int32) : {Float32, Float32}
+      sum0 = sum1 = 0.0_f32
+      sp, mp, tp, qp = scales.to_unsafe, sums.to_unsafe, totals.to_unsafe, qs.to_unsafe
       blocks.times do |block|
-        base = w + block * 20
-        qb = qp + block * 32
-        total = nibble_dot(base + 4, qb)
-        sum += (fast_half(base) * sp[block]) * total.to_f32 + fast_half(base + 2) * mp[block]
+        base0, base1 = w0 + block &* 20, w1 + block &* 20
+        qb = qp + block &* 32
+        dot0, dot1 = nibble_dot(base0 + 4, base1 + 4, qb)
+        shift = 8 &* tp[block]
+        sum0 += (fast_half(base0) * sp[block]) * (dot0 &+ shift).to_f32 + fast_half(base0 + 2) * mp[block]
+        sum1 += (fast_half(base1) * sp[block]) * (dot1 &+ shift).to_f32 + fast_half(base1 + 2) * mp[block]
       end
-      sum
+      {sum0, sum1}
     end
 
     # Writes rows *ids* of *table*, rows of *width* values in *dtype*, into
@@ -359,7 +427,7 @@ module Tensomite
       wp, sp, qp = w.to_unsafe, scales.to_unsafe, qs.to_unsafe
       blocks.times do |block|
         base = wp + block * 34
-        qb = qp + block * 32
+        qb = qp + block &* 32
         total = 0
         32.times { |j| total += base[2 + j].to_i8!.to_i32 * qb[j] }
         sum += total.to_f32 * (half(base) * sp[block])
@@ -372,7 +440,7 @@ module Tensomite
       wp, sp, qp = w.to_unsafe, scales.to_unsafe, qs.to_unsafe
       blocks.times do |block|
         base = wp + block * 18
-        qb = qp + block * 32
+        qb = qp + block &* 32
         low = high = 0
         16.times do |j|
           packed = base[2 + j]
@@ -389,7 +457,7 @@ module Tensomite
       wp, sp, mp, qp = w.to_unsafe, scales.to_unsafe, sums.to_unsafe, qs.to_unsafe
       blocks.times do |block|
         base = wp + block * 20
-        qb = qp + block * 32
+        qb = qp + block &* 32
         low = high = 0
         16.times do |j|
           packed = base[4 + j]
