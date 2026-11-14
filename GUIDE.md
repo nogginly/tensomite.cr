@@ -425,7 +425,7 @@ bpe.encode("<|im_start|>user\nWhat is 12 + 345?")
 # => [1, 4093, 198, 1780, 314, 216, 33, 34, 1232, 216, 35, 36, 37, 47]: 1 is <|im_start|>; 33 to 37 are the digits 1 to 5
 ```
 
-`generate` returns only the new tokens. Without a sampler it picks the likeliest token each time (greedy), so the output is always the same. With a `Sampler` it picks at random, in proportion to each token's probability, among the `top_k` likeliest tokens (all of them when `top_k` is 0, the default). A `temperature` above 1 makes unlikely tokens more likely to be picked, and below 1 less likely. The same seed gives the same text.
+`model.forward_last(ids, cache)` is `forward` for the last position alone, `[1, vocab]`: the final norm and the head, the largest product, run on one row, as `generate` and `apps/server` use it. `generate` returns only the new tokens, and with `stop:` it ends after any of the given tokens, such as `<|endoftext|>`, which it returns last. Without a sampler it picks the likeliest token each time (greedy), so the output is always the same. With a `Sampler` it picks at random, in proportion to each token's probability, among the `top_k` likeliest tokens (all of them when `top_k` is 0, the default). A `temperature` above 1 makes unlikely tokens more likely to be picked, and below 1 less likely. The same seed gives the same text.
 
 `GPT2` is a `Module`, and its parts have the names used in Hugging Face's file: `wte` and `wpe` (the token and position embeddings), `h.0` to `h.11` (the blocks, each with `ln_1`, `attn`, `ln_2` and `mlp`), and `ln_f`. So `model.named_params["h.0.attn.c_attn.weight"]` is that weight, and diagrams of the model use the same names.
 
@@ -470,7 +470,7 @@ puts bpe.decode(model.generate(prompt, 64, stop: [bpe.specials["<|im_end|>"]]))
 
 A loaded `Llama` joins the projections that read the same input, queries, keys and values, and the MLP's gate and up, into one product each (`Linear.merge`), which halves the dispatches of a decoded token's products without changing its logits.
 
-An instruct model expects its chat template, ChatML for SmolLM2, as above. `generate` stops after a token in `stop:`, which it returns as the last token. `Llama` is a `Module` named as Hugging Face's file is (`model.embed_tokens`, `model.layers.0.self_attn.q_proj`, `model.norm`, and `lm_head` when the head does not share the embeddings). PyTorch stores each `Linear`'s weight as `[outputs, inputs]`, so `Module#load(path, transposed: regex)` copies the matching weights into tensomite's `[inputs, outputs]` as they load.
+An instruct model expects its chat template, ChatML for SmolLM2, as above, and `stop:` ends a turn at `<|im_end|>`. `GPT2` and `Llama` share their cache, `forward(ids, cache)` and `generate` (`Generative`). `Llama` is a `Module` named as Hugging Face's file is (`model.embed_tokens`, `model.layers.0.self_attn.q_proj`, `model.norm`, and `lm_head` when the head does not share the embeddings). PyTorch stores each `Linear`'s weight as `[outputs, inputs]`, so `Module#load(path, transposed: regex)` copies the matching weights into tensomite's `[inputs, outputs]` as they load.
 
 **GGUF files.** llama.cpp's format holds a model's weights, configuration, tokeniser and chat template in one file. `Llama.load` reads one when the path ends in `.gguf`, and `BPE.from_gguf` reads its tokeniser. `scripts/fetch_smollm2_gguf.sh` downloads SmolLM2-135M-Instruct at F16, Q8_0 and Q4_0. F32, F16 and BF16 tensors load as `F32`, and quantised tensors in their block formats (below), which `Llama` runs as they are.
 
