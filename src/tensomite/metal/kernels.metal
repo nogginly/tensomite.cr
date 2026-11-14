@@ -725,29 +725,33 @@ kernel void gather_blocks_f32(device const uchar* table [[buffer(0)]],
 }
 
 // Quantises each block of 32 activations to 8 bits, as the host's
-// `quantize_activations` does: one thread per block of the rows read through
-// vx, writing the F16-rounded scale, d·Σq rounded to F16, and the values.
+// `quantize_activations` does: one SIMD group per block of the rows read
+// through vx, a lane per activation, writing the F16-rounded scale, d·Σq
+// rounded to F16, and the values. Dispatched as 32 threads a block, in
+// threadgroups of a multiple of 32, so each SIMD group holds one block. The
+// largest magnitude and the integer sum are exact in any order, so the bits
+// are those of a serial loop.
 kernel void quantize_rows_q8_f32(device const float* x [[buffer(0)]],
                                  device float* scales [[buffer(1)]],
                                  device float* sums [[buffer(2)]],
                                  device char* qs [[buffer(3)]],
                                  constant View& vx [[buffer(4)]],
                                  constant uint& blocks [[buffer(5)]],
-                                 uint i [[thread_position_in_grid]]) {
-    if (i >= blocks) return;
-    uint base = i * 32;
-    float amax = 0.0f;
-    for (uint j = 0; j < 32; j++) amax = max(amax, fabs(x[offset_of(vx, base + j)]));
+                                 uint i [[thread_position_in_grid]],
+                                 uint lane [[thread_index_in_simdgroup]]) {
+    if (i >= blocks * 32) return;
+    uint block = i / 32;
+    float v = x[offset_of(vx, i)];
+    float amax = simd_max(fabs(v));
     float d = amax / 127.0f;
     float id = d == 0.0f ? 0.0f : 1.0f / d;
-    int total = 0;
-    for (uint j = 0; j < 32; j++) {
-        char q = char(round(x[offset_of(vx, base + j)] * id));
-        qs[base + j] = q;
-        total += q;
+    char q = char(round(v * id));
+    qs[i] = q;
+    int total = simd_sum(int(q));
+    if (lane == 0) {
+        scales[block] = float(half(d));
+        sums[block] = float(half(float(total) * d));
     }
-    scales[i] = float(half(d));
-    sums[i] = float(half(float(total) * d));
 }
 
 // Returns the contribution of one block of a weight row, at p, to an output:

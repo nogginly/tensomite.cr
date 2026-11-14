@@ -473,7 +473,7 @@ The integer part can be added in any order without changing a bit; the sum over 
 
 - **On the host,** `Quant.matmul` gives the oracle's bits faster. Dense activations are read in place and quantised through pointers. Each block's dot product is taken on signed bytes, its nibbles unpacked less 8, which LLVM turns into `sdot` under `+dotprod` or `--mcpu=native`. Two weight rows share each pass over the activations, and `F16` scales come from `HALVES`, a table of every half's value.
 - **Threads.** `Quant.in_parallel` cuts a product's outputs into [spans](#glossary), up to 4 a thread and at least 64 KB of weights each, so faster cores take more of them. A `SpinPool` of `TENSOMITE_THREADS − 1` workers, each in its own isolated execution context, spins on one atomic word holding the product's generation and its next span; the calling thread works too. A span is claimed by compare-and-set, so a claim for a finished product fails. An idle worker naps, each nap twice the last, up to 10 ms.
-- **On GPUs,** a pass quantises the activations, then the product runs one thread per output, or, for fewer than 65,536 outputs, 32 [lanes](#glossary) per output, each taking whole blocks (`BlockMatMulMode`). CUDA multiplies four byte pairs an instruction with `__dp4a`, one output a warp; Metal reads a byte at a time. `Unordered` adds in a tree, for measurement only.
+- **On GPUs,** a pass quantises the activations, on Metal a SIMD group per block, then the product runs one thread per output, or, for fewer than 65,536 outputs, 32 [lanes](#glossary) per output, each taking whole blocks (`BlockMatMulMode`). CUDA multiplies four byte pairs an instruction with `__dp4a`, one output a warp; Metal reads a byte at a time. `Unordered` adds in a tree, for measurement only.
 
 > [!NOTE]
 > **Why this design?** Each of these was expected to help and did not:
@@ -483,6 +483,7 @@ The integer part can be added in any order without changing a bit; the sum over 
 > - Quantising the activations inside each product's kernel, to save a dispatch: every threadgroup quantised the whole row again, and the products took twice as long (Decision DB).
 > - On Metal, `__dp4a` emulated with shifts, exact float sums, 32 outputs a group, and padding against bank conflicts: each slower than the byte-at-a-time kernel. On CUDA, grouping 2, 4 or 8 outputs was no faster than one (Decisions CW and CX).
 > - 32 lanes per block, adding their products across the warp: exact, but five shuffles a lane per block halved decode on the GB10 (Decision CO).
+> - On Metal, the lanes' sums added in a tree rather than in block order, or 4 outputs a SIMD group rather than 1: within 3% of the ordered kernel on SmolLM2-1.7B. About 14 µs of each product was a fixed cost outside the kernel's inner loop (Decisions DM and DN).
 
 ### CUDA
 

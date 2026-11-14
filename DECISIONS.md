@@ -579,3 +579,13 @@ Well-specified, mechanical tasks go to a subagent on Sonnet: refactors whose che
 ## DL: the subagent's standing brief
 
 An agent definition, `.claude/agents/implementer.md`, holds what every delegated task needs: where the conventions are, the rules that matter (bits, hot loops, comments, documents), the checks and their commands, what not to do (commit, push, open pull requests), and how to report (decided). A task's brief then carries only the task. Its last section, lessons from earlier tasks, grows as reviews find mistakes worth not repeating. Sonnet only, until the approach is shown to help.
+
+<a id="decision-dm"></a>
+## DM: skills, then Metal's quantised products
+
+Two skills, training a model and fine-tuning one, ship in `.claude/skills/` and are kept current with the shard, so that a project depending on tensomite can link them from `lib/` (decided; #143, delegated under DK). Then Metal's quantised products, the largest gap to llama.cpp left on the GPUs (Decision CX). Four of the lanes kernel's modes, ordered or not and with 1 or 4 outputs a SIMD group, ran within 3% of one another on SmolLM2-1.7B, so the kernel's inside was not the limit.
+
+<a id="decision-dn"></a>
+## DN: the fixed cost of a quantised product on Metal
+
+On the M5 Pro each of SmolLM2-1.7B's quantised products took about 13.8 µs plus its weight's bytes at 254 GB/s, which fits all five shapes to within 1 µs; with every op timed alone the GPU total was 101% of the batched wall time, so the cost is in the GPU's work, not the profiler's. Each product is two dispatches, and the first, quantising the activations, ran one thread per block: 64 threads for a row of 2,048, each reading its 32 values in turn. It now runs one SIMD group per block, a lane per value, with `simd_max` and `simd_sum`; the largest magnitude and an integer sum are exact in any order, so the bits are unchanged (decided). The per-kernel profile times the quantising as `Quantize`, apart from the product. Quantising inside the product's kernel, which would save the dispatch, stays out: it was twice as slow (Decision DB).
