@@ -1,6 +1,6 @@
 # Tensomite: design
 
-This document describes the design as it is built today, through milestone 11 (fast quantised CPU kernels); M8's run on a discrete GPU is still to do. `PLAN.md` holds where the design is going and why. `DEVELOPMENT.md` covers how to work on the code.
+This document describes the design as it is built today, through milestone 11 (fast quantised CPU kernels); M8's run on a discrete GPU is still to do. `PLAN.md` holds where the design is going, and `DECISIONS.md` why it is as it is. `DEVELOPMENT.md` covers how to work on the code.
 
 ## Overview
 
@@ -243,7 +243,7 @@ Composite |none: built from the rows above       |`mean`, `softmax`, `log_softma
 
 - **Scalars** become rank-0 leaf tensors of the operand's dtype (`Tensor.scalar`), which then broadcast like any other tensor. So `x * 0.5` is `Mul` of `x` and a broadcast scalar.
 - **Float-only ops** (`/`, `exp`, `log`, `tanh`, `sqrt`, `mean` and the composites) raise `DTypeError` on `I32` when called.
-- **One dtype per op.** Every source of an op must share one dtype (`check_compatible`), and `gather` ids are the only exception (`I32`). Decision N in `PLAN.md` relaxes this per op for quantised weights in M9.
+- **One dtype per op.** Every source of an op must share one dtype (`check_compatible`), and `gather` ids are the only exception (`I32`). Decision N in `DECISIONS.md` relaxes this per op for quantised weights in M9.
 - **Byte sizes** always come from `DType#bytes_for(count)`, never from a size per element, so block formats with many elements per block fit without changes.
 - **`keepdims`** reshapes the reduced result to keep the axis with size 1. The reduction's output is contiguous, so this is a view, not a copy.
 

@@ -25,7 +25,8 @@ Tensomite.grad(loss, [x]).first.to_a(Float32)   # => [2.0, 4.0, 6.0]
 
 ## Working on it
 
-- [`PLAN.md`](PLAN.md): goals, milestones and decisions.
+- [`PLAN.md`](PLAN.md): goals, milestones, and an index of decisions.
+- [`DECISIONS.md`](DECISIONS.md): every decision in full, with its reasoning and measurements.
 - [`DESIGN.md`](DESIGN.md): how it works, and its measured performance.
 - [`DEVELOPMENT.md`](DEVELOPMENT.md): setup, commands, conventions and workflow.
 - [`HANDOFF.md`](HANDOFF.md): where things stand, for the next session.

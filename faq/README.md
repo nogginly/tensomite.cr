@@ -211,4 +211,4 @@ Question                                |In one line
 [Q-CB](q-cb-repeating-a-pass.md)        |Can repeating a pass in every threadgroup beat one dispatch? Only if the repeat is small: here it doubled the products.        
 [Q-CC](q-cc-a-launch-bound-profile.md)  |What does a launch-bound token look like? Launching fills it and waiting is near zero; the 1.7B model is the opposite.         
 
-Q-C and Q-P were labels on a decision and a list, not questions, so they have no page; nor do Q-BQ, Q-BS and Q-CD, which were decisions, recorded in `PLAN.md`.
+Q-C and Q-P were labels on a decision and a list, not questions, so they have no page; nor do Q-BQ, Q-BS and Q-CD, which were decisions, recorded in `DECISIONS.md`.

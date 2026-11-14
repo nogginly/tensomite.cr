@@ -1,8 +1,8 @@
 # Tensomite: handoff
 
-What the next session, or the next person, needs in order to carry on without the history of the last one. `PLAN.md`, `DESIGN.md` and `DEVELOPMENT.md` hold the project itself. This document holds how we work, where things stand and what has been learned.
+What the next session, or the next person, needs in order to carry on without the history of the last one. `PLAN.md`, `DECISIONS.md`, `DESIGN.md` and `DEVELOPMENT.md` hold the project itself. This document holds how we work, where things stand and what has been learned.
 
-**Keeping it current.** Rewrite it rather than appending to it: at the end of each PR, and whenever a session's context passes about 70%. Anything that belongs in one of the other three documents goes there instead.
+**Keeping it current.** Rewrite it rather than appending to it: at the end of each PR, and whenever a session's context passes about 70%. Anything that belongs in one of the other four documents goes there instead.
 
 *Last rewritten: 14 Nov 2026, with M11 met and Decision DG settled.*
 
@@ -26,7 +26,7 @@ Stacked PRs         |When needed. The later PR's base is `main`; its description
 Merging             |The maintainer merges, by squash or by merge commit. After a squash, merge `main` into a stacked branch and resolve conflicts with the branch's side; never rewrite history or force-push (the session blocks it anyway).                                            
 Milestones          |Each ends with its exit criterion passing, with the evidence (numbers, logs) in the PR description.                                                                                                                                                                  
 Documents           |Updated in the same PR as the code (see "Workflow" in `DEVELOPMENT.md`), `GUIDE.md` included whenever the public API changes. Tables and diagrams follow "Documents" in `DEVELOPMENT.md`; check them with `scripts/format_tables.py` and `scripts/check_diagrams.sh`.
-Decisions           |Labelled with letters and recorded in `PLAN.md`. The next is **DJ**. P (how to get GPT-2 small's fixtures) was settled by allowing Hugging Face; Q made this document committed.                                                                                     
+Decisions           |Labelled with letters, recorded in `DECISIONS.md` and indexed in `PLAN.md`. The next is **DJ**. P (how to get GPT-2 small's fixtures) was settled by allowing Hugging Face; Q made this document committed.                                                          
 Understanding checks|Short questions labelled Q-A, Q-B and so on, after explaining something new. The next is **Q-CK**. Each is written up in `faq/`, a page per question, grouped by theme (Decision DH).                                                                                
 Claims              |Measured before stated. Several assumptions were wrong when checked: decode time was dominated by the KV cache, not host kernels; GPT-2's file was unaligned. Say "I think" when something is unverified.                                                            
 

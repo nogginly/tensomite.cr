@@ -42,7 +42,7 @@ flowchart LR
 
 ### Where it shows up in tensomite
 
-`Builder` is the model DSL (Decision AN); `PLAN.md` records that any macro that returns must pass ameba without suppressing a rule. The tutorial, Shakespeare and GPT-2 models are all written with it.
+`Builder` is the model DSL (Decision AN); `DECISIONS.md` records that any macro that returns must pass ameba without suppressing a rule. The tutorial, Shakespeare and GPT-2 models are all written with it.
 
 </details>
 
