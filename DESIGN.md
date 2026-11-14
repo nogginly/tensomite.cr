@@ -928,7 +928,7 @@ GPT-2 small, as above                           |M5 Pro         |`BLAS` |166 tok
 GPT-2 small, as above                           |GB10           |`CUDA` |268 tokens/s; 5,050 tokens/s                        |`bench/gpt2.cr` with `-Dcuda` |BF        
 GPT-2 small, decode                             |GB10           |`BLAS` |95 tokens/s                                         |`bench/gpt2.cr`               |BB        
 SmolLM2-1.7B at Q4_0, decode                    |GB10           |`CUDA` |5.71 ms a token (llama.cpp: 4.85)                   |`bench/profile_decode_cuda.cr`|CZ        
-SmolLM2-1.7B at Q4_0, decode                    |M5 Pro         |`Metal`|6.60 ms a token (llama.cpp: 4.73)                   |`bench/profile_decode.cr`     |CZ        
+SmolLM2-1.7B at Q4_0, decode                    |M5 Pro         |`Metal`|6.10 ms a token (llama.cpp: 4.73)                   |`bench/profile_decode.cr`     |DN        
 SmolLM2-1.7B at Q4_0, decode, all threads       |M5 Pro         |`BLAS` |7.17 ms a token; 6.36 native (llama.cpp's CPU: 6.7) |`bench/profile_decode_cpu.cr` |DF        
 SmolLM2-1.7B at Q4_0, decode, all threads       |GB10           |`BLAS` |12.8 ms a token; 11.2 native (llama.cpp's CPU: 11.4)|`bench/profile_decode_cpu.cr` |DF        
 SmolLM2-135M-Instruct at Q4_0, decode, 4 threads|Linux container|`BLAS` |8.2–8.3 ms a token, against 27–31 in `F32`          |`bench/profile_decode_cpu.cr` |M11's exit
