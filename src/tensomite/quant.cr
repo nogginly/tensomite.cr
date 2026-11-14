@@ -211,12 +211,14 @@ module Tensomite
       FIRST_NAP   = 100.microseconds
       LONGEST_NAP = 10.milliseconds
 
-      # The current product's generation in the high 32 bits and its next
-      # unclaimed span in the low 32: a span is claimed by compare-and-set,
-      # so a claim made for one product fails once the next has started.
-      @claim = Atomic(Int64).new(0)
+      # One word that says which spans are left: the current product's
+      # generation in the high 32 bits, its number of spans in the next 16 and
+      # its next unclaimed span in the low 16. A span is claimed by
+      # compare-and-set on the whole word, so a claim is checked against the
+      # span count of the product it claims from, and fails once the next
+      # product has been published.
+      @claim = Atomic(UInt64).new(0)
       @done = Atomic(Int32).new(0)
-      @spans = 0
       @count = 0
       @job : Proc(Int32, Int32, Nil)? = nil
 
@@ -226,17 +228,18 @@ module Tensomite
         end
       end
 
-      # Runs *job* on *spans* spans of `0...count`: publishes it, takes spans
-      # alongside the workers, then waits until every span has finished.
+      # Runs *job* on *spans* spans of `0...count`, at most 65,535: publishes
+      # it, takes spans alongside the workers, then waits until every span
+      # has finished.
       #
-      # The job, span count and counters are written before the claim moves
-      # to the new generation, so a worker that sees the generation sees them
-      # too.
+      # The job and count are written before the claim word moves to the new
+      # generation. Every span of the previous product has finished by then,
+      # so no claim on it can still succeed.
       def run(spans : Int32, count : Int32, job : Proc(Int32, Int32, Nil)) : Nil
-        @job, @spans, @count = job, spans, count
+        @job, @count = job, count
         @done.set(0)
-        generation = (@claim.get >> 32) &+ 1
-        @claim.set(generation << 32)
+        generation = ((@claim.get >> 32) &+ 1) & 0xffff_ffff_u64
+        @claim.set(generation << 32 | spans.to_u64 << 16)
         help(generation)
         until @done.get == spans
           Intrinsics.pause
@@ -246,7 +249,7 @@ module Tensomite
       # Waits for each new generation, spinning, then napping, and takes its
       # spans.
       private def work : Nil
-        seen = 0_i64
+        seen = 0_u64
         loop do
           idle = 0
           nap = FIRST_NAP
@@ -267,17 +270,19 @@ module Tensomite
       # Takes spans of product *generation* until none are left, running the
       # job on each.
       #
-      # A claim succeeds only while the product is unfinished, so the next
-      # product has not been published, and the span count, count and job
-      # read before it are this product's.
-      private def help(generation : Int64) : Nil
+      # The span count comes from the same word as the span claimed. A claim
+      # succeeds only while some span of the product is unclaimed, so the
+      # product is unfinished, the next has not been published, and the job
+      # and count read after the claim are this product's.
+      private def help(generation : UInt64) : Nil
         loop do
           claim = @claim.get
           return unless claim >> 32 == generation
-          span = (claim & 0xffff_ffff).to_i32
-          spans, count, job = @spans, @count, @job
+          spans = ((claim >> 16) & 0xffff).to_i32
+          span = (claim & 0xffff).to_i32
           return unless span < spans
           next unless @claim.compare_and_set(claim, claim + 1)[1]
+          count, job = @count, @job
           job.try &.call(count * span // spans, count * (span + 1) // spans)
           @done.add(1)
         end
