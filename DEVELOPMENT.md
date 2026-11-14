@@ -75,7 +75,7 @@ src/tensomite/view.cr       View: shape, strides, offset
 src/tensomite/device.cr     Buffer and Device interfaces
 src/tensomite/node.cr       Op and Node
 src/tensomite/tensor.cr     Tensor: construction, views, transfers, reading data
-src/tensomite/tensor/       Tensor ops by kind: elementwise, reduce, structural, composite
+src/tensomite/tensor/       Tensor ops by kind: elementwise, reduce, structural, composite, quantised
 src/tensomite/scheduler.cr  realisation
 src/tensomite/autograd.cr   Tensomite.grad and the chain rule for every op
 src/tensomite/scope.cr      Tensomite.scope and Scope
@@ -87,12 +87,18 @@ src/tensomite/kernel.cr     the Tensomite.kernel macro and the Kernel class
 src/tensomite/kernels.cr    the kernels tensomite's own ops use: gelu and AdamW's steps
 src/tensomite/buffer_pool.cr  BufferPool
 src/tensomite/optim.cr      SGD and AdamW
-src/tensomite/cuda.cr       opt-in CUDA (-Dcuda): versions, GPUs, NVRTC, contexts; cuda/lib.cr binds libcuda and libnvrtc
+src/tensomite/dropout.cr    Dropout: seeded masks for a forward pass
+src/tensomite/maths.cr      Maths: exp, log and tanh in pure Crystal, so host loops vectorise
+src/tensomite/f16.cr, bf16.cr   F16 and BF16: half-precision values, widened to F32
+src/tensomite/quant.cr      Quant: block formats, the oracle and threaded quantised matmul, gathers
+src/tensomite/profile_report.cr  ProfileReport: the GPU profilers' Markdown tables
+src/tensomite/cuda.cr       opt-in CUDA (-Dcuda): versions, GPUs, NVRTC, contexts, the device
+src/tensomite/cuda/         lib.cr (libcuda and libnvrtc), kernels.cu and prelude.cu (CUDA C++ source), report.cr (profiles)
 src/tensomite/devices/      host.cr (shared host kernels), then one file per pure-Crystal device
 src/tensomite/blas.cr       opt-in BLAS binding and device; not required by src/tensomite.cr
 src/tensomite/metal.cr      opt-in Metal device (Apple Silicon); not required by src/tensomite.cr
-src/tensomite/metal/        objc.cr (Objective-C runtime calls), kernels.metal (MSL source)
-src/tensomite/mapped_file.cr, safetensors.cr   weight loading
+src/tensomite/metal/        objc.cr (Objective-C runtime calls), kernels.metal and prelude.metal (MSL source)
+src/tensomite/mapped_file.cr, safetensors.cr, gguf.cr   weight loading
 src/tensomite/bpe.cr, sampler.cr               tokeniser and sampling
 src/tensomite/models/       one file per model architecture
 spec/                       specs, one file per type or kind of op
@@ -102,6 +108,7 @@ bench/                      benchmarks, run with --release
 examples/                   programs using the library, such as training on Shakespeare and TUTORIAL.md's multiply.cr
 apps/server/                an inference server and CLI on the library, with its own specs (apps/server/README.md)
 apps/finetune/              fine-tunes a pretrained GPT-2 on a text file, with checkpoints to resume (apps/finetune/README.md)
+faq/                        a page per understanding check (Q-A, Q-B, ...), grouped by theme in faq/README.md
 models/, data/              downloaded weights and datasets (git-ignored)
 ```
 
@@ -169,7 +176,7 @@ To check that a change leaves GPT-2's arithmetic alone, run `bench/gpt2_digest.c
 - **Expected values are worked out by hand,** never produced by tensomite itself. Write the intermediate result in a comment above the assertion, for example `# a.T + b = [[11, 24], [32, 45], [53, 66]]`, so a reviewer can check the arithmetic.
 - **Transcendental values come from an independent reference,** Python's `math` module, in float64, and are compared with `expect_close` (tolerance 1e-6 by default). Say so in a comment at the top of the spec file.
 - **Op specs run on every device.** Wrap them in `DEVICES.each do |device| … end` and build inputs with `tensor(device, shape, data)`. `DEVICES` holds `CPU`, `SimDiscrete` and `BLAS`. Results must be identical on all of them for the small integer inputs these specs use, so the same expectations apply. Comparisons on random data, where `BLAS` legitimately differs in the last bits, go in the device's own spec with a tolerance, as in `blas_spec.cr`. Device-specific behaviour, such as transfer counts, goes in `device_spec.cr`.
-- **GPU devices are compared with the CPU, not hand-computed values.** `GPUS` in `spec_helper.cr` lists the GPUs present (`Metal` on an Apple Silicon Mac with a GPU, otherwise none), and `gpu_spec.cr` runs every op on each of them. Exact ops (IEEE arithmetic, comparisons, data movement) must match bit for bit; division and transcendental functions within 1e-6. Without a GPU those specs are pending.
+- **GPU devices are compared with the CPU, not hand-computed values.** `GPUS` in `spec_helper.cr` lists the GPUs present (`Metal` on an Apple Silicon Mac with a GPU, `CUDA` in a `-Dcuda` build with a GPU or the stand-in driver, otherwise none), and `gpu_spec.cr` runs every op on each of them. Exact ops (IEEE arithmetic, comparisons, data movement) must match bit for bit; division and transcendental functions within 1e-6. Without a GPU those specs are pending.
 - **Each milestone's exit criterion has its own `describe "Mn exit: …"` block.**
 - **Include non-contiguous inputs** (transposed and broadcast views) for any new op. Most indexing bugs hide there.
 - **Test the timing of errors,** as well as the fact that they are raised, when an op adds new checks.
@@ -204,7 +211,7 @@ flowchart LR
 
 ### Adding a dtype
 
-1. **Add the member to `DType`** and its `bytes_for`. A block format returns the bytes for whole blocks.
+1. **Add the member to `DType`** and its `bytes_for`. A block format returns the bytes for whole blocks, and follows Decision N's rules: block tensors are leaves only, sliced by whole rows, and read only by `BlockMatMul` (as the weight) and `Gather` (as the table).
 2. **Add a `DType.of` overload** for the Crystal type.
 3. **Add a dispatch branch** to each device's `execute(node, output)`.
 4. **Add specs** that run existing ops in the new dtype.
