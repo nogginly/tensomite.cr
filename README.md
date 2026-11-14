@@ -22,6 +22,7 @@ Tensomite.grad(loss, [x]).first.to_a(Float32)   # => [2.0, 4.0, 6.0]
 - `examples/shakespeare.cr` trains a character-level GPT; `examples/gpt2_diagram.cr` draws GPT-2's structure.
 - [`apps/server`](apps/server/README.md) serves GPT-2 and Llama-family models over HTTP, in an OpenAI-style API, and chats in the terminal.
 - [`apps/finetune`](apps/finetune/README.md) fine-tunes GPT-2 on a text, with checkpoints that resume bit for bit.
+- Claude Code skills in [`.claude/skills/`](.claude/skills): `train-a-model` and `finetune-a-model` teach a Claude session in another project to train and fine-tune with tensomite; link them from `lib/tensomite/.claude/skills/`.
 
 ## Working on it
 
