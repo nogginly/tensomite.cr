@@ -1,6 +1,6 @@
 # Q-O: Why can `c[j] += a_ik × b[j]` vectorise when `acc += a[k] × b[k]` cannot?
 
-*[CPU speed](README.md#cpu-speed) · previous: [Q-N](q-n-where-blas-speed-comes-from.md) · last in the theme*
+*[CPU speed](README.md#cpu-speed) · previous: [Q-N](q-n-where-blas-speed-comes-from.md) · next: [Q-CF](q-cf-the-share-outside-the-ops.md)*
 
 ## The question
 

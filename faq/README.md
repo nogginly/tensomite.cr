@@ -18,6 +18,8 @@ flowchart LR
     gpuspeed --> training["Fusion in training"]
     fusion --> training
     decode --> serving["Serving"]
+    gpuspeed --> quantgpu["Quantised decoding on GPUs"]
+    decode --> quantgpu
     training --> finetune["Fine-tuning"]
     finetune --> evaluate["Evaluating code"]
     style order stroke:#1971c2,stroke-width:3px
@@ -27,16 +29,19 @@ flowchart LR
 
 One running example threads through this theme: three float32 numbers, `1`, `1e8` and `−1e8`, whose sum depends on the order they are added in.
 
-Question                           |In one line                                                                                                                      
------------------------------------|---------------------------------------------------------------------------------------------------------------------------------
-[Q-H](q-h-tile-order.md)           |Does the order of tiles matter to online softmax? Not to the maths, but to the last bits.                                        
-[Q-AG](q-ag-fused-multiply-add.md) |Why does a more accurate fused multiply-add break bit-matching? Because the oracle rounds twice.                                 
-[Q-S](q-s-fused-gelu.md)           |Why can a fused CPU `gelu` match bit for bit, but Metal's not? `tanh` comes from a different maths library.                      
-[Q-I](q-i-exact-prefill-decode.md) |Why test prefill against decode exactly, not with a tolerance? Same device, same operations, same order: any difference is a bug.
-[Q-R](q-r-split-depends-on-k.md)   |Why must split-K's split depend only on `k`? So that a row is summed the same way whatever the batch.                            
-[Q-Z](q-z-modules-match-exactly.md)|Why should a refactor match exactly rather than roughly? Same operations, same order, same draws.                                
-[Q-AR](q-ar-splitting-a-sum.md)    |Why not split one long sum across 32 threads? It regroups the additions, and the bits change.                                    
-[Q-AT](q-at-chunk-sums.md)         |Why write every chunk sum rather than one per run? Adding a run first regroups the sum, as in Q-AR.                              
+Question                                 |In one line                                                                                                                      
+-----------------------------------------|---------------------------------------------------------------------------------------------------------------------------------
+[Q-H](q-h-tile-order.md)                 |Does the order of tiles matter to online softmax? Not to the maths, but to the last bits.                                        
+[Q-AG](q-ag-fused-multiply-add.md)       |Why does a more accurate fused multiply-add break bit-matching? Because the oracle rounds twice.                                 
+[Q-S](q-s-fused-gelu.md)                 |Why can a fused CPU `gelu` match bit for bit, but Metal's not? `tanh` comes from a different maths library.                      
+[Q-I](q-i-exact-prefill-decode.md)       |Why test prefill against decode exactly, not with a tolerance? Same device, same operations, same order: any difference is a bug.
+[Q-R](q-r-split-depends-on-k.md)         |Why must split-K's split depend only on `k`? So that a row is summed the same way whatever the batch.                            
+[Q-Z](q-z-modules-match-exactly.md)      |Why should a refactor match exactly rather than roughly? Same operations, same order, same draws.                                
+[Q-AR](q-ar-splitting-a-sum.md)          |Why not split one long sum across 32 threads? It regroups the additions, and the bits change.                                    
+[Q-AT](q-at-chunk-sums.md)               |Why write every chunk sum rather than one per run? Adding a run first regroups the sum, as in Q-AR.                              
+[Q-BX](q-bx-scaling-by-a-power-of-two.md)|Why is scaling by 1/256 exact, and by 1/3 not? A power of two moves the exponent and keeps every bit.                            
+[Q-CE](q-ce-integers-in-any-order.md)    |Why can a block's integer sum go in any order, but not the sum over blocks? Integers never round; floats round at every addition.
+[Q-BY](q-by-what-exactness-buys.md)      |What does exactness buy? One oracle, prefill equal to decode, the same output every run; it cost 0% on CUDA, ~7% on Metal.       
 
 ## Lazy graphs and views
 
@@ -81,6 +86,10 @@ Question                                 |In one line
 -----------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------
 [Q-N](q-n-where-blas-speed-comes-from.md)|Why does a naive matmul lose to BLAS by thousands of times? Several factors of 5 to 20, multiplied: bookkeeping, loop order, reuse, wider instructions.
 [Q-O](q-o-which-loop-vectorises.md)      |Why does `c[j] += …` vectorise when `acc += …` cannot? Independent outputs can run side by side; one running sum cannot without regrouping.            
+[Q-CF](q-cf-the-share-outside-the-ops.md)|Does a larger model spend more of a token outside its ops? Less: the overhead goes with the op count, the work with the weights.                       
+[Q-CJ](q-cj-the-serial-share.md)         |What can 20 threads do when 2 ms of 15 runs on one? 2.65 ms at best: the serial part sets the floor (Amdahl).                                          
+[Q-CI](q-ci-tables-against-arithmetic.md)|How can a table beat a few instructions? It runs 53 million times a token, and its entries in use stay in cache.                                       
+[Q-CG](q-cg-who-sets-the-flags.md)       |Should the portable macOS build enable `+dotprod`? Not tensomite's to decide: the app's build compiles the shard.                                      
 
 ## Autograd
 
@@ -157,6 +166,7 @@ Question                                        |In one line
 [Q-BI](q-bi-when-validation-follows-training.md)|Why did validation follow training on code? Held-out code shares the training code's patterns; Shakespeare's other scenes do not. 
 [Q-BD](q-bd-testing-for-memorised-passages.md)  |How could you test for a memorised passage? Swap two words: recitation shows as a spike of loss, then near zero.                  
 [Q-BM](q-bm-what-patience-costs.md)             |Why did early stopping run 1,500 steps past the best? Patience 6 × 250 steps; less risks stopping at noise.                       
+[Q-BP](q-bp-more-from-xl.md)                    |What would get more out of GPT-2 XL? More text, most likely: 3.7M tokens is little for 1.5B parameters.                           
 
 ## Evaluating code
 
@@ -186,4 +196,19 @@ Question                              |In one line
 [Q-AD](q-ad-cache-written-in-place.md)|What does a cache written in place save? A fixed 72 KB a token, where `cat` copied everything, about 6 MB at token 80.
 [Q-AO](q-ao-the-empty-slots.md)       |How does attention avoid the empty slots? It reads a slice of the filled positions; the rest are never touched.       
 
-Q-C and Q-P were labels on a decision and a list, not questions, so they have no page.
+## Quantised decoding on GPUs
+
+The running example: SmolLM2-1.7B at Q4_0, decoding on the GB10 and the M5 Pro, from about 7 ms a token towards llama.cpp's 4.7–4.9; and, for Q-BR and Q-BV, SmolLM2-135M.
+
+Question                                |In one line                                                                                                                    
+----------------------------------------|-------------------------------------------------------------------------------------------------------------------------------
+[Q-BT](q-bt-how-decode-scales.md)       |Does a 13-times larger model decode 13 times slower? About 2 times: the small one is bound by dispatches.                      
+[Q-BR](q-br-joining-projections.md)     |Why should joining projections save less than fusing? It removes dispatches, not bytes; but tiny products cost a fixed minimum.
+[Q-BU](q-bu-the-heads-bandwidth.md)     |Why does the head read fastest? 49,152 outputs keep every core busy; the others have too few.                                  
+[Q-BV](q-bv-idle-threads-still-help.md) |Why can 256 threads with 112 idle beat 36? Four times the loads in flight, combined reads, a short tree.                       
+[Q-BW](q-bw-what-grouping-saves.md)     |Wider loads or grouped outputs for the down projection? Wider loads on CUDA; the activations were already in cache.            
+[Q-CA](q-ca-scores-that-stay-on-chip.md)|Why does fused attention matter more as the context grows? The scores grow with it; the dispatches do not.                     
+[Q-CB](q-cb-repeating-a-pass.md)        |Can repeating a pass in every threadgroup beat one dispatch? Only if the repeat is small: here it doubled the products.        
+[Q-CC](q-cc-a-launch-bound-profile.md)  |What does a launch-bound token look like? Launching fills it and waiting is near zero; the 1.7B model is the opposite.         
+
+Q-C and Q-P were labels on a decision and a list, not questions, so they have no page; nor do Q-BQ, Q-BS and Q-CD, which were decisions, recorded in `PLAN.md`.
