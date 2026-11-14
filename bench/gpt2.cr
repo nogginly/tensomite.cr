@@ -22,8 +22,10 @@ DECODE = 32
 path = ARGV[0]? || abort "usage: bench/gpt2.cr MODEL.safetensors [HEADS]"
 heads = (ARGV[1]? || "12").to_i
 
-puts "device|prefill tokens/s|decode tokens/s|ms per decoded token"
-puts "------|----------------|---------------|--------------------"
+# "prefill" computes every position's logits, as perplexity and training do;
+# "last only" computes the last position's, as generation does (`forward_last`).
+puts "device|prefill tokens/s|last only, tokens/s|decode tokens/s|ms per decoded token"
+puts "------|----------------|-------------------|---------------|--------------------"
 # Each device to run, with a label and a setup to apply first.
 runs = [{"CPU", CPU.default.as(Device), -> { }}, {"BLAS", BLAS.default.as(Device), -> { }}]
 {% if flag?(:darwin) && flag?(:aarch64) %}
@@ -54,6 +56,13 @@ runs.each do |label, device, setup|
     (Time.instant - start).total_seconds
   end
   prefill = prefills.sort[repeats // 2]
+  model.forward_last(prompt, model.new_cache) if repeats > 1
+  lasts = Array.new(repeats) do
+    start = Time.instant
+    model.forward_last(prompt, model.new_cache)
+    (Time.instant - start).total_seconds
+  end
+  last = lasts.sort[repeats // 2]
 
   # Decode is the median of as many runs, each after a fresh prefill, with the
   # previous runs' models collected first so that their finalizers do not land
@@ -68,5 +77,5 @@ runs.each do |label, device, setup|
   end
   decode = decodes.sort[repeats // 2]
 
-  puts "%s|%.1f|%.2f|%.0f" % {label, PROMPT / prefill, DECODE / decode, decode / DECODE * 1000}
+  puts "%s|%.1f|%.1f|%.2f|%.0f" % {label, PROMPT / prefill, PROMPT / last, DECODE / decode, decode / DECODE * 1000}
 end

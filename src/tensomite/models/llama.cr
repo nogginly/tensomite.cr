@@ -254,7 +254,7 @@ module Tensomite
     # 2. Runs each block: attention then MLP, each after an RMS norm and added
     #    back to the residual stream, with queries and keys rotated by position.
     # 3. Applies the final norm and projects onto the vocabulary.
-    private def logits(ids : Array(Int32), cache : Cache) : Tensor
+    private def logits(ids : Array(Int32), cache : Cache, last : Bool = false) : Tensor
       count, past = ids.size, cache.length
       raise ShapeError.new("forward of no tokens") if count == 0
       if past + count > config.context
@@ -265,6 +265,7 @@ module Tensomite
       Tensomite.scope("layers") do
         @model.layers.each_with_index { |block, layer| x = block.call(x, mask, rope, cache.layers[layer]) }
       end
+      x = x.slice(0, count - 1, count) if last
       head(x)
     end
 

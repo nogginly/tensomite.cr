@@ -69,6 +69,18 @@ describe "GPT-2 on the tiny reference model" do
         model.generate(expected.prompt_ids, expected.greedy.size).should eq expected.greedy
       end
 
+      it "gives the last position's logits alone, with the full forward's last row" do
+        full = model.forward(expected.prompt_ids, model.new_cache).to_a(Float32)
+        last = model.forward_last(expected.prompt_ids, model.new_cache)
+        last.shape.should eq [1, model.config.vocab]
+        row = full[-model.config.vocab..]
+        if device.shape_invariant?
+          last.to_a(Float32).should eq row
+        else
+          last.to_a(Float32).zip(row) { |got, want| got.should be_close(want, 1e-4 * Math.max(1f32, want.abs)) }
+        end
+      end
+
       it "stops generating after a stop token, and returns it last" do
         stop = expected.greedy[3]
         model.generate(expected.prompt_ids, 20, stop: [stop]).should eq expected.greedy[0..expected.greedy.index!(stop)]
