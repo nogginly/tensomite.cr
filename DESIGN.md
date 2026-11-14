@@ -416,6 +416,11 @@ The atomic kernel needs `atomic_float`, from Metal 3. Without it the device stil
 
 Every op now has an `F32` Metal kernel. `I32` ops, views of more than 8 dimensions and overlapping views run on the host.
 
+> [!NOTE]
+> **Why this design?** Two matmul changes expected to help did not:
+> - `Atomic`, which adds partial sums with atomics rather than in chunk order, saved at most 8% of a product in M6, so `Split`'s fixed order stays the default.
+> - Larger [patches](#glossary) per thread: 8 × 8 ran 2–3 times slower on every product, I think because its accumulators cost the GPU its threads in flight, and 8 × 4 gained within the noise. `T64x64`'s 4 × 4 stays (Decision BR; [Q-AZ](faq/q-az-bigger-patches.md)).
+
 ### Moving data between devices
 
 An op whose operands are on different devices raises `DeviceError`. Data moves only through an explicit `Tensor#to(device)`, which realises the source, copies it through host memory and returns a realised leaf on the target:
@@ -457,6 +462,28 @@ flowchart LR
 - **`Gather`** copies row `ids[i]` of a 2-D table into output row `i`. An id outside the table raises `ExecutionError`.
 - **`MatMul`** computes each output as a dot product over `k`, added in index order. Its sources arrive already expanded to the common batch shape. It is the one kernel that does not call `offset_of` per element: it finds where each batch matrix starts, then walks rows, columns and `k` with the sources' strides directly. The order of additions is unchanged, so the result is bit-identical to indexing each element (`spec/host_kernels_spec.cr`), and about 10 times faster.
 
+### Quantised products
+
+`BlockMatMul` is `x · wᵀ` for a weight in a [block](#glossary) format (`Tensor#linear`). Every device computes it as ggml's reference code does, and the host's `Quant.matmul_reference` is the [oracle](#glossary):
+
+1. Each row of `x` is quantised to `Q8_0` a block at a time (`Q8_1`, which also keeps `d · Σq`, for `Q4_1` weights).
+2. Each output is a sum over blocks, in block order: the block's integer dot product, then its two scales and, for `Q4_1`, the minimum.
+
+The integer part can be added in any order without changing a bit; the sum over blocks cannot ([Q-CE](faq/q-ce-integers-in-any-order.md)), so every kernel keeps the block order.
+
+- **On the host,** `Quant.matmul` gives the oracle's bits faster. Dense activations are read in place and quantised through pointers. Each block's dot product is taken on signed bytes, its nibbles unpacked less 8, which LLVM turns into `sdot` under `+dotprod` or `--mcpu=native`. Two weight rows share each pass over the activations, and `F16` scales come from `HALVES`, a table of every half's value.
+- **Threads.** `Quant.in_parallel` cuts a product's outputs into [spans](#glossary), up to 4 a thread and at least 64 KB of weights each, so faster cores take more of them. A `SpinPool` of `TENSOMITE_THREADS − 1` workers, each in its own isolated execution context, spins on one atomic word holding the product's generation and its next span; the calling thread works too. A span is claimed by compare-and-set, so a claim for a finished product fails. An idle worker naps, each nap twice the last, up to 10 ms.
+- **On GPUs,** a pass quantises the activations, then the product runs one thread per output, or, for fewer than 65,536 outputs, 32 [lanes](#glossary) per output, each taking whole blocks (`BlockMatMulMode`). CUDA multiplies four byte pairs an instruction with `__dp4a`, one output a warp; Metal reads a byte at a time. `Unordered` adds in a tree, for measurement only.
+
+> [!NOTE]
+> **Why this design?** Each of these was expected to help and did not:
+> - A parked pool (`Fiber::ExecutionContext::Parallel`): no gain on the M5 Pro and a loss on the GB10, since a product's spans take 50–200 µs and parked threads woke after the first had done them all. More spinning threads than cores was worse still, so the workers are one fewer than the threads (Decision DD).
+> - Widening `F16` scales in registers, exactly, by a multiply by 2¹¹²: about 1 ns more a scale than the table, one scale every 32 weights, 3–5 ms a token on SmolLM2-1.7B ([Q-CI](faq/q-ci-tables-against-arithmetic.md)). `llvm.convert.from.fp16` would give one `fcvt`, but some LLVMs Crystal links do not accept it (Decision DF).
+> - `--mattr=+dotprod` alone, while the nibbles were unsigned: LLVM had no instruction for unsigned by signed bytes short of `usdot`, so nothing changed (Decisions DE and DF).
+> - Quantising the activations inside each product's kernel, to save a dispatch: every threadgroup quantised the whole row again, and the products took twice as long (Decision DB).
+> - On Metal, `__dp4a` emulated with shifts, exact float sums, 32 outputs a group, and padding against bank conflicts: each slower than the byte-at-a-time kernel. On CUDA, grouping 2, 4 or 8 outputs was no faster than one (Decisions CW and CX).
+> - 32 lanes per block, adding their products across the warp: exact, but five shuffles a lane per block halved decode on the GB10 (Decision CO).
+
 ### CUDA
 
 `src/tensomite/cuda.cr` reaches NVIDIA GPUs through CUDA's driver API (Decisions AS to AV). M8's first part is the layer under the device to come:
@@ -479,6 +506,11 @@ flowchart LR
   So a graph of host ops downloads each source once, not once per reader, and uploads each output once. Device memory comes from a pool, as on Metal. A buffer's finalizer hands its memory to a retired list, which the device moves into the pool at its next allocation or sync. If the list is busy, the finalizer frees the memory at once instead, making the context current on its thread first, so it never waits.
 - **Kernels** (`cuda/kernels.cu`) are ports of the Metal ones: elementwise arithmetic and comparisons, `exp`, `log`, `tanh`, `sqrt`, copies and `Cat`, `Sum` and `Max` in chunks of 16 at fixed offsets, `Gather`, `ScatterAdd` and `Unview`. Views reach them as a struct of 19 integers, passed by value. They are compiled once, on the first op, for the GPU's architecture, and queued in order on the default stream; a plain copy to or from the host waits for the kernels before it, so no explicit stream is needed yet. `Gather` and `ScatterAdd` report an id out of range in a small error buffer, which `sync` reads and clears, raising `ExecutionError`. - **Matmul, row ops and macro kernels** are ports too. `MatMul` has Metal's modes (`CUDA::MatMulMode`): serial, with the host's bits; split, in chunks of `k` at fixed offsets; and tiled, in the three tile sizes of `CUDA::MatMulTile`, with split's bits, so `Auto` picks tiled at 16 rows or more and split below, and a tiled prefill gives a split decode's bits. Softmax, log-softmax and layernorm fold rows in chunks as the reductions do, so a row padded with `-inf` keeps its bits. `Kernel#cuda` emits a macro kernel as CUDA C++, one statement per operation, as `#msl` emits MSL; each is compiled on its first launch and kept. With these, GPT-2's forward pass runs no host ops on CUDA.
 - **Testing without a GPU.** `scripts/cuda_stub/libcuda.c` stands in for the driver: one "GPU" whose memory is host memory. It cannot run PTX, but with `TENSOMITE_CUDA_KERNELS` it loads `prelude.cu`, `kernels.cu` and every macro kernel's CUDA C++ (written out by `scripts/cuda_stub/macro_kernels.cr`), compiled as host C++ behind `emulate.h`. That header defines CUDA's built-ins and runs a block's threads in a loop, or, for a kernel with shared memory, as one OS thread per GPU thread, all meeting at a barrier inside the kernel and between blocks. NVRTC, from PyPI, still compiles the real source. So CI compiles every kernel, runs each on the host, and compares it with the CPU in `gpu_spec`, as `scripts/emulate_metal` does for MSL. What it cannot catch is a difference in CUDA's own semantics, such as its maths library; the GB10 runs the same specs on the real GPU.
+
+> [!NOTE]
+> **Why this design?** Two decode changes expected to help did not:
+> - Narrower split blocks, 16 or 8 columns, to give few-row products more blocks: they read weights at 71–202 GB/s against 160–209 for 32 columns, since a warp of 32 columns reads 128 adjacent bytes at a step (Decision BE).
+> - A first fused bias, read through a general view with integer divisions per output, cut prefill on the GB10 by a third; the bias is now a contiguous `[N]` read as `bias[col]` (Decision BF).
 
 ## Realisation
 
@@ -574,6 +606,11 @@ The expression language is deliberately small: `+`, `-` (binary and unary), `*`,
   `LayerNorm`|`(ĝ - mean(ĝ) - x̂ · mean(ĝ · x̂)) / σ`, with `ĝ = g · weight` and `x̂ = (x - mean) / σ`, fused
 
   The weight's gradient is `g · x̂` and the bias's is `g`, in the expanded shape, so that accumulating them sums over the rows.
+
+> [!NOTE]
+> **Why this design?** Two fusions saved less than expected at first:
+> - The first fused row ops removed half of a decoded token's dispatches but little GPU time: a layer norm of 768 ran on 12 threads, each reading [chunks](#glossary) of 64 through `offset_of`. More threads, with chunks of 16 and stride indexing, did what fusing had promised (M7 part 5 in `PLAN.md`).
+> - The first fused attention kernel found every key and value with `offset_of`'s divisions and left each output column's sum to one thread: 1.73 ms a token on the GB10 and 1.33 on the M5 Pro, against 0.73 and 0.92 for the three ops it replaced. Stepping by stride and sharing each column's sum gave 0.42 and 0.70 (Decision CZ).
 
 ## Dropout
 
@@ -879,469 +916,41 @@ On `BLAS`, the same comparison on the tiny reference model differs in the low bi
 
 ## Performance baselines
 
-Measured with `bench/matmul.cr` and `bench/gpt2.cr`, built with `--release`. Medians of several runs.
-
-**Matmul, naive oracle against BLAS, square `F32` matrices** (the oracle as of M3, before its strided matmul):
-
-Size|Linux container, 4 cores, OpenBLAS: oracle / BLAS ms|MacBook Pro, M5 Pro, Accelerate: oracle / BLAS ms|M5 Pro GFLOP/s
-----|----------------------------------------------------|-------------------------------------------------|--------------
-64  |8.03 / 0.015                                        |2.59 / 0.004                                     |141           
-128 |40.87 / 0.042                                       |20.92 / 0.007                                    |606           
-256 |349.72 / 0.123                                      |169.20 / 0.043                                   |774           
-512 |3,276.51 / 1.176                                    |1,301.29 / 0.260                                 |1,031         
-
-The M5 Pro's BLAS throughput is higher than its NEON units alone can deliver. Accelerate is most likely using the CPU's matrix extension.
-
-**GPT-2 small, Linux container** (shapes of GPT-2 small, 64-token prompt, 32 decoded tokens):
-
-Device|M4 prefill tokens/s|M4 decode tokens/s|M5 prefill tokens/s|M5 decode tokens/s|M5 ms per decoded token
-------|-------------------|------------------|-------------------|------------------|-----------------------
-`CPU` |2.1                |1.64              |2.7                |2.17              |462                    
-`BLAS`|57.9               |10.25             |258.3              |29.59             |34                     
-
-M5's gain comes from walking views in runs (see "Host kernels"), which made `Cat`, the KV cache's copy, several times cheaper. As of M4, before that change, a decoded token's 93 ms on `BLAS` went as follows:
-
-Kernel                      |ms per token|Share
-----------------------------|------------|-----
-`Cat` (growing the KV cache)|44.9        |48%  
-`MatMul` (`cblas_sgemm`)    |30.1        |32%  
-All other host kernels      |15.6        |17%  
-Outside kernels             |2.7         |3%   
-
-- **The KV cache cost the most:** every token copies the whole cache. It still does, but in runs; a preallocated cache written in place would remove the copy altogether.
-- **The matmuls are limited by memory bandwidth:** each decoded token streams all ~500 MB of weights once, and 30 ms is about 17 GB/s.
-
-**Metal on the MacBook Pro, M5 Pro** (M6: every op on the GPU; `MatMul` in each of its modes):
-
-Device                |GPT-2 prefill tokens/s|GPT-2 decode tokens/s|ms per decoded token
-----------------------|----------------------|---------------------|--------------------
-`CPU`                 |8.6                   |7.63                 |131                 
-`BLAS`                |905.5                 |152.01               |7                   
-`Metal`, serial matmul|635.3                 |34.22                |29                  
-`Metal`, split matmul |1,148.7               |63.57                |16                  
-`Metal`, atomic matmul|1,267.5               |63.52                |16                  
-
-Size|`BLAS` ms|`BLAS` GFLOP/s|`Metal` ms (split)|`Metal` GFLOP/s
-----|---------|--------------|------------------|---------------
-64  |0.003    |151.6         |0.255             |2.1            
-128 |0.005    |786.3         |0.293             |14.3           
-256 |0.027    |1,240.8       |0.966             |34.7           
-512 |0.205    |1,308.1       |2.716             |98.8           
-
-- **Splitting `k` nearly doubled decode** (34 to 64 tokens/s) and lifted prefill past `BLAS` (1,149 against 906 tokens/s).
-- **Determinism costs nothing in decode and about 9% in prefill.** The atomic split decodes at the same speed and prefills at 1,268 tokens/s. Waiting for the 8 partial sums and adding them in order is cheap beside streaming the weights.
-**Matrix-vector products by mode** (`bench/matvec.cr`, M5 Pro; 20 products per realise, ms per 20):
-
-Shape (GPT-2 small)         |Serial|Split |Atomic|Atomic saving
-----------------------------|------|------|------|-------------
-attention q·k·v, 768 → 2,304|3.293 |0.895 |0.859 |4%           
-attention out, 768 → 768    |2.070 |0.564 |0.570 |-1%          
-MLP up, 768 → 3,072         |3.231 |0.923 |0.914 |1%           
-MLP down, 3,072 → 768       |11.713|1.839 |1.795 |2%           
-logits, 768 → 50,257        |13.986|11.804|11.768|0%           
-prefill MLP up, 64 rows     |11.851|12.574|11.537|8%           
-
-- **The logits product runs at memory bandwidth.** Its 154 MB of weights, too large for any cache, stream in 0.59 ms, about 260 GB/s.
-- **A token's matmuls take about 3 ms of its 16.** Each layer's four products take about 211 µs, so 2.5 ms for 12 layers, plus 0.6 ms for the logits. The smaller weights may stay in the GPU's cache across the 20 products, so those figures flatter decode a little.
-- **With 64 rows, splitting costs 6%** over serial: the GPU is already full, and the split's barriers are pure cost. One kernel for every number of rows is what keeps prefill equal to decode.
-- **Decode is still behind `BLAS`** (16 ms against 7 ms per token). The matmuls take about 3 ms of it (above), so about 13 ms goes elsewhere. Each primitive op is its own dispatch, hundreds per token, and the reductions inside `layernorm` and `softmax` use one thread per output. That is M7's work: kernel macros fuse those chains (Decision O requires Metal to beat `BLAS` there).
-- **Square matmuls barely change, at 99 GFLOP/s** against Accelerate's 1.3 TFLOP/s on the CPU's matrix units. They already had enough outputs to fill the GPU; they needed tiling in threadgroup memory, which came in M7 part 8.
-- **About 0.3 ms per realise is fixed cost:** committing a command buffer and waiting for it. It dominates small matrices, and is paid once per decoded token.
-- **With one thread per output (serial), decode left most of the GPU idle:** a 768-wide layer launched 768 threads, each looping over all of `k`.
-
-**Where a decoded token's time goes on Metal** (`bench/profile_decode.cr`, M5 Pro, M7 part 1):
-
-Part of the 15.65 ms wall time                                          |ms   |Share
-------------------------------------------------------------------------|-----|-----
-Waiting for the GPU                                                     |13.19|84%  
-Everything else on the host (graph building, scheduling, reading logits)|1.19 |8%   
-Allocating buffers                                                      |1.00 |6%   
-Encoding 710 dispatches                                                 |0.26 |2%   
-
-GPU time per op, each committed alone (13.75 ms in all):
-
-Op        |Per token|GPU ms|Share
-----------|---------|------|-----
-`Sum`     |62       |7.81  |57%  
-`MatMul`  |73       |3.81  |28%  
-`Add`     |159      |0.49  |4%   
-`Mul`     |134      |0.40  |3%   
-`Max`     |12       |0.36  |3%   
-`Div`     |87       |0.30  |2%   
-all others|151      |0.57  |4%   
-
-- **One thread per output is what makes `Sum` slow.** Fifty of the 62 sums are the means inside the 25 layer norms, each a single row of 768: one GPU thread adds 768 numbers in turn, waiting on memory for each, about 126 µs per sum. The other 12 are softmax denominators.
-- **Dispatch overhead is not the problem.** Encoding 710 dispatches costs 0.26 ms, and a small elementwise op about 3 µs of GPU time.
-- **Allocation costs 1 ms a token**, which the buffer pool (Decision U) targets.
-
-**After parallel reductions** (M7 part 2, M5 Pro):
-
-Measure                                                    |Part 1|Part 2
------------------------------------------------------------|------|------
-Metal decode, tokens/s (split)                             |63.6  |104.9 
-Metal prefill, tokens/s (split)                            |1,149 |1,279 
-Wall per decoded token, ms                                 |15.65 |10.14 
-of which waiting for the GPU                               |13.19 |6.98  
-of which on the host: allocating, encoding, everything else|2.45  |3.16  
-GPU time in `Sum`, ms                                      |7.81  |1.03  
-GPU time in `MatMul`, ms                                   |3.81  |4.04  
-GPU time in elementwise ops and `Cat`, ms                  |1.76  |2.10  
-
-- **Host work is now about a third of a decoded token's 10 ms.** The host builds the graph, allocates buffers and encodes every dispatch before the command buffer is committed, so the GPU waits for all of it. The buffer pool (part 3) removes most of the allocation. Committing in batches as encoding proceeds would let the GPU start before the host finishes.
-- **Matmul is now the largest GPU cost, at 54%.** Elementwise ops, about 2 ms over 500 dispatches, are what fusion removes.
-- **`BLAS` decodes at 6.6 ms per token.** Metal is at 9.5, so about 3 ms is left to find.
-
-**After the buffer pool and batched commits** (M7 part 3, M5 Pro):
-
-Measure                          |Part 2|Part 3
----------------------------------|------|------
-Metal decode, tokens/s (split)   |104.9 |138.6 
-`BLAS` decode, tokens/s, same run|151.7 |144.0 
-Metal prefill, tokens/s (split)  |1,279 |1,521 
-Wall per decoded token, ms       |10.14 |6.98  
-of which waiting for the GPU     |6.98  |5.23  
-allocating buffers               |1.29  |0.60  
-everything else on the host      |1.53  |0.78  
-Command buffers per token        |1     |12    
-GPU time, each op alone, ms      |7.44  |6.78  
-
-- **The host now overlaps the GPU.** The wall time (6.98 ms) is less than the GPU's own work timed op by op (6.78 ms) plus the host's (1.74 ms), because the GPU starts on each batch of 64 dispatches while the host encodes the next.
-- **Metal decodes within 4% of `BLAS`** in the same run, and prefills 1.7 times as fast. `BLAS` itself varies by about 5% between runs (144 to 153 tokens/s), so the M7 exit compares the two within one run.
-- **What is left is GPU work:** matmul 3.8 ms, and about 2 ms of small elementwise dispatches, which fusion removes.
-
-**After kernel macros** (M7 part 4, M5 Pro, `gelu` as one kernel):
-
-Measure                    |Part 3|Part 4
----------------------------|------|------
-Dispatches per token       |710   |614   
-Wall per decoded token, ms |6.98  |6.72  
-GPU time, each op alone, ms|6.78  |6.48  
-of which `MatMul`          |3.82  |3.80  
-of which `Sum` and `Max`   |1.21  |1.21  
-of which the 12 `gelu`s    |≈0.30 |0.04  
-
-- **`gelu` went from nine dispatches per layer to one,** and from about 25 µs of GPU time per layer to about 3.
-- **The rest of the non-matmul time is mostly inside `layernorm` and `softmax`:** their sums and maxima, and the `Sub`, `Div`, `Sqrt`, `Exp` and `Mul` around them. The fused row ops (part 5) replace each of them with one kernel.
-
-**After fused row ops** (M7 part 5, M5 Pro, first version):
-
-Measure                          |Part 4|Part 5
----------------------------------|------|------
-Dispatches per token             |614   |316   
-Metal decode, tokens/s           |—     |150.95
-`BLAS` decode, tokens/s, same run|—     |167.82
-Wall per decoded token, ms       |6.72  |6.54  
-GPU time, each op alone, ms      |6.48  |6.33  
-of which `MatMul`                |3.80  |3.74  
-of which `LayerNorm` (25)        |—     |1.42  
-of which `Softmax` (12)          |—     |0.51  
-
-Fusing saved dispatches but little GPU time: a layer norm of one row of 768 took 57 µs. With chunks of 64 it had only 12 threads, each reading 64 elements in turn through `offset_of`, whose integer division and remainder per dimension are slow on a GPU. So reductions and row ops now use chunks of 16, giving a row of 768 48 threads, and step through a run by its stride; `offset_of` returns `offset + i` at once for a dense view, which every kernel benefits from.
-
-**After more threads per row and stride indexing** (M7 part 5, M5 Pro):
-
-Measure                          |Part 5, first|Part 5    
----------------------------------|-------------|----------
-Metal decode, tokens/s (split)   |150.95       |**187.63**
-`BLAS` decode, tokens/s, same run|167.82       |160.26    
-Metal prefill, tokens/s (split)  |1,552        |1,642     
-`BLAS` prefill, tokens/s         |1,285        |1,240     
-Wall per decoded token, ms       |6.54         |4.95      
-GPU time, each op alone, ms      |6.33         |4.74      
-of which `MatMul`                |3.74         |3.73      
-of which `LayerNorm` (25)        |1.42         |0.28      
-of which `Softmax` (12)          |0.51         |0.08      
-
-- **Metal decodes 17% faster than `BLAS`** in the same run, and prefills a third faster: what Decision O requires of M7.
-- **A layer norm of one row now takes 11 µs, not 57.** Four times the threads, and no integer division per element.
-- **Matmul is 79% of the GPU's time.** The rest is the residual and bias adds, the KV cache's `Cat` and `Copy`, and the fused ops.
-- **Atomic matmul is now slower than the deterministic split in decode** (182.9 against 187.6 tokens/s), so determinism costs nothing there.
-
-**After vectorised host loops and own maths** (M7 part 6, M5 Pro): Metal's kernels are unchanged, but `BLAS` runs every op except matmul on host kernels, which now vectorise.
-
-Measure                          |Part 5|Part 6    
----------------------------------|------|----------
-Metal decode, tokens/s (split)   |187.63|**183.80**
-`BLAS` decode, tokens/s, same run|160.26|171.56    
-Metal prefill, tokens/s (split)  |1,642 |1,590     
-`BLAS` prefill, tokens/s         |1,240 |**2,349** 
-Wall per decoded token, ms       |4.95  |4.98      
-
-- **Metal still decodes faster, by 7% rather than 17%.** Decision O's requirement holds, with less room.
-- **`BLAS` now prefills half as fast again as Metal.** Prefill is a few large matmuls, where Accelerate is strong and Metal's matmul, untiled until M7 part 8, was not.
-
-**After the tiled matmul** (M7 part 8, M5 Pro, GPU time per product of a 128-token GPT-2 prefill from `bench/profile_decode.cr --prefill 128`):
-
-Products                        |Before, ms|After, ms|GFLOP/s after|`BLAS` GFLOP/s
---------------------------------|----------|---------|-------------|--------------
-head, `[128,768]·[768,50257]`   |24.9      |4.0      |2,481        |1,010         
-mlp in, ×12                     |13.3      |3.4      |2,106        |1,139         
-attention in, ×12               |10.0      |3.0      |1,826        |1,450         
-mlp out, ×12                    |12.3      |7.5      |967          |1,756         
-attention out, ×12              |3.5       |1.9      |941          |1,498         
-attention scores and values, ×24|3.4       |0.6      |840–1,240    |730–970       
-all GPU work                    |69.0      |22.1     |             |              
-
-- **A 128-token prefill runs at 5,539 tokens/s,** against 2,010 for `BLAS` in `bench/gpt2.cr`: Decision AF's target, with room. Decode is unchanged (183 against `Split`'s 187 tokens/s, within run-to-run noise), because it still uses `Split`.
-- **64×64 blocks win everywhere it matters.** In `bench/matmul.cr`, 32×32 and 32×64 blocks were slower on every large product, including the narrow ones.
-- **Products with 768 output columns are the gap left** (Decision AG). A 128 × 768 output is 24 blocks of 64×64, too few to occupy the GPU, and each walks all of `k` alone; mlp out and attention out are 43% of the prefill now. Splitting `k` across threadgroups would fill the GPU, but split-K's left fold, `((c0 + c1) + c2) + …`, means each chunk's sum would have to be stored and folded by a second kernel, about 19 MB of scratch for mlp out, for an estimated 3 of 22 ms.
-
-**M7's exit runs** (M5 Pro, `main` after part 8; `bench/gpt2.cr` times prefill warm, as the median of five):
-
-Device                 |Prefill of 64 tokens, tokens/s|Decode, tokens/s
------------------------|------------------------------|----------------
-`BLAS`                 |2,419                         |166.4           
-Metal, `Split`         |1,732                         |198.5           
-Metal, `Atomic`        |1,988                         |186.6           
-Metal, `Tiled`         |3,681                         |65.9            
-Metal, `Auto` (default)|**3,684**                     |**186.1**       
-
-- **Metal now leads on both counts:** 1.12 times `BLAS` at decode and 1.52 times at a 64-token prefill. At 128 tokens, where the tiled matmul has more rows to share, `bench/profile_decode.cr --prefill 128` gives 5,296 tokens/s.
-- **A decoded token takes 5.07 ms** of wall time, 4.77 ms of it GPU work, in 316 dispatches and 5 command buffers.
-- **`Tiled` alone decodes slowly** (66 tokens/s), because one row fills a sixty-fourth of a block; `Auto` sends such products to `Split`. The spread between `Split`, `Atomic` and `Auto` at decode, 186 to 199 tokens/s, is mostly run-to-run noise: they run the same kernels there.
-
-**CUDA on the DGX Spark** (GB10, M8 part 4; `bench/gpt2.cr` with `-Dcuda`, prefill timed warm as the median of five):
-
-Device                |Prefill of 64 tokens, tokens/s|Decode, tokens/s|ms per decoded token
-----------------------|------------------------------|----------------|--------------------
-CPU oracle            |8.2                           |7.21            |139                 
-`BLAS` (OpenBLAS)     |836                           |67.2            |15                  
-CUDA, `Serial`        |600                           |108.8           |9                   
-CUDA, `Split`         |447                           |154.3           |6                   
-CUDA, `Tiled`         |4,616                         |95.9            |10                  
-CUDA, `Auto` (default)|**4,587**                     |**170.7**       |**6**               
-
-- **CUDA leads on both counts:** 5.5 times `BLAS` at a 64-token prefill and 2.5 times at decode, with every op of the forward pass on the GPU.
-- **`Auto` takes the best of both,** as on Metal: tiled products prefill nearly ten times faster than split ones, and split products decode 1.6 times faster than tiled ones.
-- **Decode has room to grow.** A decoded token takes 5.9 ms; `bench/profile_decode_cuda.cr` shows where it goes. Reading GPT-2 small's 0.5 GB of `F32` weights once at the GB10's memory bandwidth would take about 2 ms, I think, so most of the time is elsewhere: about 316 launches a token, the logits copied back to the host, and a KV cache that `Cat` copies whole every token.
-
-**Where a decoded token goes on the GB10** (Decision AW; `bench/profile_decode_cuda.cr`, part 4's kernels):
-
-Cost                      |ms per token
---------------------------|------------
-wall                      |6.38        
-GPU time, every kernel    |5.63        
-matmuls, 493 MB of weights|3.83        
-the output head alone     |1.64        
-launching (316 launches)  |0.94        
-allocating                |1.04        
-copying                   |0.03        
-
-- **Decode is GPU-bound, and the matmuls are most of it.** They read weights at about 129 GB/s; the output head, `[1,768]·[768,50257]`, at 94.
-- **`Split` has too few blocks for one row.** It launches one per 32 output columns, so the 768-column products get 24 blocks, and every block walks all of `k`.
-- **The head reads across its weights.** Its `b` is the token embedding transposed, so `k` is contiguous in memory and neighbouring columns are 768 floats apart. `Split`'s neighbouring threads read neighbouring columns, so no two reads share a transaction.
-
-**[Two passes](#glossary) for few rows (Decision AX).** `TwoPass` cuts each product into blocks of 128 columns by one chunk of 64 along `k` (and 16 rows). Each block copies its chunk of `b` into shared memory along whichever axis is contiguous, then each thread sums its column's chunk in index order, as `Split` does, and stores the sum in scratch memory. A second kernel adds each output's chunk sums in chunk order from zero. The sums and their order are `Split`'s, so the bits are too. The head becomes 393 × 12 blocks instead of 1,571 blocks each walking 768. The scratch is one buffer kept by the device, grown as needed (2.4 MB for the head): kernels run one after another, so each launch may reuse it. `spec/cuda_spec.cr` checks `TwoPass` against `Split` bit for bit, and a change to the order of the second pass fails it.
-
-Measured on the GB10 (`bench/gpt2.cr`, then `bench/profile_decode_cuda.cr`):
-
-Product, decoding one token       |`Split`, GB/s|`TwoPass`, GB/s|`TwoPass`, ms
-----------------------------------|-------------|---------------|-------------
-head, `[1,768]·[768,50257]`       |94           |203            |0.761        
-mlp out, `[1,3072]·[3072,768]`    |137          |140            |0.806        
-mlp in, `[1,768]·[768,3072]`      |175          |172            |0.658        
-qkv, `[1,768]·[768,2304]`         |171          |151            |0.562        
-attention out, `[1,768]·[768,768]`|126          |99             |0.286        
-
-- **Decode rose from 170.7 to 198.1 tokens/s,** 5.0 ms a token from 6.4, below the 210 estimated. `TwoPass` alone decodes at 181 and `Split` alone at 159.
-- **The head gained, the rest did not.** Two passes more than doubled the head's bandwidth, because its reads now coalesce. The products whose weights are contiguous along `n` already coalesced under `Split`, so they gained nothing from coalescing. qkv and attention out got slower: I think from the extra launch and the 32 KB of shared memory per block, which limits how many blocks share a multiprocessor (not yet measured).
-- **Launches rose from 316 to 389,** one more per matmul.
-
-**`Auto` chooses by layout (Decision AY).** Below 16 rows it now uses `TwoPass` only when `b`'s columns are not contiguous, as in the head and attention's `q·kᵀ`, and `Split` otherwise. On the GB10 the profile gives 4.71 ms a decoded token, about 212 tokens/s, in 329 launches; attention out is back at `Split`'s 126 GB/s. qkv stayed at 149 GB/s under `Split`, against 171 in part 4's profile, so some of the earlier gap between the two was run-to-run variation.
-
-**Timing decode.** Until this change `bench/gpt2.cr` timed decode once, 32 tokens, straight after loading each device's model. One such run put `Auto` at 169 tokens/s and `TwoPass`, which `Auto` mostly matches, at 206, while the profile put `Auto` at 212. I think the collector, finalizing the models of earlier runs, landed inside that timing. Decode is now the median of five runs, after a `GC.collect`, as prefill already was. Rerun that way on the GB10:
-
-Device                |Prefill of 64 tokens, tokens/s|Decode, tokens/s|ms per decoded token
-----------------------|------------------------------|----------------|--------------------
-`BLAS` (OpenBLAS)     |773                           |70.9            |14                  
-CUDA, `Serial`        |617                           |123.3           |8                   
-CUDA, `Split`         |445                           |178.5           |6                   
-CUDA, `Tiled`         |4,834                         |94.8            |11                  
-CUDA, `TwoPass`       |3,718                         |203.2           |5                   
-CUDA, `Auto` (default)|**4,585**                     |**211.4**       |**5**               
-
-- **`Auto` decodes at 211 tokens/s,** from part 4's 171, and agrees with the profile's 212. It beats `TwoPass` alone by keeping `Split` where `b`'s columns are contiguous.
-- **What remains,** by op (Decision AZ; `bench/profile_decode_cuda.cr` now totals each op whatever its shape):
-
-Op       |Per token|GPU ms|Share
----------|---------|------|-----
-`MatMul` |73       |3.160 |67%  
-`Cat`    |24       |0.520 |11%  
-`Add`    |85       |0.405 |9%   
-`Copy`   |48       |0.246 |5%   
-LayerNorm|25       |0.224 |5%   
-`Softmax`|12       |0.086 |2%   
-others   |25       |0.108 |2%   
-
-- **The matmuls are still two thirds.** The five weight products take 2.96 ms for 493 MB, about 167 GB/s; mlp out (136 GB/s) and attention out (126) are the slowest, with 24 blocks each under `Split`.
-- **`Cat` is the largest of the rest:** 24 a token, each copying a layer's whole key or value cache, about 22 µs apiece. The profile's by-shape table had hidden it, since its shape grows every token.
-- **The small kernels cost about 4.7 µs each** whatever they do: 49 `Add [1,768]` take 0.229 ms.
-
-**The KV cache written in place (Decision BB),** on the GB10, `bench/gpt2.cr` on `main` and then on the change, one after the other:
-
-Device                |Decode before, tokens/s|Decode after, tokens/s
-----------------------|-----------------------|----------------------
-`BLAS`                |71.2                   |94.6                  
-CUDA, `Split`         |176.1                  |197.6                 
-CUDA, `TwoPass`       |203.1                  |229.4                 
-CUDA, `Auto` (default)|203.6                  |**246.0**             
-
-- **`Auto` decodes 21% faster,** 4.04 ms a token in the profile from 4.83, in 305 launches from 329: a `Write` is one launch where a `Cat` of two sources was two.
-- **The saving is twice what `Cat` cost.** The 24 writes take 0.118 ms where the copies took 0.520, which accounts for 0.4 ms. The matmuls account for most of the rest, 2.89 ms from 3.16: mlp out reads at 182 GB/s from 136, mlp in at 200 from 174. I think the copies, about 13 MB of traffic a token, were evicting the weights' neighbours from the GPU's cache and churning the buffer pool (allocating fell from 0.41 to 0.32 ms), but this is not measured.
-- **`BLAS` decodes 33% faster,** since on the host the copy was a larger share of a token.
-- **Narrower split blocks did not help (Decisions BD, BE).** With the cache in place, the four decode products whose weights are contiguous read at 136–200 GB/s in the model, and `Split` gives a 768-column product only 24 blocks, about one for every two of the GB10's multiprocessors. Blocks of 16 and 8 columns, with 16 and 32 threads per column, made two and four times as many, with the same bits, and were slower on every product (`bench/matmul_cuda.cr`, GB/s of weights read on the GPU alone):
-
-Product                           |32 columns|16 columns|8 columns|Two passes
-----------------------------------|----------|----------|---------|----------
-qkv, `[1,768]·[768,2304]`         |196       |168       |71       |150       
-attention out, `[1,768]·[768,768]`|160       |161       |136      |141       
-mlp in, `[1,768]·[768,3072]`      |209       |165       |79       |191       
-mlp out, `[1,3072]·[3072,768]`    |202       |202       |151      |165       
-
-  Block count was not the limit: mlp out reads at 202 GB/s with 24 blocks. I think the width of each read is: a warp of 32 columns reads 128 adjacent bytes of a row of weights at each step, while one of 8 columns reads four 32-byte pieces of rows far apart. The narrower kernels were removed, and `bench/matmul_cuda.cr` stays to compare split with two passes. In the model the same products read 10–15% slower than alone, worth about 0.15 ms a token.
-- **Bias adds inside the matmul (Decision BF).** `matmul(b, bias)` with a contiguous `[N]` bias, as a `Linear` layer has, gives `MatMul` a third source, and every matmul kernel adds `bias[col]` to each output after the output's sum is complete: `with_bias(total, ...)` on CUDA and Metal, a pass over each row of the output on the host and after `cblas_sgemm`. Any other bias is added by a separate `Add`. A first version took any bias that broadcasts, read through a general view; finding each output's bias then cost integer divisions, and on the GB10 a 64-token prefill fell from 4,134 to 2,935 tokens/s and `BLAS`'s from 826 to 608. The sum is the same and the addition is the same single rounding, so the bits are those of a separate `Add`; specs compare the two on every device and in every matmul mode. Metal's `Atomic` mode starts its atomic adds from the bias instead of from zero, which, like the rest of that mode, is not bit-exact. `Linear` uses it, so GPT-2 loses 48 `Add`s a token, four per block. The gradient of the bias is the output's gradient summed over the rows, by the `Unview` of the bias expanded to the output, as a separate `Add` gives.
-
-**After views and fused bias adds (Decision BF),** on the GB10 (`bench/gpt2.cr`, then `bench/profile_decode_cuda.cr`):
-
-Change                 |`Auto` prefill, tokens/s|`Auto` decode, tokens/s|Launches a token
------------------------|------------------------|-----------------------|----------------
-the KV cache in place  |4,134                   |246.0                  |305             
-`reshape` as a view    |4,250                   |254.8                  |257             
-bias adds in the matmul|**5,050**               |**267.9**              |**209**         
-
-- **A decoded token takes 3.67 ms,** 80% of its GPU time in matmuls, which read the weights at 182–222 GB/s except attention out (133).
-- **Prefill gains most from the fused adds,** 19%: a 64-row product's bias add was a pass over 64 × 3,072 outputs, now done as each output is stored.
-- **Prefill pays for the cache once (Decision BC).** A new cache allocates its whole capacity, 75 MB for GPT-2 small, and the prompt's keys and values are copied into it: about 1.3 ms and 0.4 ms on the GB10, a cost before the first token rather than per token. `bench/gpt2.cr` makes a new cache for every prefill it times, so its prefill rate fell 10%, to 4,134 tokens/s.
-
-**Training on CUDA.** `examples/shakespeare.cr --device cuda` trains with every op on the GPU: on the stub, three steps of a small model run no host ops in 885 launches, and eleven steps give the same losses as the CPU and `BLAS` to four decimals. `spec/gpu_spec.cr` trains a small attention model for five AdamW steps on every GPU and compares the losses with the CPU's within 1e-5; Metal runs it on the macOS runner.
-
-Measured, ms per step (`examples/shakespeare.cr`; the default model is 4 layers of width 128 with 16 sequences of 64 characters, the larger one Decision R's 4 layers of width 192, 6 heads, 16 sequences of 128):
-
-Machine            |Device                  |Default model|Larger model
--------------------|------------------------|-------------|------------
-DGX Spark (GB10)   |`blas` (OpenBLAS, Grace)|75           |410         
-DGX Spark (GB10)   |`cuda`                  |**41.8**     |**110**     
-MacBook Pro, M5 Pro|`blas` (Accelerate)     |**27**       |86          
-MacBook Pro, M5 Pro|`metal`                 |45           |**76**      
-
-- **Two 2,000-step CUDA runs of the default model gave the same losses, validation losses and sample, character for character,** ending at 1.8444 nats/char after 84 s.
-- **The GPU wins once the products are large enough to outweigh its fixed cost per kernel.** A training step is several hundred launches, many of them small. On the default model, Accelerate, which runs on the M5 Pro's matrix units, beats Metal; on the larger one, with products 1.5 times wider and twice as tall, Metal wins. OpenBLAS on the Grace cores is a weaker rival, and CUDA leads at both sizes, by 3.7 times on the larger model.
-- **CUDA trains the larger model slower than Metal** (110 against 76 ms) though the GB10 has the larger GPU.
-
-**Profiling a CUDA training step (Decision BG).** `examples/shakespeare.cr --device cuda --profile 10` on the larger model, on the GB10: of 109 ms a step, 75 were spent waiting for the GPU and 17 allocating, in 906 launches and 363 uploads. By GPU time:
-
-Op      |Per step|GPU ms|Share
---------|--------|------|-----
-`Unview`|36      |32.3  |34%  
-`Mul`   |298     |20.9  |22%  
-`Add`   |147     |10.8  |11%  
-`MatMul`|75      |10.7  |11%  
-`Sub`   |68      |6.8   |7%   
-`Div`   |164     |4.9   |5%   
-
-- **`Unview` worked out every source index from scratch.** For each element it read, it decoded a flat index with divisions and rebuilt the logical element in a loop over a per-thread array, all in a serial chain. Summing a layer norm's gradient over 2,048 rows, `Unview [192]`, took 0.74 ms; the gradient of a q, k or v slice, `Unview [2048,576]`, 1.4 ms. The kernel now takes the view's row-major strides from the host, builds the logical element with multiplications while it decomposes the position, and walks repeated dimensions by stepping it: one step for a single repeated dimension, an odometer for several. The order of the sum, and so the bits, is unchanged.
-- **Allocating missed the pool,** because of the retired list's re-entrancy (see "Buffer pool").
-- **With both fixes, a step took 83.4 ms, from 109,** on the GB10: allocating 0.09 ms, from 17.4, with none of 1,269 allocations missing the pool, and the host's other work 2.2 ms, from 12.7. On the M5 Pro, Metal, which had the same retired list, trained the larger model at 59 ms a step, from 76, with no kernel changed.
-- **Views copied into each thread's local memory.** `Unview [2048,576]`, which reads one element per thread, still took 1.4 ms, and `Mul [16,6,128,128]` 0.58 ms for 1.6 million elements. A kernel argument indexed by a value known only at run time, as `v.strides[d]` in a loop over dimensions, is first copied to each thread's local memory: 76 bytes per view, 104 more for `Inverse`, and for a million threads hundreds of megabytes of traffic. Compiled to PTX, 28 of the hand-written kernels used local memory. `offset_of`, `stride_of` and `Unview` now loop over all `MAX_DIMS` dimensions, skipping those a view lacks, so the loops unroll and index arguments only by constants; `Inverse` holds the sorted strides and sizes themselves rather than dimension numbers. No kernel uses local memory now, and `spec/cuda_spec.cr` checks the PTX for it. With it, the larger model trains at about 20 ms a step on the GB10, from 83.4, with the same losses step for step: 5.4 times as fast as before Decision BG, and three times Metal's 59.5 on the M5 Pro. Metal's view arguments live in constant memory that kernels can index freely, so it made no such copies.
-- **The first step after a change to the kernels took 1.1 s,** where it had taken 0.11. I think the driver compiles new PTX for the GPU on first use and caches the result on disk: the next run of the same build took 58.5 ms for its first step. The trainer used to report the average time per step since step 0, which that one step kept high for hundreds of steps; it now reports the time per step since the previous report, leaving out validation, and the total at the end.
-
-**Profiling a Metal training step (Decision BI).** `examples/shakespeare.cr --device metal --profile 10` on the larger model, on the M5 Pro: of 59.1 ms a step, 57.0 were spent waiting for the GPU, and none of 1,269 allocations missed the pool. Timed alone, the ops took 42.2 ms of GPU time:
-
-Op          |Per step|GPU ms|Share
-------------|--------|------|-----
-`MatMul`    |75      |16.6  |39%  
-`Unview`    |36      |15.7  |37%  
-`ScatterAdd`|2       |3.1   |7%   
-`Mul`       |298     |2.3   |6%   
-
-- **`Unview [192]`, a layer norm's gradient summed over 2,048 rows, took 0.83 ms a call,** 14.9 ms a step: Metal still had the index arithmetic CUDA lost in Decision BG. Its kernel now takes the same `Inverse`, with row-major strides, and walks repeated dimensions by stepping. Metal's constant memory can be indexed freely, so its loops need not unroll. Compiled as C++ on the CPU, the new kernel gives the old one's bits on seven views, from `[2048,192]` expanded from `[192]` to a q slice of `[2048,576]`.
-- **`ScatterAdd [133120,1]`, the loss's gradient into the flattened logits, took 2.6 ms:** a thread per column zeroed its column before adding, and with one column a single thread zeroed 133,120 elements. On both GPUs a dispatch with a thread per element now zeroes the output first; the adds, and so the bits, are unchanged.
-- **With both kernel changes a step took 49.9 ms, from 59.1,** with the same losses: `Unview [192]` 0.40 ms a call, from 0.83, still the largest op, and `ScatterAdd` 1.2 ms a step, from 3.1. Only 192 threads share that `Unview`, each adding 2,048 numbers in turn.
-- **With both, a step takes 30.7 ms on the M5 Pro,** against 20.5 on the GB10. The same `Unview [192]` takes 0.40 ms a call on Metal and 0.032 on CUDA, I think because Metal's compiler waits for each load before the next, where NVIDIA's has several in flight. Metal's kernel now has a path for a dense source with one repeated dimension, the common case, that loads 32 elements before adding them, in order (Decision BJ). With eight, `Unview [192]` took 0.058 ms a call, from 0.40, and a step 26.3 ms, from 30.7: the additions were never the cost, only waiting for each element before asking for the next. With 32 it takes 0.027 ms, faster than CUDA's 0.032, and a step 25.9 ms, with `MatMul` 63% of the GPU time. Threadgroups of 32 rather than 256, which spread its 192 threads over more GPU cores, made no difference.
-- **17 ms of the wall time was not in any op.** A step committed 114 command buffers, where its 906 dispatches need about 14 at 64 apiece, and each extra one was a pause in which the GPU waited for the host. The optimizer caused them (see "Optimizers"); with one wait per step, and without the kernel changes, a step commits 15 and takes 40.0 ms, its wall time now below the 42.1 ms of its ops timed alone.
-
-**Tiled products in two passes (Decision BJ).** A weight's gradient is `xᵀ·g`, `[192, 2048]·[2048, 192]` for the larger model's attention projections: few outputs and a long `k`. `Tiled` gave it nine blocks of 64 by 64 outputs, each walking all 32 chunks of `k`, and it ran at 330 GFLOP/s on the M5 Pro and 468 on the GB10, against 2,100 and 4,900 for forward products of the same size. `TiledTwoPass`, on both GPUs, gives each block of outputs a run of chunks as well, enough for about 256 blocks in all, and writes each chunk's sum to scratch as `Tiled` would add it; a second pass adds each output's chunk sums in chunk order, as `TwoPass` does. The sums and their order are `Tiled`'s, so the bits are too: the specs compare it with `Split` on both GPUs, with runs of one chunk and of several, and `scripts/emulate_metal/run.sh` with runs of 1, 3 and every chunk. `Auto` uses it for products of at least 16 rows with fewer than 64 blocks of outputs and at least four chunks of `k`, which covers the larger model's five slow products and none of its forward ones. Measured on the larger model, with the forward products unchanged:
-
-Product                |M5 Pro, ms per step|GB10, ms per step
------------------------|-------------------|-----------------
-`[192,2048]·[2048,192]`|1.83 → 0.38        |1.29 → under 0.21
-`[768,2048]·[2048,192]`|1.85 → 1.31        |1.29 → 0.77      
-`[192,2048]·[2048,768]`|1.86 → 1.33        |1.28 → 0.71      
-`[192,2048]·[2048,576]`|1.82 → 1.02        |1.25 → 0.56      
-All `MatMul`           |16.6 → 12.9        |9.6 → 6.3        
-Training step          |25.9 → 22.4        |20.5 → 17.2      
-
-The smallest product gains most, from 9 threadgroups to about 256; the others already had 36. Weight gradients still run below forward products, 1,800 GFLOP/s against 2,100 to 2,300 on Metal and 3,200 to 3,400 against 4,900 on CUDA, I think mostly from writing and rereading the chunk sums.
-
-**Constants shared (Decision BK).** Arithmetic with a number, as in `x * 2` or AdamW's `m / (1 - β₁ᵗ)`, makes the number a scalar tensor on the device. Each use made a new one, so a training step uploaded 363 of them on the GB10, 1.26 ms of synchronous copies. They are now kept by device, dtype, value and scope and shared: tensors never change, and `Tensor#write`, the one op that writes into a buffer, writes only into a target its caller names, which these are not. The scope keeps each part of a model to its own nodes, so diagrams still fold identical blocks; AdamW's constants, made outside every scope, are shared across all the parameters, while those of a forward pass are made once per pass. A learning-rate schedule makes a few new values each step, so the table is cleared when it reaches 4,096 entries. On the CUDA stub a small model's step makes 19 uploads, from 205, with the same losses. On the GB10 the larger model's step makes 29, from 363, and takes 15.8 ms, from 17.2, its copying 0.10 ms from 1.26; Metal, whose uploads are copies within shared memory, is unchanged at 22.5. A few new constants each step miss the buffer pool, as the table keeps the old ones: 24 allocations, about 0.05 ms. `Tensor.scalar` itself still makes a new tensor each call.
-
-**A scatter into one column (Decision BK).** Cross-entropy picks one log-probability per row from the logits flattened to `[rows × classes, 1]`, so its gradient is `ScatterAdd [133120,1]` for the larger model: one column, so one thread, adding 2,048 rows in turn, 0.66 ms on the M5 Pro and 0.82 on the GB10. For one column both GPUs now run a thread per id. Each first looks for the same id earlier in the list and stops if it finds one; the thread left for each distinct id adds every occurrence's row in index order from zero, as the host does, so the bits are the same. For 2,048 ids that is about four million comparisons across 2,048 threads. Of the ids out of range, only the first is reported, as before. A scatter into several columns keeps a thread per column. Measured on the larger model, `ScatterAdd` takes 0.66 ms a step on the M5 Pro, from 1.20, and 0.58 on the GB10, from 1.27, nearly all of it now the embedding's `[65,192]`; a step takes 22.0 ms, from 22.4, and 16.1, from 17.2.
-
-**Where training stands after Decision BK.** On `main`, the larger Shakespeare model trains at 21.8 ms a step on the M5 Pro and 15.0 on the GB10, from 59.1 and 20.5 when Decision BI began, and from 109 on the GB10 before Decision BG, with the same losses throughout. The GPUs now run nearly back to back: the ops timed alone add up to 97% of the M5 Pro's wall time and 99% of the GB10's. `MatMul` takes 60% and 43% of that, and the rest is spread over about 850 launches of small elementwise, reduction and view ops, `Mul` alone 298 of them; fusing those into fewer kernels is the next large gain.
-
-**AdamW fused (Decision BM).** AdamW's step was about fifteen primitive ops per parameter: for the larger model's 36 parameters, over half of a training step's 925 launches, each reading and writing a parameter-sized tensor. From the second step on, `AdamW` runs three kernel macros per parameter instead:
-
-Kernel               |Computes                                                 |Inputs
----------------------|---------------------------------------------------------|------
-`adamw_moment`       |`m = β₁m + (1 − β₁)g`                                    |4     
-`adamw_second_moment`|`v = β₂v + (1 − β₂)g²`                                   |4     
-`adamw_update`       |`p · decay − m / (1 − β₁ᵗ) / (√(v / (1 − β₂ᵗ)) + ε) · lr`|8     
-
-A macro's constants are fixed when it is compiled, so the numbers that change each step, the bias corrections, the learning rate and the decay, are scalar inputs, broadcast like any other, which the optimizer makes once per value. Each kernel does the composite's operations in its order, so the bits are unchanged: a parameter without decay is multiplied by 1, which is exact. The first step keeps the composite, having no `m` or `v` to read. `CUDA` kernels now take any number of inputs; `adamw_update` has eight, and Metal binds up to 31 buffers, enough for fourteen. On the CUDA stub a step of the larger model launches 511 kernels, from 925, with the same losses and parameters to the bit. Measured on the larger model, a step takes 20.8 ms on the M5 Pro, from 21.8, and 14.1 on the GB10, from 15.0; the ops timed alone fall by 1.2 and 1.4 ms. AdamW's 108 kernels take about 0.7 ms on the GB10, about 6 µs each, against about 2 ms for its old ops; a fused kernel on `[192]` takes 4.7 µs, against 2.8 for a `Mul`, I think because each of its eight inputs is read through a general view, with integer divisions per element.
-
-**Broadcast inputs without index arithmetic (Decision BN).** A GPU kernel finds an input's element through its view with `offset_of`, which takes a modulo and a division per dimension unless the view is dense. A scalar broadcast to `[768,192]` has two dimensions of stride 0, so each of AdamW's five scalars cost two divisions per element to find the one number. The elementwise ops and kernel macros, which read their inputs only through `offset_of`, now receive each view without its leading dimensions of stride 0: they add nothing to a position, and once they are dropped the remaining dimensions decompose the index exactly as before. A broadcast scalar becomes a view of no dimensions, and a bias expanded over rows a view of one. Such a view is never marked dense, since its elements repeat. Other kernels, which read shapes for their own purposes, keep the full view. Measured on the M5 Pro: a training step takes 20.5 ms, from 20.8, and the ops timed alone 19.5, from 19.9. The largest gain was not AdamW's but attention's scale, `Mul [16,6,128,128]` by a scalar, 0.59 ms from 0.81: three dimensions of divisions for each of 1.6 million elements. AdamW's kernels gained 0.17 ms in all, though `Kernel [192]` only 4.8 to 4.4 µs, which is mostly a dispatch's fixed cost. GELU's `Kernel [2048,768]`, whose one input was already dense, is unchanged at 0.37 ms. On the GB10 nothing changed beyond noise: 14.3 ms a step against 14.1, `Mul [16,6,128,128]` 46 µs a call from 47. That is about the time to read and write its 12.6 MB at the GB10's bandwidth, so I think CUDA hid the divisions behind memory traffic, where Metal paid for them.
-
-Metal keeps `Split` at decode: its decode was not profiled for this, and the fix there would be the same.
-
-**Training step in the Linux container through M7** (the 0.8M-param model, 30 steps, identical losses):
-
-Build                             |ms per step
-----------------------------------|-----------
-M6                                |744        
-buffer pool, a collection per step|470        
-`gelu` as one kernel              |387        
-fused row ops                     |293        
-pointer loops and own maths       |133        
-
-The larger model Decision R's 1.6 target needs (4 layers, 6 heads, width 192, context 128, batch 16) went from 1.6 s to 0.54 s a step: about 45 minutes for 5,000 steps, inside the hour. The last row's two changes, measured in one session on that model:
-
-Build                       |ms per step
-----------------------------|-----------
-`main` after fused row ops  |1,130      
-pointer loops, libm         |808        
-pointer loops, `Maths` (own)|542        
-
-- **Own maths only pays in loops that vectorise.** With the old bounds-checked loops it made the step slower (1,065 to 1,282 ms): scalar code with both of `tanh`'s branches computed loses to libm's, and `softmax`'s masked `-inf` entries produced subnormals.
-- **Kernel time per step fell from 1.0 to 0.4 s.** `gelu` went from 26 to 4.5 ns per element, its gradient from 28 to 6, and `softmax` from 9 to 4.2.
-
-**Training a character-level GPT on Tiny Shakespeare, Linux container.** The M5 exit is a validation loss below 1.8 within an hour here, and M7's is below 1.6 within an hour (Decision R). Runs use `examples/shakespeare.cr` on `BLAS`, with AdamW and a cosine schedule from 1e-3 to 1e-4:
-
-Model                                    |Params|Tokens per step|ms per step|Steps|Wall time|Validation loss, nats/char         
------------------------------------------|------|---------------|-----------|-----|---------|-----------------------------------
-4 layers, 4 heads, width 128, context 64 |0.8M  |1,024          |720        |3,000|36 min   |1.726 (1.80 at step 2,250, 27 min) 
-4 layers, 6 heads, width 192, context 128|1.8M  |2,048          |431        |5,000|36 min   |1.494 (1.573 at step 2,749, 20 min)
-
-- **The second row is M7's exit** (Decision R), run with M7 part 6 and the pool's thread fix. Its validation loss passes 1.6 at step 2,749.
-- **On the M5 Pro,** the same run (Accelerate, before the thread fix) takes 90 ms a step, 7.5 minutes in all, and ends at 1.4936 against Linux's 1.4939. Host maths is identical on both, but the two BLAS libraries add matmul terms in different orders, and the last-bit differences compound over 5,000 steps.
-
-Where the time of a step went, measured over 10 steps of the first model before two fixes:
-
-Cost                                       |Before             |After                             
--------------------------------------------|-------------------|----------------------------------
-Per-element `offset_of` in host kernels    |11 s of kernel time|3.9 s, after walking runs         
-Allocation, with `GC_UNMAP_THRESHOLD` unset|3.6 s              |0.9 s, with `GC_UNMAP_THRESHOLD=0`
-`MatMul` on `BLAS`                         |0.4 s              |0.4 s                             
-
-- **Training is bound by elementwise passes, not by matmul.** The composites are built from primitives, so `gelu`, `softmax` and `layernorm`, forwards and backwards, touch tens of millions of elements per step. Each pass reads and writes fresh memory at about 2.4 ns per element, against 0.45 ns for the same loop over cached buffers. Fusion (M7) and buffer reuse (M7) attack exactly this, and parallel host kernels (Decision D) would divide it by the core count.
-- **The 720 ms was measured without `GC_UNMAP_THRESHOLD=0`,** which brings it to about 500 ms. With the buffer pool and a collection per step (M7), a step takes about 470 ms with no flag.
-- **Attention grows with the square of the context.** Doubling the context to 128, at the same width, more than doubles the step.
+Current numbers, to measure a change against: a regression shows only against a number. How each was reached is in `DECISIONS.md`, under the decision named (Decision DI). Built with `--release`; on the GPUs, the default modes.
+
+**Inference.**
+
+Workload                                        |Machine        |Device |Result                                              |Command                       |Decision  
+------------------------------------------------|---------------|-------|----------------------------------------------------|------------------------------|----------
+GPT-2 small: decode; prefill of 64 tokens       |M5 Pro         |`Metal`|186 tokens/s; 3,684 tokens/s                        |`bench/gpt2.cr`               |M7's exit 
+GPT-2 small, as above                           |M5 Pro         |`BLAS` |166 tokens/s; 2,419 tokens/s                        |`bench/gpt2.cr`               |M7's exit 
+GPT-2 small, as above                           |GB10           |`CUDA` |268 tokens/s; 5,050 tokens/s                        |`bench/gpt2.cr` with `-Dcuda` |BF        
+GPT-2 small, decode                             |GB10           |`BLAS` |95 tokens/s                                         |`bench/gpt2.cr`               |BB        
+SmolLM2-1.7B at Q4_0, decode                    |GB10           |`CUDA` |5.71 ms a token (llama.cpp: 4.85)                   |`bench/profile_decode_cuda.cr`|CZ        
+SmolLM2-1.7B at Q4_0, decode                    |M5 Pro         |`Metal`|6.60 ms a token (llama.cpp: 4.73)                   |`bench/profile_decode.cr`     |CZ        
+SmolLM2-1.7B at Q4_0, decode, all threads       |M5 Pro         |`BLAS` |7.17 ms a token; 6.36 native (llama.cpp's CPU: 6.7) |`bench/profile_decode_cpu.cr` |DF        
+SmolLM2-1.7B at Q4_0, decode, all threads       |GB10           |`BLAS` |12.8 ms a token; 11.2 native (llama.cpp's CPU: 11.4)|`bench/profile_decode_cpu.cr` |DF        
+SmolLM2-135M-Instruct at Q4_0, decode, 4 threads|Linux container|`BLAS` |8.2–8.3 ms a token, against 27–31 in `F32`          |`bench/profile_decode_cpu.cr` |M11's exit
+
+`bench/profile_decode_cpu.cr` takes the model directory and `--quantize Q4_0`; the GPU profilers take the same, or a GGUF file. llama.cpp's figures are `llama-bench`'s on the same machines, with its own Q4_0 file, so they compare near enough rather than exactly.
+
+**Training.**
+
+Workload                                                                         |Machine        |Device |Result                   |Command                                 |Decision 
+---------------------------------------------------------------------------------|---------------|-------|-------------------------|----------------------------------------|---------
+Shakespeare, Decision R's larger model (4 layers, width 192, 16 × 128 characters)|M5 Pro         |`Metal`|18.7 ms a step           |`examples/shakespeare.cr --device metal`|BP       
+the same                                                                         |GB10           |`CUDA` |12.9 ms a step           |`examples/shakespeare.cr --device cuda` |BP       
+the same, to 1.494 nats/char in 5,000 steps                                      |Linux container|`BLAS` |431 ms a step, 36 minutes|`examples/shakespeare.cr`               |M7's exit
+GPT-2 small, a training step                                                     |GB10           |`CUDA` |388 ms a step            |`bench/train_gpt2.cr` with `-Dcuda`     |CI       
+
+Each training run gives the same losses from run to run on the same device.
 
 ## Current limits
 
-- **Metal matmuls with few output blocks are slower than Accelerate.** A prefill's products with 768 output columns run at about 950 GFLOP/s against Accelerate's 1.5–1.8 TFLOP/s, though prefill as a whole is 2.7 times as fast (see "Performance baselines").
+- **Metal matmuls with few output blocks are slower than Accelerate.** A prefill's products with 768 output columns run at about 950 GFLOP/s against Accelerate's 1.5–1.8 TFLOP/s, though prefill as a whole is faster on Metal: 3,684 tokens/s against 2,419 (see "Performance baselines").
 - **Element counts and offsets are `Int32`,** following Crystal's `Slice` indexing. That caps one buffer at about 2 GB.
 - **Computation is in `F32` and `I32`.** No type promotion: operands must have the same dtype. The block formats are storage for weights (below).
-- **BLAS covers `F32` matmul only.** See "Performance baselines" for how far the oracle is behind it.
+- **BLAS covers `F32` matmul only.** The oracle's own matmul is far behind it: about 1,300 ms against 0.26 for a 512 × 512 product on the M5 Pro, as of M3.
 - **Model weights compute in `F32` only.** `BF16` and `F16` weights are widened to `F32` as they load, which doubles their memory. Quantised weights load in their block formats (`Q8_0`, `Q4_0`, `Q4_1`), and only `BlockMatMul` (`Tensor#linear`) and `Gather` read them. Metal and CUDA have their own kernels for both: a pass that quantises each block of activations, then one thread per output or, for products of fewer than 65,536 outputs, 32 [lanes](#glossary) per output (a warp on CUDA, a SIMD group on Metal) that each take whole blocks; either way the blocks' contributions are added in the host's order (`BlockMatMulMode`). CUDA's give the host's bits; Metal's division may differ from the host's in the last bit, so its results may differ by a step of a block's scale. On host devices, `Quant.matmul` shares each product's outputs among `TENSOMITE_THREADS` threads (all cores by default), with the bits of `Quant.matmul_reference`, the oracle.
 - **One device per op.** Moving data needs an explicit `to`, which goes through host memory.
 - **Only what is written as a kernel, a fused row op or a fused composite is fused.** `gelu`, `softmax` (with its scale and mask), `log_softmax`, `layernorm`, `rmsnorm`, RoPE, attention on GPUs for decoding's few rows, and bias adds into `MatMul` are one op each; residual adds are still separate primitives.
