@@ -131,7 +131,7 @@ module Tensomite
     # 2. Runs each block: attention then MLP, each after a layer norm and added
     #    back to the residual stream.
     # 3. Applies the final layer norm and projects onto the token embeddings.
-    private def logits(ids : Array(Int32), cache : Cache) : Tensor
+    private def logits(ids : Array(Int32), cache : Cache, last : Bool = false) : Tensor
       count, past = ids.size, cache.length
       raise ShapeError.new("forward of no tokens") if count == 0
       if past + count > config.context
@@ -142,6 +142,7 @@ module Tensomite
       end
       mask = Tensor.causal_mask(count, past + count, device).named("causal mask")
       @h.each_with_index { |block, layer| x = block.call(x, mask, cache.layers[layer]) }
+      x = x.slice(0, count - 1, count) if last
       Tensomite.scope("head") { @ln_f.call(x).linear(@wte.weight.value) }
     end
   end
