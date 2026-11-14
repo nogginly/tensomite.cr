@@ -136,22 +136,10 @@ module Tensomite
       end
     end
 
-    # Keys and values of every position run so far, one `CausalSelfAttention::Cache` per block.
-    class Cache
-      getter layers : Array(CausalSelfAttention::Cache)
+    include Generative
 
-      # Returns the number of positions held.
-      getter length = 0
-
-      # A cache of *count* layers, each holding up to *capacity* positions.
-      def initialize(count : Int32, capacity : Int32? = nil)
-        @layers = Array.new(count) { CausalSelfAttention::Cache.new(capacity) }
-      end
-
-      protected def advance(count : Int32) : Nil
-        @length += count
-      end
-    end
+    # The cache `Generative` keeps: see `Generative::Cache`.
+    alias Cache = Generative::Cache
 
     # Weights stored transposed in Hugging Face's file: every `Linear`'s.
     TRANSPOSED = /_proj\.weight$|^lm_head\.weight$/
@@ -246,25 +234,6 @@ module Tensomite
       @rope = RotaryEmbedding.new(config.head_width, config.context, config.rope_theta, device)
     end
 
-    # Returns an empty cache for this model, holding up to *capacity* positions
-    # in place.
-    def new_cache(capacity : Int32 = config.context) : Cache
-      Cache.new(config.layers, capacity)
-    end
-
-    # Runs *ids* at the positions following those in *cache*, appends their keys and
-    # values to *cache*, and returns realised logits of shape `[ids.size, vocab]`.
-    #
-    # 1. Embeds the tokens.
-    # 2. Runs each block: attention then MLP, each after an RMS norm and added
-    #    back to the residual stream, with queries and keys rotated by position.
-    # 3. Applies the final norm and projects onto the vocabulary.
-    def forward(ids : Array(Int32), cache : Cache) : Tensor
-      result = logits(ids, cache).realize
-      cache.advance(count: ids.size)
-      result
-    end
-
     # Returns lazy logits `[batch * length, vocab]` for *ids*, `[batch, length]`
     # token ids, each row its own sequence from position 0, without a cache.
     def forward(ids : Tensor) : Tensor
@@ -278,32 +247,13 @@ module Tensomite
       head(x)
     end
 
-    # Returns *count* tokens generated after *prompt*, each chosen by *sampler* from
-    # the logits of the last position, yielding each as it is chosen. Generation
-    # stops early after a token in *stop*, which is then the last one returned.
-    def generate(prompt : Array(Int32), count : Int32, sampler : Sampler = Sampler.greedy,
-                 stop : Enumerable(Int32) = [] of Int32, & : Int32 ->) : Array(Int32)
-      cache = new_cache(Math.min(config.context, prompt.size + count))
-      logits = forward(prompt, cache)
-      tokens = [] of Int32
-      count.times do |i|
-        token = sampler.pick(logits.slice(0, logits.shape[0] - 1, logits.shape[0]).to_a(Float32))
-        tokens << token
-        yield token
-        break if stop.includes?(token)
-        logits = forward([token], cache) if i < count - 1
-      end
-      tokens
-    end
-
-    # :ditto:
-    def generate(prompt : Array(Int32), count : Int32, sampler : Sampler = Sampler.greedy,
-                 stop : Enumerable(Int32) = [] of Int32) : Array(Int32)
-      generate(prompt, count, sampler, stop) { }
-    end
-
     # Returns the logits of *ids* after the positions in *cache*, unrealised, and
     # appends their keys and values to it; `#forward` advances it after realising.
+    #
+    # 1. Embeds the tokens.
+    # 2. Runs each block: attention then MLP, each after an RMS norm and added
+    #    back to the residual stream, with queries and keys rotated by position.
+    # 3. Applies the final norm and projects onto the vocabulary.
     private def logits(ids : Array(Int32), cache : Cache) : Tensor
       count, past = ids.size, cache.length
       raise ShapeError.new("forward of no tokens") if count == 0
