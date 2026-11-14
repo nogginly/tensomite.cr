@@ -24,3 +24,6 @@ CLAUDE.md
 /runs/
 /data/
 /multiplier.safetensors
+
+# Git worktrees that Claude Code subagents work in
+/.claude/worktrees/

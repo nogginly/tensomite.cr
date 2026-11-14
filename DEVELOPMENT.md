@@ -322,5 +322,6 @@ flowchart LR
   - `DEVELOPMENT.md` whenever a convention, command or gotcha is learned.
   - `DECISIONS.md` when a decision is taken or revised, with its line in `PLAN.md`'s index; `PLAN.md` when a milestone changes.
   - `GUIDE.md` whenever the public API changes, with every example run and its output shown; `TUTORIAL.md` and `examples/multiply.cr` together.
+  - The skills in `.claude/skills/` describe the public API and `apps/finetune` for Claude sessions. They ship with the shard, so a dependent project can link them from `lib/tensomite/.claude/skills/`. Update them in the same PR as any change that makes them wrong, and re-run `.claude/skills/train-a-model/example.cr`.
   - `HANDOFF.md` at the end of each PR, rewritten rather than appended to: where things stand, working agreements, follow-ups, environment and concepts covered.
 - **AI use** follows `DISCLOSURE.md`: generated code is reviewed until it is understood as if written by hand.
