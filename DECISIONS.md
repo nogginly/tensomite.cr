@@ -564,3 +564,18 @@ Written up in `faq/` now, before the glossary, which links to them (decided). Si
 ## DI: what the design keeps of its history
 
 `DESIGN.md` describes the system as it is, with one table of current baselines, so that a regression shows against a number; a lesson learned the hard way stays as a short `> [!NOTE]` "Why this design?" callout that names its decision, so it is not relearned; the dated before-and-after figures go, since the decisions and the pull requests hold them (decided). This revises #119: the decisions move into a file of their own, and no measurement notebook is kept.
+
+<a id="decision-dj"></a>
+## DJ: the order of generation and the server's issues
+
+One `Cache` and one `generate` for both models first (#127), then the head on the last position only (#121), then sampling without sorting the vocabulary (#122) (decided). The shared `generate` meant the other two changed one copy rather than two. With them, a 64-token GPT-2 prefill that keeps only the last row ran at 712 tokens/s against 578 on `BLAS` in the Linux container, and a top-40 pick from 50,257 logits took 197 µs rather than 6,603, choosing the same tokens for the same seed.
+
+<a id="decision-dk"></a>
+## DK: delegating to a cheaper model
+
+Well-specified, mechanical tasks go to a subagent on Sonnet: refactors whose checks prove them, benches, specs, documentation tables (decided). Design, diagnosis and review stay with the main session, which writes each task's brief, reviews the diff and reruns the checks; work whose difficulty is judgement, such as a race, a regression or what a callout should say, is not delegated. Each pull request says what was delegated. Reviewed after the first delegated task, to see whether it saved more than the brief and the review cost.
+
+<a id="decision-dl"></a>
+## DL: the subagent's standing brief
+
+An agent definition, `.claude/agents/implementer.md`, holds what every delegated task needs: where the conventions are, the rules that matter (bits, hot loops, comments, documents), the checks and their commands, what not to do (commit, push, open pull requests), and how to report (decided). A task's brief then carries only the task. Its last section, lessons from earlier tasks, grows as reviews find mistakes worth not repeating. Sonnet only, until the approach is shown to help.
