@@ -52,10 +52,10 @@ private def bit_exact?(device : Device) : Bool
 end
 
 # Returns the modes in which *device* computes meaningless sums, for
-# measurement: Loads and Stream on Metal.
+# measurement: Loads, Stream and StreamActivations on Metal.
 private def measurement_modes(device : Device) : Array(BlockMatMulMode)
   {% if flag?(:darwin) && flag?(:aarch64) %}
-    return [BlockMatMulMode::Loads, BlockMatMulMode::Stream] if device.is_a?(Metal)
+    return [BlockMatMulMode::Loads, BlockMatMulMode::Stream, BlockMatMulMode::StreamActivations] if device.is_a?(Metal)
   {% end %}
   [] of BlockMatMulMode
 end

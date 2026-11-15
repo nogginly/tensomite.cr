@@ -23,6 +23,9 @@ module Tensomite
     # and nothing else, so the result is meaningless. It shows how fast the
     # weights stream. Elsewhere, as `Lanes`.
     Stream
+    # For measurement only, on Metal: as `Stream`, also reading each block's
+    # activations, scale and d·Σq as `Lanes` does. Elsewhere, as `Lanes`.
+    StreamActivations
 
     # Returns the number of outputs below which `Auto` uses lanes. On the GB10,
     # lanes decode SmolLM2's 49,152-word head faster than threads too.
@@ -31,7 +34,7 @@ module Tensomite
     end
 
     # Returns the mode `TENSOMITE_BLOCK_MATMUL` names (`auto`, `thread`,
-    # `lanes`, `unordered`, `loads` or `stream`), or `Auto` without it, so that the modes can be timed against
+    # `lanes`, `unordered`, `loads`, `stream` or `stream_activations`), or `Auto` without it, so that the modes can be timed against
     # each other without rebuilding.
     def self.from_env : BlockMatMulMode
       ENV["TENSOMITE_BLOCK_MATMUL"]?.try { |name| parse?(name) } || Auto
