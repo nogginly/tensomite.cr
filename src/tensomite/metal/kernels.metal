@@ -889,6 +889,77 @@ kernel void block_matmul_lanes_f32(device const uchar* w [[buffer(0)]],
     if (output < count && lane == 0) dst[output] = with_bias(sum, bias, col, dims.z);
 }
 
+// For measurement only: block_matmul_lanes_f32 with the arithmetic taken out.
+// Each lane reads the same bytes of its blocks, activations, scales and d·Σq,
+// in the same order, but adds them together with one integer add each, so the
+// result is meaningless. Against the lanes kernel it shows what the
+// arithmetic costs. The sum is written, so that no load can be dropped.
+kernel void block_matmul_loads_f32(device const uchar* w [[buffer(0)]],
+                                   device const float* scales [[buffer(1)]],
+                                   device const float* sums [[buffer(2)]],
+                                   device const char* qs [[buffer(3)]],
+                                   device float* dst [[buffer(4)]],
+                                   device const float* bias [[buffer(5)]],
+                                   constant Blocks& b [[buffer(6)]],
+                                   constant uint3& dims [[buffer(7)]],
+                                   constant uint& count [[buffer(8)]],
+                                   uint group [[threadgroup_position_in_grid]],
+                                   uint simd [[simdgroup_index_in_threadgroup]],
+                                   uint groups [[simdgroups_per_threadgroup]],
+                                   uint lane [[thread_index_in_simdgroup]]) {
+    uint output = group * groups + simd;
+    uint i = output < count ? output : count - 1;
+    uint n = dims.x, k = dims.y, blocks = k / 32;
+    uint row = i / n, col = i % n;
+    device const uchar* weights = w + b.offset + col * blocks * b.bytes;
+    float sum = 0.0f;
+    for (uint start = 0; start < blocks; start += 32) {
+        uint block = start + lane;
+        float mine = 0.0f;
+        if (block < blocks) {
+            device const uchar* p = weights + block * b.bytes;
+            device const char* qb = qs + row * k + block * 32;
+            int total = 0;
+            for (uint j = 0; j < b.bytes; j++) total += p[j];
+            for (uint j = 0; j < 32; j++) total += qb[j];
+            mine = float(total) + scales[row * blocks + block] + sums[row * blocks + block];
+        }
+        uint run = min(blocks - start, 32u);
+        for (uint j = 0; j < 32; j++) {
+            float value = simd_shuffle(mine, ushort(j));
+            if (j < run) sum += value;
+        }
+    }
+    if (output < count && lane == 0) dst[output] = sum;
+}
+
+// For measurement only: each output's weight row read as 16-byte words, lane
+// l taking words l, l + 32 and so on, their bits folded together and written,
+// so the result is meaningless. It shows how fast the GPU streams the weights
+// when nothing else is done with them. The row and its offset must be
+// multiples of 16 bytes.
+kernel void block_matmul_stream_f32(device const uchar* w [[buffer(0)]],
+                                    device float* dst [[buffer(4)]],
+                                    constant Blocks& b [[buffer(6)]],
+                                    constant uint3& dims [[buffer(7)]],
+                                    constant uint& count [[buffer(8)]],
+                                    uint group [[threadgroup_position_in_grid]],
+                                    uint simd [[simdgroup_index_in_threadgroup]],
+                                    uint groups [[simdgroups_per_threadgroup]],
+                                    uint lane [[thread_index_in_simdgroup]]) {
+    uint output = group * groups + simd;
+    uint i = output < count ? output : count - 1;
+    uint n = dims.x, row_bytes = dims.y / 32 * b.bytes;
+    device const uint4* words = (device const uint4*)(w + b.offset + (i % n) * row_bytes);
+    uint acc = 0;
+    for (uint j = lane; j < row_bytes / 16; j += 32) {
+        uint4 v = words[j];
+        acc += v.x ^ v.y ^ v.z ^ v.w;
+    }
+    float sum = simd_sum(float(acc));
+    if (output < count && lane == 0) dst[output] = sum;
+}
+
 #if __METAL_VERSION__ >= 300
 // For measurement only: `per` consecutive outputs (at most LANE_OUTPUTS) per
 // SIMD group, lane l taking blocks l, l + 32 and so on, as in

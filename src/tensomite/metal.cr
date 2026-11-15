@@ -62,7 +62,7 @@ module Tensomite
       Op::Exp => "exp_f32", Op::Log => "log_f32", Op::Tanh => "tanh_f32", Op::Sqrt => "sqrt_f32",
       Op::Copy => "copy_f32",
     }
-    private OTHER    = %w[copy_into_f32 sum_f32 max_f32 sum_short_f32 max_short_f32 gather_f32 fill_zero_f32 scatter_add_f32 scatter_add_column_f32 unview_f32 matmul_f32 matmul_split_f32 matmul_tiled_chunks_64x64_f32 matmul_chunk_sums_f32 matmul_tiled_32x32_f32 matmul_tiled_64x64_f32 matmul_tiled_32x64_f32 dropout_f32 softmax_f32 softmax_scaled_f32 softmax_grad_f32 log_softmax_grad_f32 log_softmax_f32 layernorm_f32 layernorm_grad_f32 rmsnorm_f32 rope_f32 attention_f32 gather_blocks_f32 quantize_rows_q8_f32 block_matmul_f32 block_matmul_lanes_f32]
+    private OTHER    = %w[copy_into_f32 sum_f32 max_f32 sum_short_f32 max_short_f32 gather_f32 fill_zero_f32 scatter_add_f32 scatter_add_column_f32 unview_f32 matmul_f32 matmul_split_f32 matmul_tiled_chunks_64x64_f32 matmul_chunk_sums_f32 matmul_tiled_32x32_f32 matmul_tiled_64x64_f32 matmul_tiled_32x64_f32 dropout_f32 softmax_f32 softmax_scaled_f32 softmax_grad_f32 log_softmax_grad_f32 log_softmax_f32 layernorm_f32 layernorm_grad_f32 rmsnorm_f32 rope_f32 attention_f32 gather_blocks_f32 quantize_rows_q8_f32 block_matmul_f32 block_matmul_lanes_f32 block_matmul_loads_f32 block_matmul_stream_f32]
     private OPTIONAL = %w[matmul_atomic_f32 block_matmul_unordered_f32]
     private COLS     = 32
     # SIMD groups in each threadgroup of a quantised matmul on lanes.
@@ -527,7 +527,7 @@ module Tensomite
           dispatch_groups_at("block_matmul_unordered_f32", groups, 32 * BLOCK_GROUPS, buffers, offsets, constants + [u32(per)])
         elsif block_mode.lanes?(node.size)
           groups = (node.size + BLOCK_GROUPS - 1) // BLOCK_GROUPS
-          dispatch_groups_at("block_matmul_lanes_f32", groups, 32 * BLOCK_GROUPS, buffers, offsets, constants)
+          dispatch_groups_at(lanes_kernel(w, k), groups, 32 * BLOCK_GROUPS, buffers, offsets, constants)
         else
           dispatch_at("block_matmul_f32", node.size, buffers, offsets, constants)
         end
@@ -540,6 +540,15 @@ module Tensomite
         return false
       end
       true
+    end
+
+    # Returns the lanes kernel `#block_mode` names for a product by *w*, whose
+    # rows hold *k* values: `Stream` falls back to `Loads` unless each row and
+    # its offset are whole 16-byte words.
+    private def lanes_kernel(w : Tensor, k : Int32) : String
+      return "block_matmul_lanes_f32" unless block_mode.loads? || block_mode.stream?
+      words = (w.dtype.bytes_for(k) % 16).zero? && (w.dtype.bytes_for(w.view.offset) % 16).zero?
+      block_mode.stream? && words ? "block_matmul_stream_f32" : "block_matmul_loads_f32"
     end
 
     # Returns the kernels' `Blocks` for a block-format tensor: its kind, the
