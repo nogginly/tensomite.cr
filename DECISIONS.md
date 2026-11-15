@@ -589,3 +589,13 @@ Two skills, training a model and fine-tuning one, ship in `.claude/skills/` and 
 ## DN: the fixed cost of a quantised product on Metal
 
 On the M5 Pro each of SmolLM2-1.7B's quantised products took about 13.8 µs plus its weight's bytes at 254 GB/s, which fits all five shapes to within 1 µs; with every op timed alone the GPU total was 101% of the batched wall time, so the cost is in the GPU's work, not the profiler's. Each product is two dispatches, and the first, quantising the activations, ran one thread per block: 64 threads for a row of 2,048, each reading its 32 values in turn. It now runs one SIMD group per block, a lane per value, with `simd_max` and `simd_sum`; the largest magnitude and an integer sum are exact in any order, so the bits are unchanged (decided). The per-kernel profile times the quantising as `Quantize`, apart from the product. A token then took 6.10 ms rather than 6.63, with the same bits; the quantising took about 3 µs, as long as an `Add`, and each product 7.4 µs plus its bytes at 250 GB/s. Quantising inside the product's kernel, which would save the dispatch, stays out: it was twice as slow (Decision DB).
+
+<a id="decision-dp"></a>
+## DP: what limits a quantised product on Metal
+
+A measurement first (decided): `bench/dispatch_metal.cr` timed, in the normal batched mode, a dependent `Add` at 1.6 µs and each quantised product at 5.9 µs plus its bytes at 252 GB/s on the M5 Pro; the per-kernel profile about doubles both. So the fixed cost was half dispatches and small, and the rate was the lever. Two measurement modes followed: `Stream`, which only reads each weight row as 16-byte words, ran SmolLM2-1.7B's products at 263–295 GB/s and a token in 5.36–5.43 ms against `Lanes`' 6.04–6.05. A first `Loads`, the lanes kernel's loads without its arithmetic, ran 20% slower than `Lanes`: its byte loop had a bound known only at run time, so it did not compile to the same loads.
+
+<a id="decision-dq"></a>
+## DQ: where the lanes kernel's time goes
+
+With `Loads`' byte counts fixed per format, and `StreamActivations` reading the activations beside `Stream`'s weight words, one run on the M5 Pro split the 0.62 ms a token between `Lanes` (6.05 ms) and `Stream` (5.43) (decided): the arithmetic 0.23 ms (`Lanes` against `Loads`, 5.82), the weights read a byte at a time from each lane's own block 0.30 ms (`Loads` against `StreamActivations`, 5.52), and the activations 0.09 ms. The per-kernel rates moved by up to 10% between runs, so modes are compared within one run.

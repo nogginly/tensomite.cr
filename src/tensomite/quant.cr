@@ -1,7 +1,7 @@
 module Tensomite
   # How a GPU divides the work of a quantised matmul (`Tensor#linear` with a
-  # block-format weight). Every mode but `Unordered` gives the host's bits;
-  # they differ only in speed.
+  # block-format weight). `Auto`, `Thread` and `Lanes` give the host's bits
+  # and differ only in speed; the others are for measurement only.
   enum BlockMatMulMode
     # Lanes when the product has fewer than `.lanes_below` outputs, which leave
     # one thread per output too few to fill the GPU, and threads otherwise.
@@ -15,6 +15,17 @@ module Tensomite
     # over its blocks and the lanes' sums are added in a tree, so the bits can
     # differ from the host's. It shows what adding in block order costs.
     Unordered
+    # For measurement only, on Metal: as `Lanes`, with the same loads, but the
+    # bytes added together rather than multiplied, so the result is meaningless.
+    # It shows what the arithmetic costs. Elsewhere, as `Lanes`.
+    Loads
+    # For measurement only, on Metal: each weight row read as 16-byte words
+    # and nothing else, so the result is meaningless. It shows how fast the
+    # weights stream. Elsewhere, as `Lanes`.
+    Stream
+    # For measurement only, on Metal: as `Stream`, also reading each block's
+    # activations, scale and d·Σq as `Lanes` does. Elsewhere, as `Lanes`.
+    StreamActivations
 
     # Returns the number of outputs below which `Auto` uses lanes. On the GB10,
     # lanes decode SmolLM2's 49,152-word head faster than threads too.
@@ -23,7 +34,7 @@ module Tensomite
     end
 
     # Returns the mode `TENSOMITE_BLOCK_MATMUL` names (`auto`, `thread`,
-    # `lanes` or `unordered`), or `Auto` without it, so that the modes can be timed against
+    # `lanes`, `unordered`, `loads`, `stream` or `stream_activations`), or `Auto` without it, so that the modes can be timed against
     # each other without rebuilding.
     def self.from_env : BlockMatMulMode
       ENV["TENSOMITE_BLOCK_MATMUL"]?.try { |name| parse?(name) } || Auto
@@ -38,9 +49,10 @@ module Tensomite
     end
 
     # Returns true when a product of *outputs* outputs runs on lanes, in block
-    # order or not.
+    # order or not, or on a measurement kernel shaped as lanes.
     def lanes?(outputs : Int32) : Bool
-      lanes? || unordered? || (auto? && outputs < BlockMatMulMode.lanes_below)
+      return false if thread?
+      !auto? || outputs < BlockMatMulMode.lanes_below
     end
   end
 

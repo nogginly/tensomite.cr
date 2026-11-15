@@ -51,6 +51,15 @@ private def bit_exact?(device : Device) : Bool
   DEVICES.includes?(device)
 end
 
+# Returns the modes in which *device* computes meaningless sums, for
+# measurement: Loads, Stream and StreamActivations on Metal.
+private def measurement_modes(device : Device) : Array(BlockMatMulMode)
+  {% if flag?(:darwin) && flag?(:aarch64) %}
+    return [BlockMatMulMode::Loads, BlockMatMulMode::Stream, BlockMatMulMode::StreamActivations] if device.is_a?(Metal)
+  {% end %}
+  [] of BlockMatMulMode
+end
+
 # Runs the block with *device*'s quantised matmuls in *mode*, where it has modes.
 private def with_block_mode(device : Device, mode : BlockMatMulMode, &) : Nil
   {% if flag?(:darwin) && flag?(:aarch64) %}
@@ -128,7 +137,8 @@ describe "Tensor#linear with block-format weights" do
   end
 
   GPUS.each do |gpu|
-    BlockMatMulMode.values.each do |mode|
+    measuring = measurement_modes(gpu)
+    (BlockMatMulMode.values - measuring).each do |mode|
       it "gives the host's sums on #{gpu.class} in #{mode} mode, over more blocks than lanes" do
         long = 1280
         xs, ws = random_values(3 * long, 4), random_values(37 * long, 5)
@@ -144,6 +154,18 @@ describe "Tensor#linear with block-format weights" do
             got.zip(expected) { |a, e| a.should be_close(e, 1e-2 * Math.max(1f32, e.abs)) }
           end
         end
+      end
+    end
+
+    measuring.each do |mode|
+      it "runs on #{gpu.class} in #{mode} mode, one sum per output" do
+        long = 1280
+        got = [] of Float32
+        with_block_mode(gpu, mode) do
+          weight = Tensor.from(random_values(37 * long, 5), [37, long], gpu).quantize(DType::Q4_0)
+          got = Tensor.from(random_values(3 * long, 4), [3, long], gpu).linear(weight).to_a(Float32)
+        end
+        got.size.should eq 3 * 37
       end
     end
 
