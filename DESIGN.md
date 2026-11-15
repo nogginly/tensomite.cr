@@ -483,6 +483,7 @@ The integer part can be added in any order without changing a bit; the sum over 
 > - Quantising the activations inside each product's kernel, to save a dispatch: every threadgroup quantised the whole row again, and the products took twice as long (Decision DB).
 > - On Metal, `__dp4a` emulated with shifts, exact float sums, 32 outputs a group, and padding against bank conflicts: each slower than the byte-at-a-time kernel. On CUDA, grouping 2, 4 or 8 outputs was no faster than one (Decisions CW and CX).
 > - 32 lanes per block, adding their products across the warp: exact, but five shuffles a lane per block halved decode on the GB10 (Decision CO).
+> - A measurement mode meant to make the lanes kernel's loads without its arithmetic ran 20% slower than the kernel itself: its loop over a block's bytes had a bound known only at run time, so it compiled to different loads. With the counts fixed it measured as intended (Decisions DP and DQ).
 > - On Metal, the lanes' sums added in a tree rather than in block order, or 4 outputs a SIMD group rather than 1: within 3% of the ordered kernel on SmolLM2-1.7B. About 14 µs of each product was a fixed cost outside the kernel's inner loop (Decisions DM and DN).
 
 ### CUDA

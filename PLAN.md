@@ -283,6 +283,8 @@ Recorded in full, with their reasoning and measurements, in [`DECISIONS.md`](DEC
 - [DL](DECISIONS.md#decision-dl): the subagent's standing brief (decided).
 - [DM](DECISIONS.md#decision-dm): skills, then Metal's quantised products (decided).
 - [DN](DECISIONS.md#decision-dn): the fixed cost of a quantised product on Metal (decided).
+- [DP](DECISIONS.md#decision-dp): what limits a quantised product on Metal (decided).
+- [DQ](DECISIONS.md#decision-dq): where the lanes kernel's time goes (decided).
 
 ## Risks
 
