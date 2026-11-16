@@ -619,3 +619,8 @@ Packed rows with attention per row (decided; a fused ragged attention can follow
 ## DU: where a step of many rows goes
 
 Profile a 64-row step before building a fused ragged attention (decided). On the 30M-parameter Llama shape, a step ran 3,180 dispatches, 2,560 of them per row: 512 attentions (one a row a layer), 1,024 rotations and 1,024 cache writes. On the M5 Pro the GPU was the limit: 17.8 ms of a 22.8 ms step waiting for it, against 4.8 ms of encoding and graph work; timed alone, attention took 12.3 ms, rotations 5.4 and writes 3.1, the products 2.2. On the GB10 the host was: 8.2 ms launching kernels and 4.9 ms building and scheduling the graph, against 4.0 ms waiting. So the per-row cost was about the same on both machines for different reasons, and the guess that the host set it held only on CUDA. Each per-row op does little work and pays its whole fixed cost: an attention of one query over about a hundred positions took 24 µs on Metal. Fewer, wider ops cut both costs.
+
+<a id="decision-dv"></a>
+## DV: fewer, wider ops for a step of many rows
+
+In stages, measured after each (decided): first the rotations, packed, then one cache buffer for every row with a write that places each row's keys and values at its own position, then a fused attention over every row. Each keeps every row's bits. The rotations come first, being elementwise and exact: a Llama now rotates every row's new queries and keys in one op each per layer, each token by the cosines and sines of its own position, gathered once per step (`RotaryEmbedding#angles`), rather than two ops per row per layer, which takes a 64-row step of 8 layers from 1,024 rotations to 16.

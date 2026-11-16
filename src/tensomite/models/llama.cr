@@ -117,8 +117,9 @@ module Tensomite
 
       # The block over several sequences' new positions packed together, each
       # segment's attention on its own cache (see `GroupedQueryAttention#forward`).
-      def forward(x : Tensor, segments : Array(CausalSelfAttention::Segment), rope : RotaryEmbedding) : Tensor
-        x = x + @self_attn.call(@input_layernorm.call(x), segments, rope)
+      def forward(x : Tensor, segments : Array(CausalSelfAttention::Segment), rope : RotaryEmbedding,
+                  angles : {Tensor, Tensor}) : Tensor
+        x = x + @self_attn.call(@input_layernorm.call(x), segments, rope, angles)
         x + @mlp.call(@post_attention_layernorm.call(x))
       end
 
@@ -282,8 +283,9 @@ module Tensomite
       total = ids.sum(&.size)
       x = Tensomite.scope("embedding") { @model.embed_tokens.call(Tensor.from(ids.flatten, [total], device).named("ids")) }
       masks = packed_masks(ids, caches)
+      angles = rope.angles(ids.zip(caches).flat_map { |row_ids, row_cache| Array.new(row_ids.size) { |i| row_cache.length + i } })
       Tensomite.scope("layers") do
-        @model.layers.each_with_index { |block, layer| x = block.call(x, segments(ids, caches, masks, layer), rope) }
+        @model.layers.each_with_index { |block, layer| x = block.call(x, segments(ids, caches, masks, layer), rope, angles) }
       end
       x = last_rows(x, ids) if last
       head(x)

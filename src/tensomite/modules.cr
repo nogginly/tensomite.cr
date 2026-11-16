@@ -295,6 +295,23 @@ module Tensomite
       @sin = Tensor.from(sin, [context, width], device).named("rope sin")
     end
 
+    # Returns the cosines and sines of *positions*, each `[positions.size, 1,
+    # width]`, to rotate a packed `[positions.size, heads, width]` with `#call`.
+    def angles(positions : Array(Int32)) : {Tensor, Tensor}
+      unless positions.all? { |position| 0 <= position < context }
+        raise ShapeError.new("rotary embeddings of context #{context} cannot rotate positions #{positions.minmax}")
+      end
+      ids = Tensor.from(positions, [positions.size], @cos.device).named("positions")
+      shape = [positions.size, 1, width]
+      {@cos.gather(ids).reshape(shape), @sin.gather(ids).reshape(shape)}
+    end
+
+    # Returns *x*, `[tokens, heads, width]`, each token rotated by its entry of
+    # *angles* (see `#angles`), as `#call` rotates it at its position.
+    def call(x : Tensor, angles : {Tensor, Tensor}) : Tensor
+      x.rope(*angles)
+    end
+
     # Returns *x*, `[..., length, width]`, its rows rotated as positions
     # `start...start + length`: `x · cos + rotate_half(x) · sin`.
     def call(x : Tensor, start : Int32 = 0) : Tensor
@@ -355,26 +372,35 @@ module Tensomite
     # several sequences packed one after another, each *segment* naming its
     # rows, its mask and its cache: what `#forward` gives each sequence alone,
     # with the projections run once for them all.
-    def forward(x : Tensor, segments : Array(CausalSelfAttention::Segment), rope : RotaryEmbedding) : Tensor
+    #
+    # *angles* are each packed position's cosines and sines (see
+    # `RotaryEmbedding#angles`), so that queries and keys are rotated in one op
+    # each for every segment.
+    def forward(x : Tensor, segments : Array(CausalSelfAttention::Segment), rope : RotaryEmbedding,
+                angles : {Tensor, Tensor}) : Tensor
       q, k, v = project(x)
+      total, head_width = x.shape[0], rope.width
+      q = rope.call(q.reshape([total, heads, head_width]), angles).reshape([total, heads * head_width])
+      k = rope.call(k.reshape([total, kv_heads, head_width]), angles).reshape([total, kv_heads * head_width])
       parts = segments.map do |segment|
         rows = {segment.start, segment.start + segment.count}
-        attend(q.slice(0, *rows), k.slice(0, *rows), v.slice(0, *rows), segment.count, segment.mask, rope, segment.cache)
+        attend(q.slice(0, *rows), k.slice(0, *rows), v.slice(0, *rows), segment.count, segment.mask, rope, segment.cache, rotated: true)
       end
       o_proj.call(parts.size == 1 ? parts.first : Tensor.cat(parts, 0))
     end
 
     # Returns the heads' joined attention, `[batch * length, heads * head
     # width]`, of projected queries, keys and values, steps 2 to 5 of `#forward`.
+    # With *rotated*, the queries and keys are rotated already.
     private def attend(q : Tensor, k : Tensor, v : Tensor, length : Int32, mask : Tensor, rope : RotaryEmbedding,
-                       cache : CausalSelfAttention::Cache?) : Tensor
+                       cache : CausalSelfAttention::Cache?, rotated : Bool = false) : Tensor
       rows = q.shape[0]
       batch, head_width, group = rows // length, rope.width, heads // kv_heads
       start = cache ? cache.length : 0
       q = split(q, batch, length, heads, head_width)
       k = split(k, batch, length, kv_heads, head_width)
       v = split(v, batch, length, kv_heads, head_width)
-      q, k = rope.call(q, start), rope.call(k, start)
+      q, k = rope.call(q, start), rope.call(k, start) unless rotated
       k, v = cache.append(k, v) if cache
       grouped = q.reshape([batch, kv_heads, group * length, head_width])
       masks = group == 1 ? mask : mask.expand([group] + mask.shape).reshape([group * length, mask.shape[1]])
