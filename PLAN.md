@@ -287,6 +287,7 @@ Recorded in full, with their reasoning and measurements, in [`DECISIONS.md`](DEC
 - [DP](DECISIONS.md#decision-dp): what limits a quantised product on Metal (decided).
 - [DQ](DECISIONS.md#decision-dq): where the lanes kernel's time goes (decided).
 - [DS](DECISIONS.md#decision-ds): release 0.4.0 for a training app's gaps (decided).
+- [DT](DECISIONS.md#decision-dt): batched decoding with a cache (decided).
 
 ## Risks
 
