@@ -54,6 +54,17 @@ describe "Llama's ops" do
     check_gradients([[2, 4], [4]]) { |(x, w)| x.rmsnorm(w) }
   end
 
+  it "rotates packed tokens by their own positions as it rotates rows from a start" do
+    xs = random_values(5 * 2 * 4, 7)
+    (DEVICES + GPUS).each do |device|
+      rope = RotaryEmbedding.new(4, context: 16, theta: 100.0, device: device)
+      packed = rope.call(tensor(device, [5, 2, 4], xs), rope.angles([3, 4, 5, 0, 1])).to_a(Float32)
+      first = rope.call(tensor(device, [5, 2, 4], xs).slice(0, 0, 3).permute([1, 0, 2]), start: 3)
+      second = rope.call(tensor(device, [5, 2, 4], xs).slice(0, 3, 5).permute([1, 0, 2]), start: 0)
+      packed.should eq Tensor.cat([first.permute([1, 0, 2]), second.permute([1, 0, 2])], 0).to_a(Float32)
+    end
+  end
+
   it "rotates pairs of features by position" do
     rope = RotaryEmbedding.new(4, context: 8, theta: 100.0)
     xs = random_values(3 * 4, 3)
