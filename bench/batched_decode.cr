@@ -7,10 +7,14 @@
 #     crystal run --release bench/batched_decode.cr                 # CPU
 #     crystal run --release bench/batched_decode.cr -- metal        # Metal
 #     crystal run --release bench/batched_decode.cr -- blas
+#     crystal run --release -Dcuda bench/batched_decode.cr -- cuda
 require "../src/tensomite"
 require "../src/tensomite/blas"
 {% if flag?(:darwin) && flag?(:aarch64) %}
   require "../src/tensomite/metal"
+{% end %}
+{% if flag?(:cuda) %}
+  require "../src/tensomite/cuda"
 {% end %}
 
 include Tensomite
@@ -27,6 +31,13 @@ device = case ARGV.first?
              Metal.default.as(Device)
            {% else %}
              abort "Metal needs macOS on Apple Silicon"
+           {% end %}
+         when "cuda"
+           {% if flag?(:cuda) %}
+             abort "no CUDA GPU" unless CUDA.available?
+             CUDA.default.as(Device)
+           {% else %}
+             abort "CUDA needs a build with -Dcuda"
            {% end %}
          else CPU.default.as(Device)
          end
