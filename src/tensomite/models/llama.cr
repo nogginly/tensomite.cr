@@ -115,6 +115,13 @@ module Tensomite
         x + @mlp.call(@post_attention_layernorm.call(x))
       end
 
+      # The block over several sequences' new positions packed together, each
+      # segment's attention on its own cache (see `GroupedQueryAttention#forward`).
+      def forward(x : Tensor, segments : Array(CausalSelfAttention::Segment), rope : RotaryEmbedding) : Tensor
+        x = x + @self_attn.call(@input_layernorm.call(x), segments, rope)
+        x + @mlp.call(@post_attention_layernorm.call(x))
+      end
+
       # Joins the projections that read the same input: queries, keys and
       # values, and the MLP's gate and up (see `Linear.merge`).
       def merge : Nil
@@ -266,6 +273,19 @@ module Tensomite
         @model.layers.each_with_index { |block, layer| x = block.call(x, mask, rope, cache.layers[layer]) }
       end
       x = x.slice(0, count - 1, count) if last
+      head(x)
+    end
+
+    # Returns the logits of several sequences' new positions, packed one after
+    # another, each after the positions in its cache, as `#logits` does each.
+    private def packed_logits(ids : Array(Array(Int32)), caches : Array(Cache), last : Bool) : Tensor
+      total = ids.sum(&.size)
+      x = Tensomite.scope("embedding") { @model.embed_tokens.call(Tensor.from(ids.flatten, [total], device).named("ids")) }
+      masks = packed_masks(ids, caches)
+      Tensomite.scope("layers") do
+        @model.layers.each_with_index { |block, layer| x = block.call(x, segments(ids, caches, masks, layer), rope) }
+      end
+      x = last_rows(x, ids) if last
       head(x)
     end
 

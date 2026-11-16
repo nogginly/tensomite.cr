@@ -427,6 +427,17 @@ bpe.encode("<|im_start|>user\nWhat is 12 + 345?")
 
 `model.forward_last(ids, cache)` is `forward` for the last position alone, `[1, vocab]`: the final norm and the head, the largest product, run on one row, as `generate` and `apps/server` use it. `generate` returns only the new tokens, and with `stop:` it ends after any of the given tokens, such as `<|endoftext|>`, which it returns last. Without a sampler it picks the likeliest token each time (greedy), so the output is always the same. With a `Sampler` it picks at random, in proportion to each token's probability, among the `top_k` likeliest tokens (all of them when `top_k` is 0, the default). A `temperature` above 1 makes unlikely tokens more likely to be picked, and below 1 less likely. The same seed gives the same text.
 
+**Many sequences at once.** A batch cache holds a row per sequence, each of its own length. Each call appends any number of tokens to each row, none for an idle row, and returns the logits of each active row's last position, in row order. The products run once for every row's tokens, so decoding 32 sequences together reads each weight once a step, not 32 times; attention runs per row on that row's own cache, so each row's logits are those it gets decoded alone, whatever else is in the batch, bit for bit on every device but `BLAS`. `reset(row)` empties a row for a new sequence and keeps its buffers.
+
+```crystal
+cache = model.new_batch_cache(rows: 64, capacity: 2048)
+logits = model.forward_last(appends, cache)   # appends[row] : Array(Int32), maybe empty → [active rows, vocab]
+cache.length(3)                               # positions row 3 holds
+cache.reset(3)                                # row 3 starts a new sequence
+```
+
+`model.forward(appends, cache)` gives every new position's logits instead, `[total, vocab]`, the rows' one after another. Masking and sampling stay with the caller, a row at a time.
+
 `GPT2` is a `Module`, and its parts have the names used in Hugging Face's file: `wte` and `wpe` (the token and position embeddings), `h.0` to `h.11` (the blocks, each with `ln_1`, `attn`, `ln_2` and `mlp`), and `ln_f`. So `model.named_params["h.0.attn.c_attn.weight"]` is that weight, and diagrams of the model use the same names.
 
 **Fine-tuning.** Called with a tensor of token ids `[batch, length]`, a GPT-2 runs each row as its own sequence from position 0, without a cache, and returns lazy logits `[batch * length, vocab]` to train with:

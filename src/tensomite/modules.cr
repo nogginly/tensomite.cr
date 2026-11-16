@@ -156,6 +156,12 @@ module Tensomite
         @values.try(&.slice(2, 0, length))
       end
 
+      # Empties the cache, keeping its buffers for the positions appended next.
+      def reset : Nil
+        @length = 0
+        @keys = @values = nil unless @capacity
+      end
+
       # :nodoc:
       def append(keys : Tensor, values : Tensor) : {Tensor, Tensor}
         if capacity = @capacity
@@ -180,6 +186,10 @@ module Tensomite
         Tensor.new(Node.new(buffer, shape, like.dtype, like.device), View.contiguous(shape))
       end
     end
+
+    # One sequence's share of a packed `#forward`: its *count* rows from
+    # *start*, its *mask*, `[count, positions]`, and its *cache*.
+    record Segment, start : Int32, count : Int32, mask : Tensor, cache : Cache
 
     getter heads : Int32
     getter c_attn : Linear
@@ -209,10 +219,28 @@ module Tensomite
     # With *dropout*, as in training, it applies to the attention weights and to
     # the projected output, as GPT-2's does.
     def forward(x : Tensor, mask : Tensor, cache : Cache? = nil, dropout : Dropout? = nil) : Tensor
-      rows, width = x.shape
-      length = mask.shape[0]
-      batch, head_width = rows // length, width // heads
       joined = c_attn.call(x)
+      output = c_proj.call(attend(joined, mask.shape[0], mask, cache, dropout))
+      dropout ? dropout.call(output) : output
+    end
+
+    # Returns the attention of *x*, `[total, width]`, the new positions of
+    # several sequences packed one after another, each *segment* naming its
+    # rows, its mask and its cache: what `#forward` gives each sequence alone,
+    # with the projections run once for them all.
+    def forward(x : Tensor, segments : Array(Segment)) : Tensor
+      joined = c_attn.call(x)
+      parts = segments.map do |segment|
+        attend(joined.slice(0, segment.start, segment.start + segment.count), segment.count, segment.mask, segment.cache)
+      end
+      c_proj.call(parts.size == 1 ? parts.first : Tensor.cat(parts, 0))
+    end
+
+    # Returns the heads' joined attention, `[batch * length, width]`, from
+    # *joined*, the queries, keys and values side by side.
+    private def attend(joined : Tensor, length : Int32, mask : Tensor, cache : Cache?, dropout : Dropout? = nil) : Tensor
+      rows, width = joined.shape[0], joined.shape[1] // 3
+      batch, head_width = rows // length, width // heads
       q, k, v = (0..2).map do |part|
         joined.slice(1, part * width, (part + 1) * width)
           .reshape([batch, length, heads, head_width]).permute([0, 2, 1, 3])
@@ -220,9 +248,7 @@ module Tensomite
       k, v = cache.append(k, v) if cache
       weights = q.matmul(k.transpose).softmax(scale: 1 / Math.sqrt(head_width), mask: mask)
       weights = dropout.call(weights) if dropout
-      attended = weights.matmul(v).permute([0, 2, 1, 3]).reshape([batch * length, width])
-      output = c_proj.call(attended)
-      dropout ? dropout.call(output) : output
+      weights.matmul(v).permute([0, 2, 1, 3]).reshape([batch * length, width])
     end
   end
 
@@ -321,11 +347,30 @@ module Tensomite
     #    op on a GPU while decoding (see `Tensor.attention`), and projects the
     #    heads' joined outputs back to the width.
     def forward(x : Tensor, mask : Tensor, rope : RotaryEmbedding, cache : CausalSelfAttention::Cache? = nil) : Tensor
-      rows = x.shape[0]
-      length = mask.shape[0]
+      q, k, v = project(x)
+      o_proj.call(attend(q, k, v, mask.shape[0], mask, rope, cache))
+    end
+
+    # Returns the attention of *x*, `[total, width]`, the new positions of
+    # several sequences packed one after another, each *segment* naming its
+    # rows, its mask and its cache: what `#forward` gives each sequence alone,
+    # with the projections run once for them all.
+    def forward(x : Tensor, segments : Array(CausalSelfAttention::Segment), rope : RotaryEmbedding) : Tensor
+      q, k, v = project(x)
+      parts = segments.map do |segment|
+        rows = {segment.start, segment.start + segment.count}
+        attend(q.slice(0, *rows), k.slice(0, *rows), v.slice(0, *rows), segment.count, segment.mask, rope, segment.cache)
+      end
+      o_proj.call(parts.size == 1 ? parts.first : Tensor.cat(parts, 0))
+    end
+
+    # Returns the heads' joined attention, `[batch * length, heads * head
+    # width]`, of projected queries, keys and values, steps 2 to 5 of `#forward`.
+    private def attend(q : Tensor, k : Tensor, v : Tensor, length : Int32, mask : Tensor, rope : RotaryEmbedding,
+                       cache : CausalSelfAttention::Cache?) : Tensor
+      rows = q.shape[0]
       batch, head_width, group = rows // length, rope.width, heads // kv_heads
       start = cache ? cache.length : 0
-      q, k, v = project(x)
       q = split(q, batch, length, heads, head_width)
       k = split(k, batch, length, kv_heads, head_width)
       v = split(v, batch, length, kv_heads, head_width)
@@ -334,7 +379,7 @@ module Tensomite
       grouped = q.reshape([batch, kv_heads, group * length, head_width])
       masks = group == 1 ? mask : mask.expand([group] + mask.shape).reshape([group * length, mask.shape[1]])
       attended = Tensor.attention(grouped, k, v, scale: 1 / Math.sqrt(head_width), mask: masks).reshape([batch, heads, length, head_width])
-      o_proj.call(attended.permute([0, 2, 1, 3]).reshape([rows, heads * head_width]))
+      attended.permute([0, 2, 1, 3]).reshape([rows, heads * head_width])
     end
 
     # Joins the query, key and value projections into one product (see
