@@ -1,4 +1,12 @@
 module Tensomite
+  # How `Tensor#cross_entropy` combines its rows' losses: their mean, their
+  # sum, or none, one loss per row.
+  enum Reduction
+    Mean
+    Sum
+    None
+  end
+
   struct Tensor
     # Returns the softmax along *axis*: `exp(x - max) / sum(exp(x - max))`.
     # Subtracting the maximum keeps `exp` from overflowing without changing the result.
@@ -37,22 +45,60 @@ module Tensomite
       shifted - shifted.exp.sum(axis, keepdims: true).log
     end
 
-    # Returns the mean cross-entropy of these `[n, classes]` logits against *targets*,
-    # one class index per row: the mean over rows of `-log_softmax[row, target]`.
+    # Returns the cross-entropy of these `[n, classes]` logits against *targets*,
+    # one class index per row: each row's loss is `-log_softmax[row, target]`.
+    #
+    # *reduction* gives their mean (the default), their sum, or, with `:none`,
+    # each row's loss as an `[n]` tensor, so that the caller can weight them:
+    # `(logits.cross_entropy(targets, reduction: :none) * weights).sum / n`.
+    # Rows whose target is *ignore_index* add nothing: they are left out of the
+    # sum and the mean's count, and their loss is 0 with `:none`. With every
+    # row ignored, the mean is NaN.
     #
     # The targets are read on the host to pick each row's entry, so *targets* is
     # realised when this is called.
-    def cross_entropy(targets : Tensor) : Tensor
+    #
+    # ```
+    # logits.cross_entropy(targets)                   # the mean, a scalar
+    # logits.cross_entropy(targets, reduction: :none) # [n]
+    # logits.cross_entropy(targets, ignore_index: -1) # the mean over rows not -1
+    # ```
+    def cross_entropy(targets : Tensor, reduction : Reduction = :mean, ignore_index : Int32? = nil) : Tensor
       raise ShapeError.new("cross_entropy needs [n, classes] logits, not #{shape}") unless ndim == 2
       rows, classes = shape
+      ids = target_ids(targets, rows, classes, ignore_index)
+      flat = log_softmax.reshape([rows * classes, 1])
+      return row_losses(flat, ids, classes, ignore_index) if reduction.none?
+      picks = [] of Int32
+      ids.each_with_index { |target, row| picks << row * classes + target unless target == ignore_index }
+      if picks.empty?
+        return Tensor.from([reduction.mean? ? Float32::NAN : 0f32], [] of Int32, device)
+      end
+      picked = flat.gather(Tensor.from(picks, [picks.size], device))
+      reduction.mean? ? -picked.mean : -picked.sum
+    end
+
+    # Returns *targets* read on the host, after checking that they are `I32`,
+    # one per row, and each a class index or *ignore_index*.
+    private def target_ids(targets : Tensor, rows : Int32, classes : Int32, ignore_index : Int32?) : Array(Int32)
       raise ShapeError.new("#{targets.size} targets for #{rows} rows") unless targets.size == rows
       raise DTypeError.new("targets must be I32, not #{targets.dtype}") unless targets.dtype.i32?
-      picks = targets.to_a(Int32).map_with_index do |target, row|
-        raise ShapeError.new("target #{target} out of range for #{classes} classes") unless 0 <= target < classes
-        row * classes + target
+      ids = targets.to_a(Int32)
+      ids.each do |target|
+        next if target == ignore_index || 0 <= target < classes
+        raise ShapeError.new("target #{target} out of range for #{classes} classes")
       end
-      picked = log_softmax.reshape([rows * classes, 1]).gather(Tensor.from(picks, [rows], device))
-      -picked.mean
+      ids
+    end
+
+    # Returns each row's `-log_softmax[row, target]` from *flat*, the
+    # log-softmax as one column, and 0 for rows whose target is *ignore_index*.
+    private def row_losses(flat : Tensor, ids : Array(Int32), classes : Int32, ignore_index : Int32?) : Tensor
+      rows = ids.size
+      picks = ids.map_with_index { |target, row| row * classes + (target == ignore_index ? 0 : target) }
+      losses = -flat.gather(Tensor.from(picks, [rows], device)).reshape([rows])
+      return losses unless ignore_index && ids.includes?(ignore_index)
+      losses * Tensor.from(ids.map { |target| target == ignore_index ? 0f32 : 1f32 }, [rows], device)
     end
 
     # Returns layer normalisation over the last axis: each row is shifted to mean 0,

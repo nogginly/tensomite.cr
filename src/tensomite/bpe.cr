@@ -1,4 +1,5 @@
 require "json"
+require "./errors"
 
 module Tensomite
   # GPT-2's byte-level byte-pair-encoding tokeniser.

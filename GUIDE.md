@@ -148,19 +148,19 @@ a.matmul(w, Tensor.from([0.5f32, -1f32], [2])).to_a(Float32)   # => [4.5, 4.0, 1
 
 ## Neural-network building blocks
 
-Method                                        |Use                                                                                                                                                
-----------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------
-`gelu`                                        |the GELU activation (tanh approximation), as in GPT-2                                                                                              
-`softmax(axis = -1)`                          |turns scores into probabilities that sum to 1                                                                                                      
-`softmax(scale: s, mask: m)`                  |the softmax of `x · s + m`, as attention takes it, in one fused op                                                                                 
-`log_softmax(axis = -1)`                      |the log of `softmax`, computed stably                                                                                                              
-`layernorm(weight, bias, eps = 1e-5)`         |normalises each row to mean 0 and variance 1, then scales and shifts                                                                               
-`rmsnorm(weight, eps = 1e-5)`                 |divides each row by its root mean square, then scales, as in Llama, in one fused op                                                                
-`silu`, `swiglu(up)`                          |SiLU, `x · sigmoid(x)`, and Llama's gate `silu(x) · up`, each one fused kernel                                                                     
-`rotate_half`, `rope(cos, sin)`               |swaps the last axis's halves and negates the first, `[x₁, x₂] → [-x₂, x₁]`; and `x · cos + rotate_half(x) · sin`, rotary embeddings in one fused op
-`cross_entropy(targets)`                      |the mean loss of `[n, classes]` scores against `[n]` `I32` class indices                                                                           
-`Tensor.causal_mask(rows, cols)`              |0 where a position may look, -∞ where it may not, for attention                                                                                    
-`Tensor.attention(q, k, v, scale: s, mask: m)`|`softmax(q · kᵀ · s + m) · v`; on a GPU, for decoding's few rows, one fused op whose scores stay on the GPU                                        
+Method                                             |Use                                                                                                                                                                            
+---------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+`gelu`                                             |the GELU activation (tanh approximation), as in GPT-2                                                                                                                          
+`softmax(axis = -1)`                               |turns scores into probabilities that sum to 1                                                                                                                                  
+`softmax(scale: s, mask: m)`                       |the softmax of `x · s + m`, as attention takes it, in one fused op                                                                                                             
+`log_softmax(axis = -1)`                           |the log of `softmax`, computed stably                                                                                                                                          
+`layernorm(weight, bias, eps = 1e-5)`              |normalises each row to mean 0 and variance 1, then scales and shifts                                                                                                           
+`rmsnorm(weight, eps = 1e-5)`                      |divides each row by its root mean square, then scales, as in Llama, in one fused op                                                                                            
+`silu`, `swiglu(up)`                               |SiLU, `x · sigmoid(x)`, and Llama's gate `silu(x) · up`, each one fused kernel                                                                                                 
+`rotate_half`, `rope(cos, sin)`                    |swaps the last axis's halves and negates the first, `[x₁, x₂] → [-x₂, x₁]`; and `x · cos + rotate_half(x) · sin`, rotary embeddings in one fused op                            
+`cross_entropy(targets, reduction:, ignore_index:)`|the loss of `[n, classes]` scores against `[n]` `I32` class indices: their mean, by default, `:sum`, or `:none` for each row's; rows whose target is `ignore_index` add nothing
+`Tensor.causal_mask(rows, cols)`                   |0 where a position may look, -∞ where it may not, for attention                                                                                                                
+`Tensor.attention(q, k, v, scale: s, mask: m)`     |`softmax(q · kᵀ · s + m) · v`; on a GPU, for decoding's few rows, one fused op whose scores stay on the GPU                                                                    
 
 ```crystal
 logits = Tensor.from([1, 2, 3].map(&.to_f32), [1, 3])
@@ -444,6 +444,13 @@ loss = model.call(inputs, dropout: Dropout.new(0.1, seed: step.to_u64)).cross_en
 ```
 
 `x.dropout(0.1, seed: 42_u64)` applies it to any `F32` tensor. The same seed gives the same mask on every device, and gradients flow through the same mask.
+
+To train on some tokens only, such as a reply and not the prompt before it, give the others a target of `-1` and pass `ignore_index: -1`: they add nothing to the loss, and the mean is over the tokens kept. To weight each token, as a policy gradient weights by advantage, take each row's loss and reduce it yourself; it costs one value a token, not a row of the vocabulary:
+
+```crystal
+losses = logits.cross_entropy(targets, reduction: :none)  # [n]
+loss = (losses * advantages).sum / losses.size            # advantages [n], F32
+```
 
 `bench/train_gpt2.cr` fine-tunes GPT-2 small on a text file for a few steps and reports the cost of a step; `apps/finetune` runs a whole fine-tune, with checkpoints, validation and early stopping, and exports a model `apps/server` serves. Fine-tuning keeps a gradient and AdamW's `m` and `v` beside every weight, so GPT-2 small needs about 2 GB for them in F32, before activations.
 
