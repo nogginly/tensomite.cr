@@ -599,3 +599,13 @@ A measurement first (decided): `bench/dispatch_metal.cr` timed, in the normal ba
 ## DQ: where the lanes kernel's time goes
 
 With `Loads`' byte counts fixed per format, and `StreamActivations` reading the activations beside `Stream`'s weight words, one run on the M5 Pro split the 0.62 ms a token between `Lanes` (6.05 ms) and `Stream` (5.43) (decided): the arithmetic 0.23 ms (`Lanes` against `Loads`, 5.82), the weights read a byte at a time from each lane's own block 0.30 ms (`Loads` against `StreamActivations`, 5.52), and the activations 0.09 ms. The per-kernel rates moved by up to 10% between runs, so modes are compared within one run.
+
+<a id="decision-do"></a>
+## DO: readiness for porting autoresearch
+
+A milestone, M13, takes the library's correctness gaps for a Crystal port of `karpathy/autoresearch`: optimizer groups and a hook for grouped updates, elementwise helpers, per-token cross-entropy, RMSNorm without a weight, a configurable BPE pattern, and the compile time of an app (decided). Its exit is the port's model and optimizer matching fixtures from the PyTorch original on CPU, CUDA and Metal, and a scaled-down run inside its time budget. 64-bit sizes, fused attention for training and BF16 compute go to a later milestone on scale: at 16 sequences of 2,048 tokens a micro-batch fits under 2 GiB, and composite attention gives the same answer. The port's data tools and the app itself are apps, not the milestone.
+
+<a id="decision-ds"></a>
+## DS: release 0.4.0 for a training app's gaps
+
+A training app built on tensomite found five gaps (decided: 0.4.0 holds two, then 0.5.0 batched decoding). 0.4.0: `bpe.cr` compiles when required alone, and `cross_entropy` gains `reduction:` (`:mean`, `:sum` or `:none`, each row's loss) and `ignore_index:`, which masks rows out of the sum and the mean's count. Weighting is the caller's, on `:none`'s `[n]` losses, since a weighted mean that divides by the weights' sum is wrong for advantages that sum to about zero; it replaces a dense `[positions, vocab]` mask, about 270 MB a step at a vocabulary of 8k and 16 × 512 tokens. Next: batched decoding with a cache (0.5.0), then saving quantised weights as GGUF. Tokeniser training stays outside the library for now. This part is also M13's per-token cross-entropy; the targets are still read on the host, which costs little, since the graph is not yet running when the loss is built.

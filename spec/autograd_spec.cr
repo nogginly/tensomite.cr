@@ -50,6 +50,12 @@ describe "Tensomite.grad" do
     check_gradients([[2, 4]], &.first.gelu)
     check_gradients([[2, 4], [4], [4]]) { |(x, w, b)| x.layernorm(w, b) }
     check_gradients([[3, 4]]) { |(x)| x.cross_entropy(Tensor.from([1, 3, 0], [3], x.device)) }
+    check_gradients([[3, 4]]) { |(x)| x.cross_entropy(Tensor.from([1, 3, 0], [3], x.device), reduction: :sum) }
+    check_gradients([[3, 4]]) do |(x)|
+      weights = Tensor.from([0.5f32, -2f32, 1.5f32], [3], x.device)
+      (x.cross_entropy(Tensor.from([1, 3, 0], [3], x.device), reduction: :none) * weights).sum
+    end
+    check_gradients([[3, 4]]) { |(x)| x.cross_entropy(Tensor.from([1, -1, 0], [3], x.device), ignore_index: -1) }
   end
 
   it "accumulates gradients from every use of a tensor" do
