@@ -288,6 +288,7 @@ Recorded in full, with their reasoning and measurements, in [`DECISIONS.md`](DEC
 - [DQ](DECISIONS.md#decision-dq): where the lanes kernel's time goes (decided).
 - [DS](DECISIONS.md#decision-ds): release 0.4.0 for a training app's gaps (decided).
 - [DT](DECISIONS.md#decision-dt): batched decoding with a cache (decided).
+- [DU](DECISIONS.md#decision-du): where a step of many rows goes (decided).
 
 ## Risks
 
