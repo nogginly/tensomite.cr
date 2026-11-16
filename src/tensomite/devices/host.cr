@@ -128,6 +128,7 @@ module Tensomite
       in Op::Copy         then copy(T, node, dst)
       in Op::Cat          then cat(T, node, dst)
       in Op::Write        then copy_into(T, node.srcs.last, node.source_view || raise(Error.new("write needs a region")), dst)
+      in Op::WriteRows    then write_rows(T, node, dst)
       in Op::Gather       then gather(T, node, dst)
       in Op::MatMul       then matmul(T, node, dst)
       in Op::BlockMatMul  then block_matmul(node, Slice.new(dst.to_unsafe.as(Float32*), dst.size))
@@ -573,6 +574,20 @@ module Tensomite
         base = run_index * run
         pr, ps = region.offset_of(base), src.view.offset_of(base)
         run.times { |j| dst[pr + j * sr] = xs[ps + j * ss] }
+      end
+    end
+
+    # Copies each token of source 1 into its row and position of *dst*, the
+    # buffer of source 0, as its slot in source 2 says (see `Op::WriteRows`).
+    private def write_rows(type : T.class, node : Node, dst : Slice(T)) : Nil forall T
+      value, slots = node.srcs[1], node.srcs[2]
+      heads, capacity, width = node.shape[1], node.shape[2], node.shape[3]
+      xs, ids = elements(T, value), elements(Int32, slots)
+      value.size.times do |i|
+        token, rest = i.divmod(heads * width)
+        head, column = rest.divmod(width)
+        row, position = ids[slots.view.offset_of(token)].divmod(capacity)
+        dst[((row * heads + head) * capacity + position) * width + column] = xs[value.view.offset_of(i)]
       end
     end
 

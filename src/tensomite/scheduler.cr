@@ -33,7 +33,7 @@ module Tensomite
       readers = release ? count_readers(order, roots) : nil
       order.each do |node|
         srcs = node.srcs
-        buffer = node.op == Op::Write ? srcs.first.node.buffer! : node.device.alloc(node.bytesize)
+        buffer = node.op.try(&.in_place?) ? srcs.first.node.buffer! : node.device.alloc(node.bytesize)
         node.device.execute(node, buffer)
         node.realized(buffer)
         readers.try { |counts| release_read(srcs, counts) }
@@ -45,13 +45,13 @@ module Tensomite
     end
 
     # Returns, for each node of *order* that may be released, the number of
-    # times nodes of *order* read it. Roots, `Write` nodes and their targets are
+    # times nodes of *order* read it. Roots, in-place writes and their targets are
     # left out, so they are never released.
     private def self.count_readers(order : Array(Node), roots : Array(Node)) : Hash(Node, Int32)
       counts = order.to_h { |node| {node, 0} }
       roots.each { |root| counts.delete(root) }
       order.each do |node|
-        if node.op == Op::Write
+        if node.op.try(&.in_place?)
           counts.delete(node)
           counts.delete(node.srcs.first.node)
         end

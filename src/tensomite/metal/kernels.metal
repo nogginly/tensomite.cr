@@ -77,6 +77,26 @@ kernel void copy_into_f32(device const float* src [[buffer(0)]],
     dst[offset_of(vd, i)] = src[offset_of(vs, i)];
 }
 
+// WriteRows: element i of src, [tokens, heads, width], into dst, [rows, heads,
+// capacity, width], at its token's row and position, slot / capacity and slot
+// % capacity.
+kernel void write_rows_f32(device const float* src [[buffer(0)]],
+                           device const int* slots [[buffer(1)]],
+                           device float* dst [[buffer(2)]],
+                           constant View& vs [[buffer(3)]],
+                           constant View& vslots [[buffer(4)]],
+                           constant uint& heads [[buffer(5)]],
+                           constant uint& capacity [[buffer(6)]],
+                           constant uint& width [[buffer(7)]],
+                           constant uint& n [[buffer(8)]],
+                           uint i [[thread_position_in_grid]]) {
+    if (i >= n) return;
+    uint token = i / (heads * width), head = (i / width) % heads, column = i % width;
+    uint slot = uint(slots[offset_of(vslots, token)]);
+    uint row = slot / capacity, position = slot % capacity;
+    dst[((row * heads + head) * capacity + position) * width + column] = src[offset_of(vs, i)];
+}
+
 // Reductions fold each output's run of `run` consecutive logical indices of `v`.
 //
 // The run is cut into chunks of REDUCE_CHUNK at fixed offsets. Each thread of an

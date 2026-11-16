@@ -96,6 +96,16 @@ module Tensomite
     # the node's buffer is source 0's, and every other element keeps its value.
     # See `Tensor#write`.
     Write
+    # Source 1's tokens, `[tokens, heads, width]`, copied in place into source
+    # 0, `[rows, heads, capacity, width]`: token `t` into row `slot / capacity`
+    # at position `slot % capacity`, for slot `t` of source 2, `I32`. As with
+    # `Write`, the node's buffer is source 0's. See `Tensor#write_rows`.
+    WriteRows
+
+    # Returns true for the ops that write into their first source's buffer.
+    def in_place? : Bool
+      write? || write_rows?
+    end
   end
 
   # Which elements a `Dropout` node keeps: element *i* is kept when

@@ -117,9 +117,9 @@ module Tensomite
 
       # The block over several sequences' new positions packed together, each
       # segment's attention on its own cache (see `GroupedQueryAttention#forward`).
-      def forward(x : Tensor, segments : Array(CausalSelfAttention::Segment), rope : RotaryEmbedding,
-                  angles : {Tensor, Tensor}) : Tensor
-        x = x + @self_attn.call(@input_layernorm.call(x), segments, rope, angles)
+      def forward(x : Tensor, pack : CausalSelfAttention::Pack, rope : RotaryEmbedding, angles : {Tensor, Tensor},
+                  cache : CausalSelfAttention::SharedCache) : Tensor
+        x = x + @self_attn.call(@input_layernorm.call(x), pack, rope, angles, cache)
         x + @mlp.call(@post_attention_layernorm.call(x))
       end
 
@@ -279,13 +279,13 @@ module Tensomite
 
     # Returns the logits of several sequences' new positions, packed one after
     # another, each after the positions in its cache, as `#logits` does each.
-    private def packed_logits(ids : Array(Array(Int32)), caches : Array(Cache), last : Bool) : Tensor
+    private def packed_logits(ids : Array(Array(Int32)), pasts : Array(Int32), pack : CausalSelfAttention::Pack,
+                              cache : BatchCache, last : Bool) : Tensor
       total = ids.sum(&.size)
       x = Tensomite.scope("embedding") { @model.embed_tokens.call(Tensor.from(ids.flatten, [total], device).named("ids")) }
-      masks = packed_masks(ids, caches)
-      angles = rope.angles(ids.zip(caches).flat_map { |row_ids, row_cache| Array.new(row_ids.size) { |i| row_cache.length + i } })
+      angles = rope.angles(ids.zip(pasts).flat_map { |row_ids, past| Array.new(row_ids.size) { |i| past + i } })
       Tensomite.scope("layers") do
-        @model.layers.each_with_index { |block, layer| x = block.call(x, segments(ids, caches, masks, layer), rope, angles) }
+        @model.layers.each_with_index { |block, layer| x = block.call(x, pack, rope, angles, cache.layers[layer]) }
       end
       x = last_rows(x, ids) if last
       head(x)

@@ -62,7 +62,7 @@ module Tensomite
       Op::Exp => "exp_f32", Op::Log => "log_f32", Op::Tanh => "tanh_f32", Op::Sqrt => "sqrt_f32",
       Op::Copy => "copy_f32",
     }
-    private OTHER    = %w[copy_into_f32 sum_f32 max_f32 sum_short_f32 max_short_f32 gather_f32 fill_zero_f32 scatter_add_f32 scatter_add_column_f32 unview_f32 matmul_f32 matmul_split_f32 matmul_tiled_chunks_64x64_f32 matmul_chunk_sums_f32 matmul_tiled_32x32_f32 matmul_tiled_64x64_f32 matmul_tiled_32x64_f32 dropout_f32 softmax_f32 softmax_scaled_f32 softmax_grad_f32 log_softmax_grad_f32 log_softmax_f32 layernorm_f32 layernorm_grad_f32 rmsnorm_f32 rope_f32 attention_f32 gather_blocks_f32 quantize_rows_q8_f32 block_matmul_f32 block_matmul_lanes_f32 block_matmul_loads_f32 block_matmul_stream_f32 block_matmul_stream_activations_f32]
+    private OTHER    = %w[copy_into_f32 write_rows_f32 sum_f32 max_f32 sum_short_f32 max_short_f32 gather_f32 fill_zero_f32 scatter_add_f32 scatter_add_column_f32 unview_f32 matmul_f32 matmul_split_f32 matmul_tiled_chunks_64x64_f32 matmul_chunk_sums_f32 matmul_tiled_32x32_f32 matmul_tiled_64x64_f32 matmul_tiled_32x64_f32 dropout_f32 softmax_f32 softmax_scaled_f32 softmax_grad_f32 log_softmax_grad_f32 log_softmax_f32 layernorm_f32 layernorm_grad_f32 rmsnorm_f32 rope_f32 attention_f32 gather_blocks_f32 quantize_rows_q8_f32 block_matmul_f32 block_matmul_lanes_f32 block_matmul_loads_f32 block_matmul_stream_f32 block_matmul_stream_activations_f32]
     private OPTIONAL = %w[matmul_atomic_f32 block_matmul_unordered_f32]
     private COLS     = 32
     # SIMD groups in each threadgroup of a quantised matmul on lanes.
@@ -379,7 +379,7 @@ module Tensomite
       case node.op
       when Op::Sum, Op::Max                                                                                                then encode_reduce(node, output)
       when Op::Cat                                                                                                         then encode_cat(node, output)
-      when Op::Write                                                                                                       then encode_write(node, output)
+      when Op::Write, Op::WriteRows                                                                                        then encode_write(node, output)
       when Op::Gather, Op::ScatterAdd                                                                                      then encode_rows(node, output)
       when Op::Unview                                                                                                      then return encode_unview(node, output)
       when Op::MatMul                                                                                                      then encode_matmul(node, output)
@@ -586,9 +586,17 @@ module Tensomite
 
     # Write: one thread per element written, into the target's own buffer.
     private def encode_write(node : Node, output : MetalBuffer) : Nil
+      return encode_write_rows(node, output) if node.op.try(&.write_rows?)
       value = node.srcs.last
       region = node.source_view || raise Error.new("write needs a region")
       dispatch("copy_into_f32", value.size, [mtl(value), output.mtl], [view_args(value.view), view_args(region), u32(value.size)])
+    end
+
+    # WriteRows: one thread per element written.
+    private def encode_write_rows(node : Node, output : MetalBuffer) : Nil
+      value, slots = node.srcs[1], node.srcs[2]
+      dispatch("write_rows_f32", value.size, [mtl(value), mtl(slots), output.mtl],
+        [view_args(value.view), view_args(slots.view), u32(node.shape[1]), u32(node.shape[2]), u32(node.shape[3]), u32(value.size)])
     end
 
     # Gather, one thread per output element, and ScatterAdd, one thread per output

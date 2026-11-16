@@ -168,8 +168,8 @@ module Tensomite
         end
       in Op::GreaterEqual
         [nil, nil] of Tensor?
-      in Op::Write
-        raise Error.new("write has no gradient")
+      in Op::Write, Op::WriteRows
+        raise Error.new("in-place writes have no gradient")
       in Nil
         raise Error.new("leaf nodes have no sources")
       end
