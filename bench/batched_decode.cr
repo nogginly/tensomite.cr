@@ -1,7 +1,8 @@
 # Times batched decoding (`Generative#forward_last` over a `BatchCache`)
 # against the number of rows, on a Llama-shaped model of about 20M parameters
 # with random weights: each row is prefilled with a prompt of its own length,
-# then decodes one token a step. Tokens a second count every row's token.
+# then decodes one token a step. Tokens a second count every row's token; the
+# last column compares a step with decoding the rows one after another.
 #
 #     crystal run --release bench/batched_decode.cr                 # CPU
 #     crystal run --release bench/batched_decode.cr -- metal        # Metal
@@ -15,7 +16,7 @@ require "../src/tensomite/blas"
 include Tensomite
 
 ROWS   = [1, 8, 32, 64]
-STEPS  = 32
+STEPS  = 8
 CONFIG = Llama::Config.new(layers: 8, heads: 8, kv_heads: 8, width: 512, hidden: 1408, head_width: 64,
   context: 512, vocab: 8192)
 
@@ -32,8 +33,9 @@ device = case ARGV.first?
 model = Llama.new(CONFIG, Builder.new(rng: Random.new(1), device: device)).merge_projections
 puts "#{(model.params.sum(&.value.size) / 1e6).round(1)}M parameters on #{device.class}"
 puts
-puts "rows|ms a step|tokens/s"
-puts "----|---------|--------"
+puts "rows|ms a step|tokens/s|against one row at a time"
+puts "----|---------|--------|--------------------------"
+single = 0.0
 ROWS.each do |rows|
   cache = model.new_batch_cache(rows, capacity: 256)
   prompts = Array.new(rows) { |row| Array.new(16 + 7 * (row % 9)) { |i| (row * 31 + i) % CONFIG.vocab } }
@@ -43,5 +45,6 @@ ROWS.each do |rows|
   start = Time.instant
   STEPS.times { model.forward_last(step, cache) }
   seconds = (Time.instant - start).total_seconds
-  puts "#{rows}|#{(seconds * 1000 / STEPS).round(2)}|#{(rows * STEPS / seconds).round(0).to_i}"
+  single = seconds if rows == 1
+  puts "#{rows}|#{(seconds * 1000 / STEPS).round(2)}|#{(rows * STEPS / seconds).round(0).to_i}|#{(single * rows / seconds).round(1)}×"
 end
