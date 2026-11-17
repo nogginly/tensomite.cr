@@ -60,6 +60,21 @@ describe "Server::Engine chatting" do
     completion.prompt_tokens.should eq ids.size
   end
 
+  it "serves a GPT-2 directory's model.gguf, quantised, in place of its safetensors" do
+    gpt2 = "#{__DIR__}/../../../spec/fixtures/tiny_gpt2"
+    dir = File.tempname("quantised")
+    Dir.mkdir_p(dir)
+    %w[vocab.json merges.txt].each { |name| FileUtils.cp(File.join(gpt2, name), File.join(dir, name)) }
+    quantised = GPT2.load(File.join(gpt2, "model.safetensors"), heads: 4).quantize(DType::Q8_0, embeddings: true)
+    quantised.save_gguf(File.join(dir, "model.gguf"))
+    served = Server::Engine.load(dir, nil, CPU.default)
+    request = Server::Request.new("The quick brown fox", max_tokens: 8, temperature: 0.0)
+    plain = Server::Engine.new(quantised, BPE.from_files(File.join(dir, "vocab.json"), File.join(dir, "merges.txt")), "plain")
+    served.complete(request).text.should eq plain.complete(request).text
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
   it "refuses to chat with a model whose tokeniser lacks ChatML's tokens" do
     gpt2 = Server::Engine.load("#{__DIR__}/../../../spec/fixtures/tiny_gpt2", 4, CPU.default)
     gpt2.chat?.should be_false

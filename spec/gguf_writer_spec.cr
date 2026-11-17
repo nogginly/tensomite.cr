@@ -76,3 +76,17 @@ describe "Module#save and #load with GGUF" do
     File.delete?(path) if path
   end
 end
+
+describe "GPT2#save_gguf and GPT2.load of a GGUF file" do
+  it "reads a quantised GPT-2 back, heads included, with the same logits" do
+    path = scratch("gpt2.gguf")
+    model = GPT2.load("#{__DIR__}/fixtures/tiny_gpt2/model.safetensors", heads: 4).quantize(DType::Q8_0, embeddings: true)
+    model.save_gguf(path)
+    loaded = GPT2.load(path)
+    loaded.config.should eq model.config
+    ids = [1, 2, 3, 4]
+    loaded.forward(ids, loaded.new_cache).to_a(Float32).should eq model.forward(ids, model.new_cache).to_a(Float32)
+  ensure
+    File.delete?(path) if path
+  end
+end

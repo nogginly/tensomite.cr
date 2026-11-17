@@ -41,6 +41,17 @@ File or directory         |What it is
 `model/`                  |the weights at the end, the same way                                                                               
 `log.txt`                 |the lines printed, appended across resumes                                                                         
 
+## A smaller model to serve
+
+With `--quantize Q8_0`, each export also writes `model.gguf` beside `model.safetensors`: the same weights quantised, about a quarter of the size, with the attention heads in its metadata. `apps/server` serves a directory's `model.gguf` when it has one. The safetensors file stays, for resuming or fine-tuning further, and the model being trained is never quantised: the export reads its weights back and quantises the copy.
+
+```sh
+bin/release/finetune --out runs/mine --data my-text.txt --steps 2000 --quantize Q8_0
+bin/release/server --model runs/mine/best                # serves best/model.gguf
+```
+
+At Q8_0 GPT-2's predictions stay close to F32's; Q4_0 is about a seventh of the size, at more cost to quality (see "Quantised models" in `GUIDE.md` to measure it with `bench/perplexity.cr`).
+
 ## Resuming exactly
 
 A checkpoint holds the weights, AdamW's `m` and `v`, and the step. The rest of what decides the next step is already fixed. The batch of step *n* comes from a generator seeded with the run's seed and *n*, and so does its dropout, so no generator state needs saving. The learning rate is a function of the step and the settings. The text is the saved `tokens.bin`, not the text file, which may since have changed. So on one device, a run resumed from a checkpoint takes the same steps, to the bit, as one that never stopped; the specs check this. Each checkpoint is written to `checkpoint.new/` and then swapped in, so an interruption leaves one whole checkpoint.
@@ -59,6 +70,7 @@ Option                          |Default         |Meaning
 `--eval-every`, `--eval-batches`|100, 8          |steps between validations, and batches in each                                         
 `--patience`                    |0               |validations without a new best before stopping; 0 never stops early                    
 `--prompt`                      |a newline       |what each validation's sample continues                                                
+`--quantize`                    |none            |also export `model.gguf` in this block format, `Q8_0`, `Q4_0` or `Q4_1`                
 
 **How long a run takes.** GPT-2 small at batch 8 × 256 trains at about 5,000 tokens/s on a GB10 and 2,700 on an M5 Pro, so a night is roughly 150M and 75M tokens. A small text is seen many times over: Tiny Shakespeare's 300K tokens would pass about 1,200 times in a night on the GB10. Set `--patience` so the run stops when validation stops improving, rather than memorising the text. On Tiny Shakespeare with GPT-2 small, the best validation loss came at step 200 without dropout and at step 500 with 0.1, which also kept validation loss nearly level for hundreds of steps after its best.
 

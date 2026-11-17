@@ -527,6 +527,8 @@ model.quantize(DType::Q8_0, embeddings: true).save("package/model.gguf", {"sourc
 model = Llama.new(config, Builder.new).load("package/model.gguf")
 ```
 
+A GPT-2 has its own pair, which keeps its attention heads in the file's metadata, so nothing else is needed to read it back: `model.save_gguf(path)` and `GPT2.load(path)`. `apps/finetune --quantize Q8_0` exports one beside the safetensors weights, and `apps/server` serves it.
+
 `bench/perplexity.cr` measures what quantisation costs. With `--reference`, it also reports the KL divergence of the quantised model's predictions from the unquantised model's. That is the better measure: on a text a model is too sure of, noise that softens its predictions lowers perplexity. Quantised GPT-2 scores *better* than F32 on Shakespeare for that reason. Some results, from 16 windows of 128 tokens of Shakespeare:
 
 Model                                      |Perplexity|KL from F32, nats/token

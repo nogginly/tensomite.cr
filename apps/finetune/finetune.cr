@@ -38,6 +38,10 @@ OptionParser.parse do |parser|
   parser.separator "\nFor a new run:"
   parser.on("--model DIR", "Pretrained GPT-2 (#{settings.model})") { |dir| settings.model = dir }
   parser.on("--heads N", "Attention heads (n_head in the model's config.json)") { |value| settings.heads = value.to_i }
+  parser.on("--quantize TYPE", "Also export model.gguf in this block format: Q8_0, Q4_0 or Q4_1") do |name|
+    abort "--quantize takes Q8_0, Q4_0 or Q4_1, not #{name}" unless Tensomite::DType.parse?(name).try(&.block?)
+    settings.quantize = name
+  end
   parser.on("--data PATH", "Text to fine-tune on (#{settings.data})") { |path| settings.data = path }
   parser.on("--batch N", "Sequences per step (#{settings.batch})") { |value| settings.batch = value.to_i }
   parser.on("--context N", "Tokens per sequence (#{settings.context})") { |value| settings.context = value.to_i }

@@ -8,7 +8,8 @@
 #
 # A GPT-2 directory holds `model.safetensors`, `vocab.json` and `merges.txt`, as
 # `scripts/fetch_gpt2.sh` downloads them or as tensomite saves a fine-tuned
-# GPT-2; a Llama-family one holds `config.json`, `model.safetensors` and
+# GPT-2, and may hold a quantised `model.gguf` too, which is then served; a
+# Llama-family one holds `config.json`, `model.safetensors` and
 # `tokenizer.json`, as `scripts/fetch_smollm2.sh` downloads them. See
 # `apps/server/README.md` for the HTTP API. Run with `--help` for the options.
 require "option_parser"

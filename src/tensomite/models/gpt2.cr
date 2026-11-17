@@ -68,8 +68,24 @@ module Tensomite
 
     # Returns the model in the safetensors file at *path*, with *heads* attention
     # heads (12 for GPT-2 small), its weights on *device*.
+    #
+    # A *path* ending in `.gguf` loads a GGUF file as `Module#save` writes one,
+    # quantised weights included, with *heads* from its `gpt2.heads` metadata
+    # when it has some (see `#save_gguf`).
     def self.load(path : String, heads : Int32 = 12, device : Device = CPU.default) : GPT2
+      return new(GGUF.open(path), heads, device) if path.ends_with?(".gguf")
       new(SafeTensors.open(path), heads, device)
+    end
+
+    # Returns the model in *file*, a GGUF file as `#save_gguf` writes one.
+    # Sizes other than *heads* come from the weight shapes, and *heads* from the
+    # file's `gpt2.heads` metadata when it has some.
+    def self.new(file : GGUF, heads : Int32, device : Device) : GPT2
+      vocab, width = file.entries["wte.weight"].shape
+      context = file.entries["wpe.weight"].shape[0]
+      layers = (0..).index! { |i| !file.has_key?("h.#{i}.ln_1.weight") }
+      heads = file.metadata["gpt2.heads"]?.try(&.as_s.to_i) || heads
+      new(Config.new(layers, heads, width, context, vocab), Builder.new(device: device, init: Init.placeholder)).load(file)
     end
 
     # Returns the model from *weights*, named as by Hugging Face with or without the
@@ -90,6 +106,18 @@ module Tensomite
       @wpe = build.embedding(config.context, config.width)
       @h = Array.new(config.layers) { Block.new(config.width, config.heads, build) }
       @ln_f = build.layernorm(config.width)
+    end
+
+    # Writes the model to a GGUF file at *path*, quantised weights as they are,
+    # with its heads as `gpt2.heads` metadata, so that `.load` needs nothing
+    # else to read it back.
+    #
+    # ```
+    # model.quantize(DType::Q8_0, embeddings: true).save_gguf("best/model.gguf")
+    # ```
+    def save_gguf(path : String) : Nil
+      raise ArgumentError.new("#{path} is not a .gguf path") unless path.ends_with?(".gguf")
+      save(path, {"gpt2.heads" => config.heads.to_s})
     end
 
     # Returns lazy logits `[batch * length, vocab]` for *ids*, `[batch, length]`
