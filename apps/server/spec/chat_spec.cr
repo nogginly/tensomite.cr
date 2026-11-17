@@ -75,6 +75,33 @@ describe "Server::Engine chatting" do
     FileUtils.rm_rf(dir) if dir
   end
 
+  it "reads a GPT-2 directory's tokenizer.json, with its special tokens, and ends at config.json's eos_token_id" do
+    gpt2 = "#{__DIR__}/../../../spec/fixtures/tiny_gpt2"
+    dir = File.tempname("special")
+    Dir.mkdir_p(dir)
+    FileUtils.cp(File.join(gpt2, "model.safetensors"), File.join(dir, "model.safetensors"))
+    vocab = Hash(String, Int32).from_json(File.read(File.join(gpt2, "vocab.json")))
+    merges = File.read_lines(File.join(gpt2, "merges.txt")).reject { |line| line.starts_with?("#version") || line.blank? }
+    File.write(File.join(dir, "tokenizer.json"), {
+      model:         {type: "BPE", vocab: vocab, merges: merges},
+      pre_tokenizer: {type: "ByteLevel", add_prefix_space: false},
+      added_tokens:  [{id: 399, content: "<|eos|>"}],
+    }.to_json)
+    tiny = GPT2.load(File.join(gpt2, "model.safetensors"), heads: 4)
+    plain = BPE.from_files(File.join(gpt2, "vocab.json"), File.join(gpt2, "merges.txt"))
+    first = tiny.generate(plain.encode("The quick brown fox"), 1).first
+    File.write(File.join(dir, "config.json"), {n_head: 4, eos_token_id: first}.to_json)
+    served = Server::Engine.load(dir, nil, CPU.default)
+    special = served.complete(Server::Request.new("a<|eos|>b", max_tokens: 1, temperature: 0.0))
+    special.prompt_tokens.should eq BPE.from_json(File.join(dir, "tokenizer.json")).encode("a<|eos|>b").size
+    special.prompt_tokens.should be < plain.encode("a<|eos|>b").size
+    ended = served.complete(Server::Request.new("The quick brown fox", max_tokens: 8, temperature: 0.0))
+    ended.finish_reason.should eq "stop"
+    ended.completion_tokens.should be <= 1
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
   it "refuses to chat with a model whose tokeniser lacks ChatML's tokens" do
     gpt2 = Server::Engine.load("#{__DIR__}/../../../spec/fixtures/tiny_gpt2", 4, CPU.default)
     gpt2.chat?.should be_false
