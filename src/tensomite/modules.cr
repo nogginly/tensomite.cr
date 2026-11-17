@@ -187,9 +187,49 @@ module Tensomite
       end
     end
 
-    # One sequence's share of a packed `#forward`: its *count* rows from
-    # *start*, its *mask*, `[count, positions]`, and its *cache*.
-    record Segment, start : Int32, count : Int32, mask : Tensor, cache : Cache
+    # The keys and values of many rows, each a sequence of its own length, in
+    # one buffer each of `[rows, heads, capacity, head width]`, made on the
+    # first append, for a packed `#forward`. Each append writes every row's new
+    # positions in place, in one op (`Tensor#write_rows`).
+    class SharedCache
+      getter rows : Int32
+      getter capacity : Int32
+      @keys : Tensor? = nil
+      @values : Tensor? = nil
+
+      def initialize(@rows : Int32, @capacity : Int32)
+      end
+
+      # Writes *keys* and *values*, `[tokens, heads, head width]`, each token at
+      # its *slots* entry, `row * capacity + position`, and returns the
+      # buffers, `[rows, heads, capacity, head width]`.
+      def append(keys : Tensor, values : Tensor, slots : Array(Int32)) : {Tensor, Tensor}
+        @keys = (@keys || empty(keys)).write_rows(keys, slots)
+        @values = (@values || empty(values)).write_rows(values, slots)
+        {@keys.as(Tensor), @values.as(Tensor)}
+      end
+
+      private def empty(like : Tensor) : Tensor
+        shape = [rows, like.shape[1], capacity, like.shape[2]]
+        buffer = like.device.alloc(like.dtype.bytes_for(shape.product(1)))
+        Tensor.new(Node.new(buffer, shape, like.dtype, like.device), View.contiguous(shape))
+      end
+    end
+
+    # One sequence's share of a packed `#forward`: its *count* rows of the pack
+    # from *start*, its *mask*, `[count, length]`, and its *row* of a
+    # `SharedCache`, which holds *length* positions once this step's are in.
+    record Segment, start : Int32, count : Int32, mask : Tensor, row : Int32, length : Int32 do
+      # Returns this segment's keys or values, `[1, heads, length, head
+      # width]`, from a `SharedCache`'s buffer.
+      def held(buffer : Tensor) : Tensor
+        buffer.slice(0, row, row + 1).slice(2, 0, length)
+      end
+    end
+
+    # A step of a packed `#forward`: each sequence's *segments*, and each new
+    # position's *slots* in the `SharedCache`, `row * capacity + position`.
+    record Pack, segments : Array(Segment), slots : Array(Int32)
 
     getter heads : Int32
     getter c_attn : Linear
@@ -228,23 +268,31 @@ module Tensomite
     # several sequences packed one after another, each *segment* naming its
     # rows, its mask and its cache: what `#forward` gives each sequence alone,
     # with the projections run once for them all.
-    def forward(x : Tensor, segments : Array(Segment)) : Tensor
+    def forward(x : Tensor, pack : Pack, cache : SharedCache) : Tensor
       joined = c_attn.call(x)
-      parts = segments.map do |segment|
-        attend(joined.slice(0, segment.start, segment.start + segment.count), segment.count, segment.mask, segment.cache)
+      total, width = x.shape[0], joined.shape[1] // 3
+      head_width = width // heads
+      new_keys, new_values = (1..2).map { |part| joined.slice(1, part * width, (part + 1) * width).reshape([total, heads, head_width]) }
+      keys, values = cache.append(new_keys, new_values, pack.slots)
+      parts = pack.segments.map do |segment|
+        attend(joined.slice(0, segment.start, segment.start + segment.count), segment.count, segment.mask, nil,
+          held: {segment.held(keys), segment.held(values)})
       end
       c_proj.call(parts.size == 1 ? parts.first : Tensor.cat(parts, 0))
     end
 
     # Returns the heads' joined attention, `[batch * length, width]`, from
-    # *joined*, the queries, keys and values side by side.
-    private def attend(joined : Tensor, length : Int32, mask : Tensor, cache : Cache?, dropout : Dropout? = nil) : Tensor
+    # *joined*, the queries, keys and values side by side; with *held*, the
+    # keys and values to attend to instead, the new ones among them.
+    private def attend(joined : Tensor, length : Int32, mask : Tensor, cache : Cache?, dropout : Dropout? = nil,
+                       held : {Tensor, Tensor}? = nil) : Tensor
       rows, width = joined.shape[0], joined.shape[1] // 3
       batch, head_width = rows // length, width // heads
       q, k, v = (0..2).map do |part|
         joined.slice(1, part * width, (part + 1) * width)
           .reshape([batch, length, heads, head_width]).permute([0, 2, 1, 3])
       end
+      k, v = held if held
       k, v = cache.append(k, v) if cache
       weights = q.matmul(k.transpose).softmax(scale: 1 / Math.sqrt(head_width), mask: mask)
       weights = dropout.call(weights) if dropout
@@ -376,24 +424,27 @@ module Tensomite
     # *angles* are each packed position's cosines and sines (see
     # `RotaryEmbedding#angles`), so that queries and keys are rotated in one op
     # each for every segment.
-    def forward(x : Tensor, segments : Array(CausalSelfAttention::Segment), rope : RotaryEmbedding,
-                angles : {Tensor, Tensor}) : Tensor
+    def forward(x : Tensor, pack : CausalSelfAttention::Pack, rope : RotaryEmbedding, angles : {Tensor, Tensor},
+                cache : CausalSelfAttention::SharedCache) : Tensor
       q, k, v = project(x)
       total, head_width = x.shape[0], rope.width
       q = rope.call(q.reshape([total, heads, head_width]), angles).reshape([total, heads * head_width])
-      k = rope.call(k.reshape([total, kv_heads, head_width]), angles).reshape([total, kv_heads * head_width])
-      parts = segments.map do |segment|
+      keys, values = cache.append(rope.call(k.reshape([total, kv_heads, head_width]), angles),
+        v.reshape([total, kv_heads, head_width]), pack.slots)
+      parts = pack.segments.map do |segment|
         rows = {segment.start, segment.start + segment.count}
-        attend(q.slice(0, *rows), k.slice(0, *rows), v.slice(0, *rows), segment.count, segment.mask, rope, segment.cache, rotated: true)
+        attend(q.slice(0, *rows), k.slice(0, *rows), v.slice(0, *rows), segment.count, segment.mask, rope, nil,
+          rotated: true, held: {segment.held(keys), segment.held(values)})
       end
       o_proj.call(parts.size == 1 ? parts.first : Tensor.cat(parts, 0))
     end
 
     # Returns the heads' joined attention, `[batch * length, heads * head
     # width]`, of projected queries, keys and values, steps 2 to 5 of `#forward`.
-    # With *rotated*, the queries and keys are rotated already.
+    # With *rotated*, the queries and keys are rotated already; with *held*,
+    # the keys and values to attend to, the new ones among them.
     private def attend(q : Tensor, k : Tensor, v : Tensor, length : Int32, mask : Tensor, rope : RotaryEmbedding,
-                       cache : CausalSelfAttention::Cache?, rotated : Bool = false) : Tensor
+                       cache : CausalSelfAttention::Cache?, rotated : Bool = false, held : {Tensor, Tensor}? = nil) : Tensor
       rows = q.shape[0]
       batch, head_width, group = rows // length, rope.width, heads // kv_heads
       start = cache ? cache.length : 0
@@ -401,6 +452,7 @@ module Tensomite
       k = split(k, batch, length, kv_heads, head_width)
       v = split(v, batch, length, kv_heads, head_width)
       q, k = rope.call(q, start), rope.call(k, start) unless rotated
+      k, v = held if held
       k, v = cache.append(k, v) if cache
       grouped = q.reshape([batch, kv_heads, group * length, head_width])
       masks = group == 1 ? mask : mask.expand([group] + mask.shape).reshape([group * length, mask.shape[1]])

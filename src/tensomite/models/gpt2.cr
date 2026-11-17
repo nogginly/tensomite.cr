@@ -45,8 +45,8 @@ module Tensomite
 
       # The block over several sequences' new positions packed together, each
       # segment's attention on its own cache (see `CausalSelfAttention#forward`).
-      def forward(x : Tensor, segments : Array(CausalSelfAttention::Segment)) : Tensor
-        x = x + @attn.call(@ln_1.call(x), segments)
+      def forward(x : Tensor, pack : CausalSelfAttention::Pack, cache : CausalSelfAttention::SharedCache) : Tensor
+        x = x + @attn.call(@ln_1.call(x), pack, cache)
         x + @mlp.call(@ln_2.call(x))
       end
     end
@@ -133,14 +133,14 @@ module Tensomite
 
     # Returns the logits of several sequences' new positions, packed one after
     # another, each after the positions in its cache, as `#logits` does each.
-    private def packed_logits(ids : Array(Array(Int32)), caches : Array(Cache), last : Bool) : Tensor
+    private def packed_logits(ids : Array(Array(Int32)), pasts : Array(Int32), pack : CausalSelfAttention::Pack,
+                              cache : BatchCache, last : Bool) : Tensor
       total = ids.sum(&.size)
       x = Tensomite.scope("embedding") do
-        places = ids.zip(caches).map { |row_ids, row_cache| positions(row_cache.length, row_ids.size) }
+        places = ids.zip(pasts).map { |row_ids, past| positions(past, row_ids.size) }
         @wte.call(Tensor.from(ids.flatten, [total], device).named("ids")) + (places.size == 1 ? places.first : Tensor.cat(places, 0))
       end
-      masks = packed_masks(ids, caches)
-      @h.each_with_index { |block, layer| x = block.call(x, segments(ids, caches, masks, layer)) }
+      @h.each_with_index { |block, layer| x = block.call(x, pack, cache.layers[layer]) }
       x = last_rows(x, ids) if last
       Tensomite.scope("head") { @ln_f.call(x).linear(@wte.weight.value) }
     end

@@ -5,9 +5,10 @@ module Tensomite
   # `logits(ids : Array(Int32), cache : Cache, last : Bool = false) : Tensor`,
   # which returns the unrealised logits of *ids* after the positions in
   # *cache*, or with *last* those of the last of them only, and appends their
-  # keys and values to it; and a private `packed_logits(appends :
-  # Array(Array(Int32)), caches : Array(Cache), last : Bool) : Tensor`, which
-  # does the same for several sequences at once, their new positions packed
+  # keys and values to it; and a private `packed_logits(ids :
+  # Array(Array(Int32)), pasts : Array(Int32), pack : CausalSelfAttention::Pack,
+  # cache : BatchCache, last : Bool) : Tensor`, which does the same for several
+  # sequences at once, after *pasts* positions each, their new positions packed
   # one after another.
   #
   # ```
@@ -40,9 +41,10 @@ module Tensomite
       end
     end
 
-    # A `Cache` for each of several rows, each a sequence of its own length, for
-    # `#forward` and `#forward_last` over many sequences at once. A row's
-    # buffers are made on its first append, and kept when it is `#reset`.
+    # The keys and values of several rows, each a sequence of its own length,
+    # for `#forward` and `#forward_last` over many sequences at once: one
+    # `CausalSelfAttention::SharedCache` per block, holding every row. Its
+    # buffers are made on the first append and kept when a row is `#reset`.
     #
     # ```
     # cache = model.new_batch_cache(rows: 64, capacity: 2048)
@@ -54,24 +56,25 @@ module Tensomite
       getter size : Int32
 
       getter capacity : Int32
+      getter layers : Array(CausalSelfAttention::SharedCache)
 
-      def initialize(@size : Int32, @layers : Int32, @capacity : Int32)
-        @rows = Array(Cache?).new(size, nil)
+      def initialize(@size : Int32, layers : Int32, @capacity : Int32)
+        @layers = Array.new(layers) { CausalSelfAttention::SharedCache.new(size, capacity) }
+        @lengths = Array(Int32).new(size, 0)
       end
 
       # Returns the number of positions row *row* holds.
       def length(row : Int32) : Int32
-        @rows[row].try(&.length) || 0
+        @lengths[row]
       end
 
-      # Empties row *row*, keeping its buffers.
+      # Empties row *row*, keeping the buffers.
       def reset(row : Int32) : Nil
-        @rows[row].try(&.reset)
+        @lengths[row] = 0
       end
 
-      # Returns row *row*'s cache, made on first use.
-      def [](row : Int32) : Cache
-        @rows[row] ||= Cache.new(@layers, @capacity)
+      protected def advance(row : Int32, count : Int32) : Nil
+        @lengths[row] += count
       end
     end
 
@@ -110,31 +113,31 @@ module Tensomite
       raise ShapeError.new("#{appends.size} appends for #{cache.size} rows") unless appends.size == cache.size
       rows = (0...appends.size).reject { |row| appends[row].empty? }
       raise ShapeError.new("forward of no tokens") if rows.empty?
-      caches = rows.map { |row| cache[row] }
       ids = rows.map { |row| appends[row] }
-      ids.zip(caches) do |row_ids, row_cache|
-        stop = row_cache.length + row_ids.size
-        raise ShapeError.new("#{stop} positions exceed the context of #{config.context}") if stop > config.context
+      pasts = rows.map { |row| cache.length(row) }
+      limit = Math.min(cache.capacity, config.context)
+      ids.zip(pasts) do |row_ids, past|
+        raise ShapeError.new("#{past + row_ids.size} positions exceed the #{limit} a row holds") if past + row_ids.size > limit
       end
-      result = packed_logits(ids, caches, last).realize
-      ids.zip(caches) { |row_ids, row_cache| row_cache.advance(count: row_ids.size) }
+      result = packed_logits(ids, pasts, pack(rows, ids, pasts, cache.capacity), cache, last).realize
+      rows.each_with_index { |row, i| cache.advance(row, ids[i].size) }
       result
     end
 
-    # Returns, for layer *layer*, each packed row's segment: its rows of the
-    # pack, its causal *masks* entry and its cache.
-    private def segments(ids : Array(Array(Int32)), caches : Array(Cache), masks : Array(Tensor), layer : Int32) : Array(CausalSelfAttention::Segment)
+    # Returns a step's `CausalSelfAttention::Pack`: each row's segment of the
+    # packed positions, with its causal mask, and each new position's slot.
+    private def pack(rows : Array(Int32), ids : Array(Array(Int32)), pasts : Array(Int32), capacity : Int32) : CausalSelfAttention::Pack
       start = 0
-      ids.map_with_index do |row_ids, i|
-        segment = CausalSelfAttention::Segment.new(start, row_ids.size, masks[i], caches[i].layers[layer])
-        start += row_ids.size
+      slots = [] of Int32
+      segments = rows.map_with_index do |row, i|
+        count, past = ids[i].size, pasts[i]
+        count.times { |j| slots << row * capacity + past + j }
+        mask = Tensor.causal_mask(count, past + count, device)
+        segment = CausalSelfAttention::Segment.new(start, count, mask, row, past + count)
+        start += count
         segment
       end
-    end
-
-    # Returns each packed row's causal mask over its cached and new positions.
-    private def packed_masks(ids : Array(Array(Int32)), caches : Array(Cache)) : Array(Tensor)
-      ids.zip(caches).map { |row_ids, row_cache| Tensor.causal_mask(row_ids.size, row_cache.length + row_ids.size, device) }
+      CausalSelfAttention::Pack.new(segments, slots)
     end
 
     # Returns the rows of *x*, packed rows' positions, that hold each row's last.

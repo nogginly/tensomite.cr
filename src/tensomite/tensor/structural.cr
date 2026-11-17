@@ -44,6 +44,24 @@ module Tensomite
       Tensor.lazy(Node.new(Op::Write, [self, value], shape, dtype, device, source_view: region))
     end
 
+    # Returns this tensor, `[rows, heads, capacity, width]`, with each token of
+    # *value*, `[tokens, heads, width]`, written in place at its *slots* entry,
+    # `row * capacity + position`: the in-place write a cache of many rows makes
+    # for one step's new keys or values (see `Op::WriteRows`). As with
+    # `#write`, this tensor must cover its buffer, and tensors read from it
+    # before must be realised first.
+    def write_rows(value : Tensor, slots : Array(Int32)) : Tensor
+      check_compatible("write_rows", {value})
+      unless ndim == 4 && value.ndim == 3 && value.shape[0] == slots.size && value.shape[1] == shape[1] && value.shape[2] == shape[3]
+        raise ShapeError.new("cannot write #{value.shape} into rows of #{shape} at #{slots.size} slots")
+      end
+      raise ShapeError.new("write_rows needs a tensor that covers its buffer") unless view.contiguous? && view.offset == 0 && size == node.size
+      places = shape[0] * shape[2]
+      slots.each { |slot| raise ShapeError.new("slot #{slot} outside #{shape[0]} rows of #{shape[2]}") unless 0 <= slot < places }
+      ids = Tensor.from(slots, [slots.size], device).named("slots")
+      Tensor.lazy(Node.new(Op::WriteRows, [self, value, ids], shape, dtype, device))
+    end
+
     # Raises unless *weight* and *bias* can apply to these rows in `#linear`.
     private def check_linear(weight : Tensor, bias : Tensor?) : Nil
       (bias ? {weight, bias} : {weight}).each do |other|

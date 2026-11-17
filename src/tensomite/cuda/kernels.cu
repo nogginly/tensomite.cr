@@ -62,6 +62,19 @@ extern "C" __global__ void copy_into_f32(const float* src, float* dst, View vs, 
     dst[offset_of(vd, i)] = src[offset_of(vs, i)];
 }
 
+// WriteRows: element i of src, [tokens, heads, width], into dst, [rows, heads,
+// capacity, width], at its token's row and position, slot / capacity and slot
+// % capacity.
+extern "C" __global__ void write_rows_f32(const float* src, const int* slots, float* dst, View vs, View vslots,
+                                          unsigned int heads, unsigned int capacity, unsigned int width, unsigned int n) {
+    unsigned int i = thread_index();
+    if (i >= n) return;
+    unsigned int token = i / (heads * width), head = (i / width) % heads, column = i % width;
+    unsigned int slot = (unsigned int)slots[offset_of(vslots, token)];
+    unsigned int row = slot / capacity, position = slot % capacity;
+    dst[((row * heads + head) * capacity + position) * width + column] = src[offset_of(vs, i)];
+}
+
 // Reductions fold each output's run of `run` consecutive logical indices of `v`,
 // in chunks of REDUCE_CHUNK at fixed offsets, as the Metal kernels do: each
 // thread of an output's block folds whole chunks in index order, and the first

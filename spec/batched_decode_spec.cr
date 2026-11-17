@@ -57,6 +57,25 @@ private def check_rows(model, vocab : Int32)
   3.times { |row| cache.length(row).should eq STEPS.sum(&.[row].size) }
 end
 
+describe "Tensor#write_rows" do
+  (DEVICES + GPUS).each do |device|
+    it "writes each token at its row and position, in place, on #{device.class}" do
+      target = Tensor.zeros([2, 2, 3, 2], device: device).realize
+      value = Tensor.from((1..12).map(&.to_f32), [3, 2, 2], device)
+      got = target.write_rows(value, [1 * 3 + 2, 0, 1 * 3 + 0]).to_a(Float32)
+      expected = Array.new(24, 0f32)
+      [{1, 2}, {0, 0}, {1, 0}].each_with_index do |(row, position), token|
+        2.times { |head| 2.times { |column| expected[((row * 2 + head) * 3 + position) * 2 + column] = (token * 4 + head * 2 + column + 1).to_f32 } }
+      end
+      got.should eq expected
+    end
+  end
+
+  it "raises for a slot outside the rows" do
+    expect_raises(ShapeError, /slot 6 outside/) { Tensor.zeros([2, 1, 3, 2]).write_rows(Tensor.zeros([1, 1, 2]), [6]) }
+  end
+end
+
 describe "Batched decoding" do
   (DEVICES + GPUS).each do |device|
     it "gives each GPT-2 row its logits alone on #{device.class}, appended raggedly" do
