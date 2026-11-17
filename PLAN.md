@@ -290,6 +290,7 @@ Recorded in full, with their reasoning and measurements, in [`DECISIONS.md`](DEC
 - [DT](DECISIONS.md#decision-dt): batched decoding with a cache (decided).
 - [DU](DECISIONS.md#decision-du): where a step of many rows goes (decided).
 - [DV](DECISIONS.md#decision-dv): fewer, wider ops for a step of many rows (decided).
+- [DW](DECISIONS.md#decision-dw): saving quantised weights (decided).
 
 ## Risks
 

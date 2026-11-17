@@ -65,6 +65,15 @@ module Tensomite
       new(Node.new(buffer, shape, dtype, device), View.contiguous(shape))
     end
 
+    # Returns this tensor's data in row-major order as a copy of its bytes:
+    # each element's for `F32` and `I32`, and each block's for a block format,
+    # as `Tensor.from_blocks` takes them.
+    def bytes : Bytes
+      return block_bytes if dtype.block?
+      return to_a(Float32).to_unsafe.to_slice(size).to_unsafe_bytes.dup if dtype.f32?
+      to_a(Int32).to_unsafe.to_slice(size).to_unsafe_bytes.dup
+    end
+
     # Returns a copy of the bytes of the rows this block-format tensor views.
     protected def block_bytes : Bytes
       bytes = realize.host_bytes

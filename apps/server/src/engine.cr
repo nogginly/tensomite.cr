@@ -87,8 +87,9 @@ module Server
     # model, with `model.safetensors` and `tokenizer.json`; generation also ends
     # at its `eos_token_id`, and a chat's default system message is the one
     # `tokenizer_config.json`'s chat template adds, if any. Otherwise it holds a
-    # GPT-2, with `model.safetensors`, `vocab.json` and `merges.txt`, whose
-    # attention *heads* are, unless given, `n_head` in `config.json`, or 12.
+    # GPT-2, with `vocab.json`, `merges.txt` and `model.gguf`, as `finetune
+    # --quantize` exports one, or else `model.safetensors`; its attention
+    # *heads* are, unless given, `n_head` in `config.json`, or 12.
     def self.load(dir : String, heads : Int32?, device : Tensomite::Device) : Engine
       return load_gguf(dir, device) if dir.ends_with?(".gguf")
       name = File.basename(File.expand_path(dir))
@@ -100,7 +101,8 @@ module Server
         return new(model, tokenizer, name, ends, Server.default_system(dir))
       end
       heads ||= Server.configured_heads(dir) || 12
-      model = Tensomite::GPT2.load(File.join(dir, "model.safetensors"), heads: heads, device: device)
+      weights = %w[model.gguf model.safetensors].map { |file| File.join(dir, file) }.find { |path| File.exists?(path) }
+      model = Tensomite::GPT2.load(weights || File.join(dir, "model.safetensors"), heads: heads, device: device)
       tokenizer = Tensomite::BPE.from_files(File.join(dir, "vocab.json"), File.join(dir, "merges.txt"))
       new(model, tokenizer, name)
     end

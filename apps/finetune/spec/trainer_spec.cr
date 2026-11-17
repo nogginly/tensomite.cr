@@ -114,4 +114,19 @@ describe Finetune::Trainer do
   ensure
     FileUtils.rm_rf(dir) if dir
   end
+
+  it "also exports a quantised model.gguf with --quantize, leaving the trained model as it is" do
+    dir = workspace
+    run = File.join(dir, "run")
+    trainer = Finetune::Trainer.new(run, settings(dir).tap(&.quantize=("Q8_0")))
+    trainer.record(3.0)
+    best = File.join(run, "best")
+    quantised = GPT2.load(File.join(best, "model.gguf"))
+    quantised.config.heads.should eq 4
+    quantised.named_params["h.0.attn.c_attn.weight"].value.dtype.should eq DType::Q8_0
+    trainer.model.named_params["h.0.attn.c_attn.weight"].value.dtype.should eq DType::F32
+    File.size(File.join(best, "model.gguf")).should be < File.size(File.join(best, "model.safetensors"))
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
 end

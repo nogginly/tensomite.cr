@@ -13,6 +13,9 @@ module Finetune
     # The model's attention heads; unless given, `n_head` in its `config.json`,
     # or 12 without one.
     property heads : Int32? = nil
+    # The block format, such as `Q8_0`, that exports also write the model in,
+    # as `model.gguf` beside `model.safetensors`; `nil` for none.
+    property quantize : String? = nil
     # The text to fine-tune on.
     property data : String = "data/shakespeare/input.txt"
     property batch : Int32 = 8
@@ -197,10 +200,18 @@ module Finetune
     end
 
     # Writes the weights to *dir* with the pretrained model's tokeniser files and
-    # config, as a directory `apps/server` serves.
+    # config, as a directory `apps/server` serves; with `Settings#quantize`,
+    # also `model.gguf`, a quantised copy, which the server prefers. The model
+    # being trained stays as it is: the copy is read back from the file just
+    # written and quantised on the host.
     def export(dir : String) : Nil
       Dir.mkdir_p(dir)
-      model.save(File.join(dir, "model.safetensors"))
+      weights = File.join(dir, "model.safetensors")
+      model.save(weights)
+      if format = settings.quantize
+        copy = Tensomite::GPT2.load(weights, heads: model.config.heads)
+        copy.quantize(Tensomite::DType.parse(format), embeddings: true).save_gguf(File.join(dir, "model.gguf"))
+      end
       %w[vocab.json merges.txt config.json].each do |name|
         source = File.join(settings.model, name)
         FileUtils.cp(source, File.join(dir, name)) if File.exists?(source)

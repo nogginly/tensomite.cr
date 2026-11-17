@@ -336,7 +336,7 @@ This is the same fit as in "Training", with the same result. `AdamW` applies wei
 
 **Other things modules do:**
 
-- `model.save(path)` writes every parameter to a safetensors file under its name, and `model.load(path)` replaces each parameter with the tensor of the same name. A missing or extra name raises `Error`, unless `strict: false`; a different shape raises `ShapeError`. The file can be read by other tools, such as Hugging Face's `safetensors` package.
+- `model.save(path)` writes every parameter to a safetensors file under its name, or, for a path ending in `.gguf`, a GGUF file, which also holds quantised weights (see "Quantised models"); `model.load(path)` replaces each parameter with the tensor of the same name. A missing or extra name raises `Error`, unless `strict: false`; a different shape raises `ShapeError`. The file can be read by other tools, such as Hugging Face's `safetensors` package.
 - `load(path, prefix: "transformer.")` reads names with a prefix in front, and `load(path, ignore: /\.attn\.bias$/)` skips tensors in the file that are not parameters. A model built only to be loaded can use `Init.placeholder`, zeros that take no memory, so building it allocates almost nothing.
 - `model.to(device)` moves every parameter to another device.
 - `tensor.to_mermaid(model: model, depth: 1)` draws a summary of the model's parts, with their parameter counts. [The tutorial](TUTORIAL.md) shows one.
@@ -519,6 +519,15 @@ Block tensors are leaves, and they cannot be read with `to_a`. Their only views 
 model = GPT2.load("models/gpt2/model.safetensors").quantize(DType::Q8_0)
 model = Llama.load("models/smollm2-135m-instruct-gguf/SmolLM2-135M-Instruct-Q4_0.gguf")
 ```
+
+To keep a quantised model, save it to a path ending in `.gguf`: the weights stay in their block formats, so at `Q8_0` the file is about a quarter the size of the `F32` one, and at `Q4_0` about a seventh. Load it into a model built at `F32`, and each quantised weight takes its place as it was saved, with the same logits, bit for bit. The names are tensomite's own, as in a safetensors file; llama.cpp's loader expects its own names and metadata, so it cannot read these files. `GGUF.write(path, {"name" => tensor, ...}, metadata)` writes tensors directly.
+
+```crystal
+model.quantize(DType::Q8_0, embeddings: true).save("package/model.gguf", {"source" => "run 42"})
+model = Llama.new(config, Builder.new).load("package/model.gguf")
+```
+
+A GPT-2 has its own pair, which keeps its attention heads in the file's metadata, so nothing else is needed to read it back: `model.save_gguf(path)` and `GPT2.load(path)`. `apps/finetune --quantize Q8_0` exports one beside the safetensors weights, and `apps/server` serves it.
 
 `bench/perplexity.cr` measures what quantisation costs. With `--reference`, it also reports the KL divergence of the quantised model's predictions from the unquantised model's. That is the better measure: on a text a model is too sure of, noise that softens its predictions lowers perplexity. Quantised GPT-2 scores *better* than F32 on Shakespeare for that reason. Some results, from 16 windows of 128 tokens of Shakespeare:
 
