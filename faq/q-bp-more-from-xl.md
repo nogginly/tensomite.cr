@@ -1,6 +1,6 @@
 # Q-BP: What would get more out of GPT-2 XL, apart from the model?
 
-*[Fine-tuning](README.md#fine-tuning) · previous: [Q-BM](q-bm-what-patience-costs.md) · last in the theme*
+*[Fine-tuning](README.md#fine-tuning) · previous: [Q-BM](q-bm-what-patience-costs.md) · next: [Q-CX](q-cx-advantage-weighted-loss.md)*
 
 ## The question
 

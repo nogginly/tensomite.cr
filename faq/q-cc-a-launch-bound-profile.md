@@ -1,6 +1,6 @@
 # Q-CC: What does a token bound by launches look like?
 
-*[Quantised decoding on GPUs](README.md#quantised-decoding-on-gpus) · previous: [Q-CB](q-cb-repeating-a-pass.md) · last in the theme*
+*[Quantised decoding on GPUs](README.md#quantised-decoding-on-gpus) · previous: [Q-CB](q-cb-repeating-a-pass.md) · next: [Q-CN](q-cn-the-slowest-product.md)*
 
 ## The question
 

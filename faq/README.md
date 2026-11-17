@@ -20,6 +20,8 @@ flowchart LR
     decode --> serving["Serving"]
     gpuspeed --> quantgpu["Quantised decoding on GPUs"]
     decode --> quantgpu
+    decode --> batched["Batched decoding"]
+    quantgpu --> batched
     training --> finetune["Fine-tuning"]
     finetune --> evaluate["Evaluating code"]
     style order stroke:#1971c2,stroke-width:3px
@@ -167,6 +169,7 @@ Question                                        |In one line
 [Q-BD](q-bd-testing-for-memorised-passages.md)  |How could you test for a memorised passage? Swap two words: recitation shows as a spike of loss, then near zero.                  
 [Q-BM](q-bm-what-patience-costs.md)             |Why did early stopping run 1,500 steps past the best? Patience 6 × 250 steps; less risks stopping at noise.                       
 [Q-BP](q-bp-more-from-xl.md)                    |What would get more out of GPT-2 XL? More text, most likely: 3.7M tokens is little for 1.5B parameters.                           
+[Q-CX](q-cx-advantage-weighted-loss.md)         |Why can't a weighted mean give advantage-weighted loss? It divides by the weights' sum, which is about zero.                      
 
 ## Evaluating code
 
@@ -200,15 +203,38 @@ Question                              |In one line
 
 The running example: SmolLM2-1.7B at Q4_0, decoding on the GB10 and the M5 Pro, from about 7 ms a token towards llama.cpp's 4.7–4.9; and, for Q-BR and Q-BV, SmolLM2-135M.
 
-Question                                |In one line                                                                                                                    
-----------------------------------------|-------------------------------------------------------------------------------------------------------------------------------
-[Q-BT](q-bt-how-decode-scales.md)       |Does a 13-times larger model decode 13 times slower? About 2 times: the small one is bound by dispatches.                      
-[Q-BR](q-br-joining-projections.md)     |Why should joining projections save less than fusing? It removes dispatches, not bytes; but tiny products cost a fixed minimum.
-[Q-BU](q-bu-the-heads-bandwidth.md)     |Why does the head read fastest? 49,152 outputs keep every core busy; the others have too few.                                  
-[Q-BV](q-bv-idle-threads-still-help.md) |Why can 256 threads with 112 idle beat 36? Four times the loads in flight, combined reads, a short tree.                       
-[Q-BW](q-bw-what-grouping-saves.md)     |Wider loads or grouped outputs for the down projection? Wider loads on CUDA; the activations were already in cache.            
-[Q-CA](q-ca-scores-that-stay-on-chip.md)|Why does fused attention matter more as the context grows? The scores grow with it; the dispatches do not.                     
-[Q-CB](q-cb-repeating-a-pass.md)        |Can repeating a pass in every threadgroup beat one dispatch? Only if the repeat is small: here it doubled the products.        
-[Q-CC](q-cc-a-launch-bound-profile.md)  |What does a launch-bound token look like? Launching fills it and waiting is near zero; the 1.7B model is the opposite.         
+Question                                |In one line                                                                                                                         
+----------------------------------------|------------------------------------------------------------------------------------------------------------------------------------
+[Q-BT](q-bt-how-decode-scales.md)       |Does a 13-times larger model decode 13 times slower? About 2 times: the small one is bound by dispatches.                           
+[Q-BR](q-br-joining-projections.md)     |Why should joining projections save less than fusing? It removes dispatches, not bytes; but tiny products cost a fixed minimum.     
+[Q-BU](q-bu-the-heads-bandwidth.md)     |Why does the head read fastest? 49,152 outputs keep every core busy; the others have too few.                                       
+[Q-BV](q-bv-idle-threads-still-help.md) |Why can 256 threads with 112 idle beat 36? Four times the loads in flight, combined reads, a short tree.                            
+[Q-BW](q-bw-what-grouping-saves.md)     |Wider loads or grouped outputs for the down projection? Wider loads on CUDA; the activations were already in cache.                 
+[Q-CA](q-ca-scores-that-stay-on-chip.md)|Why does fused attention matter more as the context grows? The scores grow with it; the dispatches do not.                          
+[Q-CB](q-cb-repeating-a-pass.md)        |Can repeating a pass in every threadgroup beat one dispatch? Only if the repeat is small: here it doubled the products.             
+[Q-CC](q-cc-a-launch-bound-profile.md)  |What does a launch-bound token look like? Launching fills it and waiting is near zero; the 1.7B model is the opposite.              
+[Q-CN](q-cn-the-slowest-product.md)     |Which product reads slowest on Metal? `o_proj`, the smallest: 104 GB/s against 171–240.                                             
+[Q-CO](q-co-a-fixed-cost-per-product.md)|What does the gap between down and `o_proj` suggest? A fixed cost per product: about 13.8 µs plus bytes at 254 GB/s.                
+[Q-CP](q-cp-the-profilers-own-cost.md)  |Could the 14 µs be the profiler's own cost? No: the per-kernel total came to 101% of the wall time, not the 120% it would have been.
+[Q-CQ](q-cq-the-floor-of-a-dispatch.md) |How cheap can the activations' quantise get? About 3 µs, the cost of a dispatch itself.                                             
+[Q-CR](q-cr-latency-at-few-outputs.md)  |Is the fixed cost all dispatch? No: at 64 outputs, each lane's serial blocks show as latency.                                       
+[Q-CS](q-cs-loads-that-must-stay.md)    |Why must a measurement mode's loads stay as they are? Unused loads are removed; different loads measure something else.             
+[Q-CT](q-ct-splitting-the-gap.md)       |How do you tell how much of a gap is the activations? Add a mode between: weights as `stream`, activations as the kernel.           
+[Q-CU](q-cu-rewrite-or-repack.md)       |Rewrite the kernel's loads or repack the weights? Rewrite: the block layout is shared by `Gather`, CUDA and the host.               
+[Q-CV](q-cv-threadgroup-memory-loads.md)|Why are byte loads from threadgroup memory cheaper? On-chip SRAM, a few cycles away; the copy is a few wide loads.                  
 
-Q-C and Q-P were labels on a decision and a list, not questions, so they have no page; nor do Q-BQ, Q-BS and Q-CD, which were decisions, recorded in `DECISIONS.md`.
+## Batched decoding
+
+The running example: a Llama-shaped model of 30M parameters (8 layers, width 512, 8 heads of 64) with random weights, decoding 64 rows at a time on the M5 Pro (Metal) and the GB10 (CUDA), `bench/batched_decode.cr`. Decisions DT to DV.
+
+Question                                 |In one line                                                                                                         
+-----------------------------------------|--------------------------------------------------------------------------------------------------------------------
+[Q-CL](q-cl-last-position-head.md)       |Why is the last-only head less than 64 times cheaper? Both read the 154 MB head once; only the arithmetic differs.  
+[Q-CY](q-cy-padding-changes-bits.md)     |Why does left padding change a softmax's bits? Zeros are harmless; the shifted chunks regroup the sum.              
+[Q-DA](q-da-the-cost-of-each-row.md)     |Why does doubling the rows nearly double a step? Each row brings about 25 small ops a layer: 0.33 ms a row on Metal.
+[Q-DB](q-db-where-a-step-waits.md)       |Does a 64-row step mostly wait for the GPU? On Metal, 78%; on the GB10 the host dominated.                          
+[Q-DC](q-dc-fewer-wider-ops.md)          |Why do fewer, wider ops help when the host is idle? Dispatches run one after another; each one's latency adds up.   
+[Q-DD](q-dd-a-ragged-attention-kernel.md)|Why does a shared cache need a new attention kernel? Rows differ in start and length; a table supplies them.        
+[Q-DE](q-de-one-dispatch-for-all-rows.md)|Why one dispatch for all rows' attention? 512 tiny dispatches pay the fixed cost 512 times; one pays it once.       
+
+Q-C and Q-P were labels on a decision and a list, not questions, so they have no page; nor do Q-BQ, Q-BS and Q-CD, which were decisions, recorded in `DECISIONS.md`. Q-CK, Q-CM, Q-CW and Q-CZ were questions about preferences or decisions, recorded in `DECISIONS.md` where they led to one.
