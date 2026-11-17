@@ -19,6 +19,9 @@ module Tensomite
   #
   # Shapes are in tensomite's order, outermost first: GGUF lists a tensor's
   # dimensions innermost first, so they are reversed.
+  #
+  # `.write` writes one: `F32` tensors and block formats as they are, with
+  # metadata, which `Module#save` uses for quantised models.
   class GGUF
     MAGIC = 0x46554747_u32
 
@@ -136,6 +139,151 @@ module Tensomite
     def bytes(name : String) : Bytes
       entry = entries[name]
       @mapping.bytes(entry.offset, entry.bytesize.to_i32)
+    end
+
+    # Writes *tensors*, by name and in order, and *metadata* to a GGUF file
+    # (version 3) at *path*: `F32` tensors and block formats (`Q8_0`, `Q4_0`,
+    # `Q4_1`) byte for byte, so `.open` reads back the same bits. Metadata
+    # values are strings, integers (written as 32-bit when they fit, else
+    # 64-bit), floats (64-bit), booleans, or arrays of one of those. Each
+    # tensor's data starts at a multiple of 32 bytes. The file is written
+    # under a temporary name and renamed into place, so a reader never sees it
+    # half written.
+    #
+    # ```
+    # GGUF.write("model.gguf", {"w" => weight.quantize(DType::Q8_0)}, {"general.name" => JSON::Any.new("demo")})
+    # ```
+    def self.write(path : String, tensors : Hash(String, Tensor), metadata : Hash(String, JSON::Any)? = nil) : Nil
+      offsets = [] of Int64
+      offset = 0_i64
+      kinds = tensors.map do |name, tensor|
+        kind = kind_of(tensor) || raise DTypeError.new("#{name}: GGUF here holds F32 and block formats, not #{tensor.dtype}")
+        offsets << offset
+        offset = (offset + kind.bytes_for(tensor.size.to_i64) + ALIGNMENT - 1) // ALIGNMENT * ALIGNMENT
+        kind
+      end
+      temp = "#{path}.#{Process.pid}.#{Random::Secure.hex(4)}.tmp"
+      begin
+        File.open(temp, "w") do |file|
+          writer = Writer.new(file)
+          writer.u32(MAGIC)
+          writer.u32(3_u32)
+          writer.u64(tensors.size.to_u64)
+          writer.u64((metadata.try(&.size) || 0).to_u64)
+          metadata.try &.each { |key, value| writer.string(key); writer.value(key, value) }
+          tensors.each_with_index do |(name, tensor), i|
+            writer.string(name)
+            writer.u32(tensor.ndim.to_u32)
+            tensor.shape.reverse_each { |dim| writer.u64(dim.to_u64) }
+            writer.u32(kinds[i].value)
+            writer.u64(offsets[i].to_u64)
+          end
+          writer.pad(ALIGNMENT)
+          tensors.each_value do |tensor|
+            writer.raw(tensor.bytes)
+            writer.pad(ALIGNMENT)
+          end
+        end
+        File.rename(temp, path)
+      ensure
+        File.delete?(temp)
+      end
+    end
+
+    # The alignment of tensor data that `.write` uses, GGUF's default.
+    ALIGNMENT = 32_i64
+
+    # Returns the kind *tensor* is written as, or `nil` for a dtype GGUF here
+    # does not hold.
+    private def self.kind_of(tensor : Tensor) : Kind?
+      case tensor.dtype
+      in .f32?  then Kind::F32
+      in .q8_0? then Kind::Q8_0
+      in .q4_0? then Kind::Q4_0
+      in .q4_1? then Kind::Q4_1
+      in .i32?  then nil
+      end
+    end
+
+    # Writes little-endian values to an IO, counting the bytes written.
+    private class Writer
+      def initialize(@io : IO)
+        @position = 0_i64
+      end
+
+      def u32(value : UInt32) : Nil
+        @io.write_bytes(value, IO::ByteFormat::LittleEndian)
+        @position += 4
+      end
+
+      def u64(value : UInt64) : Nil
+        @io.write_bytes(value, IO::ByteFormat::LittleEndian)
+        @position += 8
+      end
+
+      def string(value : String) : Nil
+        u64(value.bytesize.to_u64)
+        @io << value
+        @position += value.bytesize
+      end
+
+      # Writes *value*'s GGUF value type, then the value; *key* names it in errors.
+      def value(key : String, value : JSON::Any) : Nil
+        u32(type_of(key, value))
+        payload(key, value)
+      end
+
+      def raw(bytes : Bytes) : Nil
+        @io.write(bytes)
+        @position += bytes.size
+      end
+
+      # Writes zero bytes up to the next multiple of *alignment*.
+      def pad(alignment : Int64) : Nil
+        count = (alignment - @position % alignment) % alignment
+        @io.write(Bytes.new(count))
+        @position += count
+      end
+
+      private def payload(key : String, value : JSON::Any) : Nil
+        case raw = value.raw
+        when String then string(raw)
+        when Bool
+          @io.write_byte(raw ? 1_u8 : 0_u8)
+          @position += 1
+        when Int64
+          if Int32::MIN <= raw <= Int32::MAX
+            @io.write_bytes(raw.to_i32, IO::ByteFormat::LittleEndian)
+            @position += 4
+          else
+            @io.write_bytes(raw, IO::ByteFormat::LittleEndian)
+            @position += 8
+          end
+        when Float64
+          @io.write_bytes(raw, IO::ByteFormat::LittleEndian)
+          @position += 8
+        when Array(JSON::Any)
+          element = raw.empty? ? 8_u32 : type_of(key, raw.first)
+          raise Error.new("#{key}: a GGUF array holds one type") unless raw.all? { |item| type_of(key, item) == element }
+          u32(element)
+          u64(raw.size.to_u64)
+          raw.each { |item| payload(key, item) }
+        else
+          raise Error.new("#{key}: GGUF has no value like #{value}")
+        end
+      end
+
+      # Returns the GGUF value type *value* is written as.
+      private def type_of(key : String, value : JSON::Any) : UInt32
+        case raw = value.raw
+        when String           then 8_u32
+        when Bool             then 7_u32
+        when Int64            then Int32::MIN <= raw <= Int32::MAX ? 5_u32 : 11_u32
+        when Float64          then 12_u32
+        when Array(JSON::Any) then 9_u32
+        else                       raise Error.new("#{key}: GGUF has no value like #{value}")
+        end
+      end
     end
 
     # Reads the file in order:

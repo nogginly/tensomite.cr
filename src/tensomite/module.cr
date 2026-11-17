@@ -145,10 +145,22 @@ module Tensomite
       result
     end
 
-    # Writes every parameter to a safetensors file at *path*, by name (see
-    # `SafeTensors.write`), with optional string *metadata*.
+    # Writes every parameter to the file at *path*, by name, with optional
+    # string *metadata*: a GGUF file when *path* ends in `.gguf` (see
+    # `GGUF.write`), which holds quantised weights as they are, and otherwise a
+    # safetensors file (see `SafeTensors.write`), which holds only `F32` and
+    # `I32`.
+    #
+    # ```
+    # model.quantize(DType::Q8_0).save("model.gguf") # about a quarter of the F32 file
+    # ```
     def save(path : String, metadata : Hash(String, String)? = nil) : Nil
-      SafeTensors.write(path, named_params.transform_values(&.value), metadata)
+      tensors = named_params.transform_values(&.value)
+      if path.ends_with?(".gguf")
+        GGUF.write(path, tensors, metadata.try &.transform_values { |value| JSON::Any.new(value) })
+      else
+        SafeTensors.write(path, tensors, metadata)
+      end
     end
 
     # Replaces each parameter's value with the tensor of the same name in the
@@ -165,14 +177,60 @@ module Tensomite
     # Tensors whose names match *transposed* hold their parameter's transpose, as
     # PyTorch stores a `Linear`'s weight, `[outputs, inputs]`; each is copied into
     # the parameter's layout as it loads.
+    #
+    # A *path* ending in `.gguf` loads a GGUF file, as `#save` writes one (see
+    # `#load(file : GGUF)`).
     def load(path : String, strict : Bool = true, prefix : String = "", ignore : Regex? = nil, transposed : Regex? = nil) : self
+      if path.ends_with?(".gguf")
+        raise ArgumentError.new("transposed applies to safetensors files, not GGUF") if transposed
+        return load(GGUF.open(path), strict, prefix, ignore)
+      end
       load(SafeTensors.open(path), strict, prefix, ignore, transposed)
+    end
+
+    # Replaces each parameter's value with the tensor of the same name in
+    # *file*, as the safetensors `#load` does, on the parameter's device, and
+    # returns `self`.
+    #
+    # A `Linear`'s weight or an `Embedding`'s table may be in a block format in
+    # the file while `F32` in the model: it loads quantised, in the layout
+    # their `quantize` gives (a `Linear`'s `[outputs, inputs]`), so a model
+    # built in `F32` loads a quantised file as it was saved. Every other
+    # tensor must match its parameter's shape, in `F32`.
+    def load(file : GGUF, strict : Bool = true, prefix : String = "", ignore : Regex? = nil) : self
+      params = named_params
+      check_names(file.path, file.names, params, prefix, ignore) if strict
+      blocks = quantisable_layouts
+      params.each do |name, param|
+        next unless entry = file.entries[prefix + name]?
+        expected = entry.kind.quantised? ? blocks[name]?.try(&.call(param)) : param.shape
+        unless expected && entry.shape == expected && (entry.kind.quantised? || param.value.dtype.f32?)
+          raise ShapeError.new("#{name}: #{file.path} holds #{entry.kind} #{entry.shape}, the model #{param.value.dtype} #{param.shape}")
+        end
+        param.value = file[prefix + name, param.value.device]
+      end
+      self
+    end
+
+    # Returns, for each parameter that may hold a block format (a `Linear`'s
+    # weight, an `Embedding`'s table), the shape its quantised value has.
+    private def quantisable_layouts : Hash(String, Proc(Parameter, Array(Int32)))
+      result = {} of String => Proc(Parameter, Array(Int32))
+      modules.each do |path, part|
+        case part
+        when Linear
+          result["#{path}.weight"] = ->(param : Parameter) { param.value.dtype.block? ? param.shape : param.shape.reverse }
+        when Embedding
+          result["#{path}.weight"] = ->(param : Parameter) { param.shape }
+        end
+      end
+      result
     end
 
     # :ditto:
     def load(file : SafeTensors, strict : Bool = true, prefix : String = "", ignore : Regex? = nil, transposed : Regex? = nil) : self
       params = named_params
-      check_names(file, params, prefix, ignore) if strict
+      check_names(file.path, file.names, params, prefix, ignore) if strict
       params.each do |name, param|
         next unless entry = file.entries[prefix + name]?
         flip = transposed.try(&.matches?(prefix + name)) && entry.shape.size == 2
@@ -188,14 +246,16 @@ module Tensomite
       self
     end
 
-    # Raises unless *file* holds exactly *params*, apart from names matching *ignore*.
-    private def check_names(file : SafeTensors, params : Hash(String, Parameter), prefix : String, ignore : Regex?) : Nil
-      missing = params.keys.reject { |name| file.has_key?(prefix + name) }
-      raise Error.new("#{file.path} lacks #{missing.map { |name| prefix + name }.join(", ")}") unless missing.empty?
-      extra = file.names.reject do |name|
+    # Raises unless the file at *path*, holding *names*, holds exactly
+    # *params*, apart from names matching *ignore*.
+    private def check_names(path : String, names : Array(String), params : Hash(String, Parameter), prefix : String, ignore : Regex?) : Nil
+      held = names.to_set
+      missing = params.keys.reject { |name| held.includes?(prefix + name) }
+      raise Error.new("#{path} lacks #{missing.map { |name| prefix + name }.join(", ")}") unless missing.empty?
+      extra = names.reject do |name|
         (ignore && ignore.matches?(name)) || (name.starts_with?(prefix) && params.has_key?(name[prefix.size..]))
       end
-      raise Error.new("#{file.path} has #{extra.join(", ")}, which the model lacks") unless extra.empty?
+      raise Error.new("#{path} has #{extra.join(", ")}, which the model lacks") unless extra.empty?
     end
 
     # Quantises the weights of every `Linear` in this module to *dtype*, a block
