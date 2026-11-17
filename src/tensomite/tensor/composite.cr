@@ -185,6 +185,34 @@ module Tensomite
       q.matmul(k.transpose).softmax(scale: scale, mask: mask).matmul(v)
     end
 
+    # Returns the attention of packed queries *q*, `[tokens, heads, width]`,
+    # each to its own row of shared keys *k* and values *v*, `[rows, kv_heads,
+    # capacity, width]`, as one `Op::RaggedAttention`, `[tokens, heads, value
+    # width]`. *table* holds three entries per token: its row, the last
+    # position it may see, and the positions its row holds. Each query gets
+    # `.attention`'s fused bits for its row alone under a causal mask.
+    #
+    # Only on a device that `Device#fuses_attention?`, with every row holding
+    # at most `ATTENTION_POSITIONS` positions (see `.ragged_attention?`).
+    def self.ragged_attention(q : Tensor, k : Tensor, v : Tensor, table : Array(Int32), *, scale : Number) : Tensor
+      q.check_compatible("ragged_attention", {k, v})
+      tokens, heads = q.shape[0], q.shape[1]
+      unless q.ndim == 3 && k.ndim == 4 && v.ndim == 4 && k.shape[0...3] == v.shape[0...3] && q.shape[2] == k.shape[3] &&
+             heads % k.shape[1] == 0 && table.size == 3 * tokens
+        raise ShapeError.new("ragged attention of #{q.shape} against #{k.shape} and #{v.shape} with #{table.size} entries")
+      end
+      raise DeviceError.new("ragged attention needs a device that fuses attention") unless ragged_attention?(q.device, table, v.shape[3])
+      ids = Tensor.from(table, [table.size], q.device).named("attention table")
+      Tensor.lazy(Node.new(Op::RaggedAttention, [q, k, v, ids], [tokens, heads, v.shape[3]], q.dtype, q.device, scale: scale.to_f32))
+    end
+
+    # Returns true when `.ragged_attention` can run on *device* for *table*'s
+    # tokens and values *value_width* wide.
+    def self.ragged_attention?(device : Device, table : Array(Int32), value_width : Int32) : Bool
+      return false unless device.fuses_attention? && value_width <= ATTENTION_COLUMNS
+      (0...table.size // 3).all? { |token| 0 < table[3 * token + 2] <= ATTENTION_POSITIONS }
+    end
+
     # Returns true when `.attention` of these makes one `Op::Attention`.
     private def self.attention_fusable?(q : Tensor, k : Tensor, v : Tensor, mask : Tensor?) : Bool
       return false unless q.device.fuses_attention? && {q, k, v}.all?(&.dtype.f32?) && mask.try(&.dtype.f32?) != false

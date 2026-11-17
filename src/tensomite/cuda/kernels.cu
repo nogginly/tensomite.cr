@@ -923,33 +923,20 @@ extern "C" __global__ void rmsnorm_f32(const float* a, const float* w, float* ds
     }
 }
 
-// Attention for a few query rows: one block per query row of a head, of
-// ATTENTION_THREADS threads, adding in the orders the composite's kernels add
-// in, so that it has their bits. Thread t scores positions t, t + threads and
-// so on, `q · k · scale + mask`, the dot product in chunks of CHUNK as the
-// matmul kernels sum, into shared memory. The block finds the scores' maximum;
-// threads take the exponentials in chunks of REDUCE_CHUNK, which one thread
-// adds in chunk order, as the softmax kernels do; each score becomes its
-// exponential over the sum. Then the threads take the output columns, each
-// `threads / out_width` threads to a column taking a chunk of CHUNK positions
-// at a time, and the column's first thread adds the chunks' sums of
-// `weight · v` in chunk order. q is `[items, width]` and k and v `[heads,
-// positions, width]` through their views, items = heads × rows; each head's
-// keys and values are found once and stepped through by their views' strides.
-// At most ATTENTION_POSITIONS positions and ATTENTION_THREADS output columns.
-extern "C" __global__ void attention_f32(const float* q, const float* k, const float* v, const float* m, float* dst,
-                                         View vq, View vk, View vv, View vm, unsigned int rows,
-                                         unsigned int positions, unsigned int width, unsigned int out_width,
-                                         float scale, unsigned int masked) {
-    __shared__ float scores[ATTENTION_POSITIONS];
-    __shared__ float partial[ATTENTION_THREADS];
-    __shared__ float sums[ATTENTION_POSITIONS / REDUCE_CHUNK];
-    unsigned int item = blockIdx.x, head = item / rows, t = threadIdx.x, threads = blockDim.x;
-    int pq = offset_of(vq, int(item * width)), sq = run_stride(vq);
-    int sk = run_stride(vk), sv = run_stride(vv), sm = masked ? run_stride(vm) : 0;
-    int pm = masked ? offset_of(vm, int(item * positions)) : 0;
-    int pk = offset_of(vk, int(head * positions * width)), tk = stride_of(vk, vk.ndim - 2);
-    int pv = offset_of(vv, int(head * positions * out_width)), tv = stride_of(vv, vv.ndim - 2);
+// -infinity, as a causal mask holds it for the positions a query may not see.
+#define NEGATIVE_INFINITY __int_as_float((int)0xff800000u)
+
+// One query row of attention, as attention_f32 describes, by the block that
+// calls it: the query at pq, stride sq; the keys from pk, a position apart by
+// tk and a column by sk; the values likewise from pv by tv and sv. masked is
+// 0 for no mask, 1 to add m at pm, a position apart by sm, and 2 to add 0 up
+// to position limit and -infinity after it, the values a causal mask holds.
+// Writes the row's out_width outputs from dst[at].
+__device__ void attend_query(const float* q, const float* k, const float* v, const float* m, float* dst,
+                                    float* scores, float* partial, float* sums, int pq, int sq, int pk, int tk, int sk,
+                                    int pv, int tv, int sv, int pm, int sm, unsigned int masked, int limit,
+                                    unsigned int positions, unsigned int width, unsigned int out_width, float scale,
+                                    unsigned int at, unsigned int t, unsigned int threads) {
     float top = -3.402823466e38f;
     for (unsigned int p = t; p < positions; p += threads) {
         int row = pk + int(p) * tk;
@@ -964,7 +951,8 @@ extern "C" __global__ void attention_f32(const float* q, const float* k, const f
             dot = dot + acc;
         }
         float x = dot * scale;
-        if (masked) x = x + m[pm + int(p) * sm];
+        if (masked == 1) x = x + m[pm + int(p) * sm];
+        else if (masked == 2) x = x + (int(p) <= limit ? 0.0f : NEGATIVE_INFINITY);
         scores[p] = x;
         top = x > top ? x : top;
     }
@@ -1018,7 +1006,62 @@ extern "C" __global__ void attention_f32(const float* q, const float* k, const f
         }
         __syncthreads();
     }
-    if (slot == 0) dst[item * out_width + col] = out;
+    if (slot == 0) dst[at + col] = out;
+}
+
+// Attention for a few query rows: one block per query row of a head, of
+// ATTENTION_THREADS threads, adding in the orders the composite's kernels add
+// in, so that it has their bits. Thread t scores positions t, t + threads and
+// so on, `q · k · scale + mask`, the dot product in chunks of CHUNK as the
+// matmul kernels sum, into shared memory. The block finds the scores' maximum;
+// threads take the exponentials in chunks of REDUCE_CHUNK, which one thread
+// adds in chunk order, as the softmax kernels do; each score becomes its
+// exponential over the sum. Then the threads take the output columns, each
+// `threads / out_width` threads to a column taking a chunk of CHUNK positions
+// at a time, and the column's first thread adds the chunks' sums of
+// `weight · v` in chunk order. q is `[items, width]` and k and v `[heads,
+// positions, width]` through their views, items = heads × rows; each head's
+// keys and values are found once and stepped through by their views' strides.
+// At most ATTENTION_POSITIONS positions and ATTENTION_THREADS output columns.
+extern "C" __global__ void attention_f32(const float* q, const float* k, const float* v, const float* m, float* dst,
+                                         View vq, View vk, View vv, View vm, unsigned int rows,
+                                         unsigned int positions, unsigned int width, unsigned int out_width,
+                                         float scale, unsigned int masked) {
+    __shared__ float scores[ATTENTION_POSITIONS];
+    __shared__ float partial[ATTENTION_THREADS];
+    __shared__ float sums[ATTENTION_POSITIONS / REDUCE_CHUNK];
+    unsigned int item = blockIdx.x, head = item / rows, t = threadIdx.x, threads = blockDim.x;
+    int pq = offset_of(vq, int(item * width)), sq = run_stride(vq);
+    int sk = run_stride(vk), sv = run_stride(vv), sm = masked ? run_stride(vm) : 0;
+    int pm = masked ? offset_of(vm, int(item * positions)) : 0;
+    int pk = offset_of(vk, int(head * positions * width)), tk = stride_of(vk, vk.ndim - 2);
+    int pv = offset_of(vv, int(head * positions * out_width)), tv = stride_of(vv, vv.ndim - 2);
+    attend_query(q, k, v, m, dst, scores, partial, sums, pq, sq, pk, tk, sk, pv, tv, sv, pm, sm, masked ? 1 : 0, 0,
+                 positions, width, out_width, scale, item * out_width, t, threads);
+}
+
+// Attention for the new positions of many sequences packed together, each
+// attending to its own row of a shared cache: one block per query of a head,
+// computed as attention_f32 computes it, so with its bits. q is `[tokens,
+// heads, width]`, k and v `[rows, kv_heads, capacity, width]`, and token t's
+// entries of table, t * 3 on, are its row, the last position it may see and
+// the positions its row holds. dst is `[tokens, heads, out_width]`.
+extern "C" __global__ void attention_ragged_f32(const float* q, const float* k, const float* v, const int* table,
+                                                float* dst, View vq, View vk, View vv, View vt, unsigned int heads,
+                                                unsigned int kv_heads, unsigned int capacity, unsigned int width,
+                                                unsigned int out_width, float scale) {
+    __shared__ float scores[ATTENTION_POSITIONS];
+    __shared__ float partial[ATTENTION_THREADS];
+    __shared__ float sums[ATTENTION_POSITIONS / REDUCE_CHUNK];
+    unsigned int item = blockIdx.x, t = threadIdx.x, threads = blockDim.x;
+    unsigned int token = item / heads, head = item % heads, kv_head = head / (heads / kv_heads);
+    int row = table[offset_of(vt, int(token * 3))], limit = table[offset_of(vt, int(token * 3 + 1))];
+    unsigned int positions = (unsigned int)table[offset_of(vt, int(token * 3 + 2))];
+    int pq = offset_of(vq, int(item * width)), sq = run_stride(vq);
+    int pk = offset_of(vk, int(((unsigned int)row * kv_heads + kv_head) * capacity * width)), tk = stride_of(vk, vk.ndim - 2);
+    int pv = offset_of(vv, int(((unsigned int)row * kv_heads + kv_head) * capacity * out_width)), tv = stride_of(vv, vv.ndim - 2);
+    attend_query(q, k, v, q, dst, scores, partial, sums, pq, sq, pk, tk, run_stride(vk), pv, tv, run_stride(vv), 0, 0, 2,
+                 limit, positions, width, out_width, scale, item * out_width, t, threads);
 }
 
 // Rotary embeddings: one thread per element, `x · cos + rotate_half(x) · sin`,

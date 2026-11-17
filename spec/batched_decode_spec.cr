@@ -76,6 +76,37 @@ describe "Tensor#write_rows" do
   end
 end
 
+describe "Tensor.ragged_attention" do
+  GPUS.each do |device|
+    it "gives each packed query the bits of fused attention over its row alone on #{device.class}" do
+      heads, kv_heads, capacity, width = 4, 2, 8, 16
+      keys = Tensor.from(random_values(3 * kv_heads * capacity * width, 1), [3, kv_heads, capacity, width], device)
+      values = Tensor.from(random_values(3 * kv_heads * capacity * width, 2), [3, kv_heads, capacity, width], device)
+      # Row 2 holds 5 positions, its last 2 new; row 0 holds 3, its last 1 new.
+      queries = [{2, 3}, {2, 4}, {0, 2}]
+      q = Tensor.from(random_values(queries.size * heads * width, 3), [queries.size, heads, width], device)
+      table = queries.flat_map { |(row, limit)| [row, limit, row == 2 ? 5 : 3] }
+      got = Tensor.ragged_attention(q, keys, values, table, scale: 0.25).to_a(Float32)
+      queries.each_with_index do |(row, limit), token|
+        length = row == 2 ? 5 : 3
+        mask = Tensor.from(Array.new(length) { |position| position <= limit ? 0f32 : -Float32::INFINITY }, [1, length], device)
+        heads.times do |head|
+          kv = head // (heads // kv_heads)
+          one = Tensor.attention(q.slice(0, token, token + 1).slice(1, head, head + 1).reshape([1, 1, 1, width]),
+            keys.slice(0, row, row + 1).slice(1, kv, kv + 1).slice(2, 0, length),
+            values.slice(0, row, row + 1).slice(1, kv, kv + 1).slice(2, 0, length), scale: 0.25, mask: mask)
+          got[(token * heads + head) * width, width].should eq one.to_a(Float32)
+        end
+      end
+    end
+  end
+
+  it "raises on a device that does not fuse attention" do
+    q, kv = Tensor.zeros([1, 1, 4]), Tensor.zeros([1, 1, 2, 4])
+    expect_raises(DeviceError, /fuses attention/) { Tensor.ragged_attention(q, kv, kv, [0, 0, 1], scale: 1) }
+  end
+end
+
 describe "Batched decoding" do
   (DEVICES + GPUS).each do |device|
     it "gives each GPT-2 row its logits alone on #{device.class}, appended raggedly" do

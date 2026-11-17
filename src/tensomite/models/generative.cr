@@ -125,19 +125,23 @@ module Tensomite
     end
 
     # Returns a step's `CausalSelfAttention::Pack`: each row's segment of the
-    # packed positions, with its causal mask, and each new position's slot.
+    # packed positions, with its causal mask, and each new position's slot and
+    # ragged-attention entries.
     private def pack(rows : Array(Int32), ids : Array(Array(Int32)), pasts : Array(Int32), capacity : Int32) : CausalSelfAttention::Pack
       start = 0
-      slots = [] of Int32
+      slots, table = [] of Int32, [] of Int32
       segments = rows.map_with_index do |row, i|
         count, past = ids[i].size, pasts[i]
-        count.times { |j| slots << row * capacity + past + j }
+        count.times do |j|
+          slots << row * capacity + past + j
+          table.push(row, past + j, past + count)
+        end
         mask = Tensor.causal_mask(count, past + count, device)
         segment = CausalSelfAttention::Segment.new(start, count, mask, row, past + count)
         start += count
         segment
       end
-      CausalSelfAttention::Pack.new(segments, slots)
+      CausalSelfAttention::Pack.new(segments, slots, table)
     end
 
     # Returns the rows of *x*, packed rows' positions, that hold each row's last.

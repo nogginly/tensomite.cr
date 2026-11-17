@@ -63,6 +63,13 @@ static T __shfl_xor_sync(unsigned int, T value, int mask) {
 // reaches from every thread the same number of times.
 #define __syncwarp() block_barrier->arrive_and_wait()
 
+// The float whose bits are those of x.
+static float __int_as_float(int x) {
+    float f;
+    std::memcpy(&f, &x, 4);
+    return f;
+}
+
 // The dot product of the four signed bytes of a with those of b, plus c.
 static int __dp4a(int a, int b, int c) {
     for (int j = 0; j < 4; j++) c += int((signed char)(a >> (8 * j))) * int((signed char)(b >> (8 * j)));

@@ -92,6 +92,14 @@ module Tensomite
     # v`, with the mask (source 3, if any) expanded to `[..., rows,
     # positions]`. Only GPUs make it (see `Tensor.attention`).
     Attention
+    # Attention for the new positions of many sequences packed together, each
+    # attending causally to its own row of a shared cache: queries `[tokens,
+    # heads, width]` (source 0), keys and values `[rows, kv_heads, capacity,
+    # width]` (sources 1 and 2), and per token, in the `I32` source 3, its row,
+    # the last position it may see and the positions its row holds. Each query
+    # has `Attention`'s bits for the same row alone. Only GPUs make it (see
+    # `Tensor.ragged_attention`).
+    RaggedAttention
     # Source 1 copied into the region `Node#source_view` of source 0, in place:
     # the node's buffer is source 0's, and every other element keeps its value.
     # See `Tensor#write`.

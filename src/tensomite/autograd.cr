@@ -157,6 +157,8 @@ module Tensomite
         rmsnorm_backward(node, g)
       in Op::Attention
         attention_backward(node, g)
+      in Op::RaggedAttention
+        raise Error.new("ragged attention has no gradient")
       in Op::Rope
         _, cos, sin = srcs
         [g * cos + (g * sin).rotate_half_transposed, nil, nil] of Tensor?
