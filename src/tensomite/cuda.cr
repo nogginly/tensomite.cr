@@ -495,7 +495,7 @@ module Tensomite
       when Op::MatMul                                                                                                      then launch_matmul(kernels, node, output)
       when Op::Softmax, Op::SoftmaxGrad, Op::LogSoftmax, Op::LogSoftmaxGrad, Op::LayerNorm, Op::LayerNormGrad, Op::RMSNorm then launch_row_op(kernels, node, output)
       when Op::Kernel, Op::Dropout, Op::Rope                                                                               then launch_pointwise(kernels, node, output)
-      when Op::Attention                                                                                                   then launch_attention(kernels, node, output)
+      when Op::Attention, Op::RaggedAttention                                                                              then launch_attention(kernels, node, output)
       else                                                                                                                      return launch_elementwise(kernels, node, output)
       end
       true
@@ -503,6 +503,7 @@ module Tensomite
 
     # Fused attention: one block of `ATTENTION_THREADS` per query row of a head.
     private def launch_attention(kernels : Kernels, node : Node, output : CUDABuffer) : Nil
+      return launch_ragged_attention(kernels, node, output) if node.op.try(&.ragged_attention?)
       q, k, v = node.srcs
       mask = node.srcs[3]?
       width = q.shape[-1]
@@ -513,6 +514,17 @@ module Tensomite
         mask ? pointer(mask) : pointer(q), output.pointer, view_args(q.view), view_args(k.view), view_args(v.view),
         view_args((mask || q).view), q.shape[-2].to_u32, k.shape[-2].to_u32, width.to_u32, v.shape[-1].to_u32,
         scale, mask ? 1_u32 : 0_u32)
+    end
+
+    # Ragged attention: one block of `ATTENTION_THREADS` per query of a head.
+    private def launch_ragged_attention(kernels : Kernels, node : Node, output : CUDABuffer) : Nil
+      q, k, v, table = node.srcs
+      items = q.shape[0] * q.shape[1]
+      return if items == 0
+      scale = node.scale || raise Error.new("attention needs a scale")
+      context.launch(kernels["attention_ragged_f32"], items, ATTENTION_THREADS, pointer(q), pointer(k), pointer(v),
+        pointer(table), output.pointer, view_args(q.view), view_args(k.view), view_args(v.view), view_args(table.view),
+        q.shape[1].to_u32, k.shape[1].to_u32, k.shape[2].to_u32, q.shape[2].to_u32, v.shape[3].to_u32, scale)
     end
 
     # Kernels from `Tensomite.kernel`, dropout and rotary embeddings, each one

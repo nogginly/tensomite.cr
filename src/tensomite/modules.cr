@@ -227,9 +227,11 @@ module Tensomite
       end
     end
 
-    # A step of a packed `#forward`: each sequence's *segments*, and each new
-    # position's *slots* in the `SharedCache`, `row * capacity + position`.
-    record Pack, segments : Array(Segment), slots : Array(Int32)
+    # A step of a packed `#forward`: each sequence's *segments*, each new
+    # position's *slots* in the `SharedCache`, `row * capacity + position`,
+    # and its *table* entries for `Tensor.ragged_attention`: its row, the last
+    # position it may see, and the positions its row holds.
+    record Pack, segments : Array(Segment), slots : Array(Int32), table : Array(Int32)
 
     getter heads : Int32
     getter c_attn : Linear
@@ -274,6 +276,11 @@ module Tensomite
       head_width = width // heads
       new_keys, new_values = (1..2).map { |part| joined.slice(1, part * width, (part + 1) * width).reshape([total, heads, head_width]) }
       keys, values = cache.append(new_keys, new_values, pack.slots)
+      if Tensor.ragged_attention?(x.device, pack.table, head_width)
+        q = joined.slice(1, 0, width).reshape([total, heads, head_width])
+        attended = Tensor.ragged_attention(q, keys, values, pack.table, scale: 1 / Math.sqrt(head_width))
+        return c_proj.call(attended.reshape([total, width]))
+      end
       parts = pack.segments.map do |segment|
         attend(joined.slice(0, segment.start, segment.start + segment.count), segment.count, segment.mask, nil,
           held: {segment.held(keys), segment.held(values)})
@@ -431,6 +438,11 @@ module Tensomite
       q = rope.call(q.reshape([total, heads, head_width]), angles).reshape([total, heads * head_width])
       keys, values = cache.append(rope.call(k.reshape([total, kv_heads, head_width]), angles),
         v.reshape([total, kv_heads, head_width]), pack.slots)
+      if Tensor.ragged_attention?(x.device, pack.table, head_width)
+        attended = Tensor.ragged_attention(q.reshape([total, heads, head_width]), keys, values, pack.table,
+          scale: 1 / Math.sqrt(head_width))
+        return o_proj.call(attended.reshape([total, heads * head_width]))
+      end
       parts = pack.segments.map do |segment|
         rows = {segment.start, segment.start + segment.count}
         attend(q.slice(0, *rows), k.slice(0, *rows), v.slice(0, *rows), segment.count, segment.mask, rope, nil,

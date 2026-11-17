@@ -138,8 +138,9 @@ module Tensomite
       in Op::Rope         then rope(node, Slice.new(dst.to_unsafe.as(Float32*), dst.size))
       in Op::Softmax, Op::SoftmaxGrad, Op::LogSoftmax, Op::LogSoftmaxGrad, Op::LayerNorm, Op::LayerNormGrad, Op::RMSNorm
         rows(node, Slice.new(dst.to_unsafe.as(Float32*), dst.size))
-      in Op::Dropout   then dropout(node, Slice.new(dst.to_unsafe.as(Float32*), dst.size))
-      in Op::Attention then attention(node, Slice.new(dst.to_unsafe.as(Float32*), dst.size))
+      in Op::Dropout         then dropout(node, Slice.new(dst.to_unsafe.as(Float32*), dst.size))
+      in Op::Attention       then attention(node, Slice.new(dst.to_unsafe.as(Float32*), dst.size))
+      in Op::RaggedAttention then raise Error.new("ragged attention runs only on GPUs")
       in Op::Kernel
         kernel = node.kernel || raise Error.new("kernel node without a kernel")
         kernel.host(Slice.new(dst.to_unsafe.as(Float32*), dst.size), node.srcs.map { |src| elements(Float32, src) }, node.srcs.map(&.view))
