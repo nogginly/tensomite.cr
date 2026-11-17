@@ -155,6 +155,13 @@ Met (25 Oct 2026, the Linux container and the M5 Pro):
     - Met (14 Nov 2026): SmolLM2-135M-Instruct decodes at Q4_0 in 8.2–8.3 ms a token on the container's 4 threads, against 27–31 ms in `F32` on `BLAS`, and 16 ms at Q8_0. `Quant.matmul` gives `Quant.matmul_reference`'s bits on 1, 3 and 8 threads (`spec/quant_spec.cr`), so the results match the oracle exactly, and SmolLM2's Q4_0 gives the same logits in prefill and in one-by-one decode on the host devices (`spec/block_matmul_spec.cr`). SmolLM2-1.7B at Q4_0 decodes in 7.17 ms a token on the M5 Pro (6.36 native) and 12.8 on the GB10 (11.2 native), from 365 and 414 ms before M11; llama.cpp takes 6.7 and 11.4.
 12. **Vulkan backend.** Bind Vulkan compute, and port the hand-written kernels to GLSL compiled at build time. Kernel macros gain a GLSL backend beside Crystal, MSL and CUDA C++ (Decision V), so fused kernels come with it. It follows CUDA (Decision AT), for AMD and Intel GPUs.
     - Exit: the full op suite matches the oracle on a Linux discrete GPU, and GPT-2 runs there.
+13. **Ready for autoresearch (Decision DO).** Close the library's gaps for a Crystal port of `karpathy/autoresearch`, an agent that edits a training script, trains for a fixed time and keeps or discards the change on validation bits per byte. Each gap is a GitHub issue, under the epic #156.
+    - Optimizer parameter groups, each with its own learning rate, betas, epsilon and weight decay (G-02, #158), and a documented hook for optimizers that update parameters in groups, as Muon does (G-03, #159).
+    - `relu`, `square`, `sigmoid`, `Tensor.stack` and `unbind` (G-04, #160); RMSNorm without a weight (G-06, #162).
+    - Per-token cross-entropy (G-05, #161): `reduction:` and `ignore_index:` came in 0.4.0; computing the targets' gather on the device remains.
+    - A configurable BPE pre-tokenizer pattern, and a tokenizer exported from `tiktoken` (D-01, #166); the compile time of an app, measured (G-09, #165).
+    - Exit: the port's GPT model and MuonAdamW match fixtures from the PyTorch original on CPU, CUDA and Metal, and a scaled-down configuration trains inside its time budget. The port's data tools and the app itself are apps, not the milestone.
+14. **Scale (later).** 64-bit element counts and offsets (G-01, #157), fused causal and windowed attention for training (G-07, #163), and `BF16` and `F16` compute (G-08, #164): what a full-size autoresearch run needs once M13's scaled-down one works. At 16 sequences of 2,048 tokens a micro-batch fits under 2 GiB, and composite attention gives the same answer, so none blocks M13.
 
 
 **Apps (Decisions BT to CF).** Not a milestone: apps under `apps/` that use tensomite as a library on real work, and find what the library still lacks. Two so far.
@@ -291,6 +298,7 @@ Recorded in full, with their reasoning and measurements, in [`DECISIONS.md`](DEC
 - [DU](DECISIONS.md#decision-du): where a step of many rows goes (decided).
 - [DV](DECISIONS.md#decision-dv): fewer, wider ops for a step of many rows (decided).
 - [DW](DECISIONS.md#decision-dw): saving quantised weights (decided).
+- [DX](DECISIONS.md#decision-dx): what comes after 0.7.1 (decided).
 
 ## Risks
 

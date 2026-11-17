@@ -633,3 +633,8 @@ Stage 3, the fused ragged attention: `Op::RaggedAttention` takes every row's new
 ## DW: saving quantised weights
 
 GGUF, written by tensomite (decided): `GGUF.write` writes `F32` and block-format tensors byte for byte, with typed metadata, and `Module#save` writes one for a path ending in `.gguf`; `Module#load` reads it back into a model built at `F32`, each quantised `Linear` weight or `Embedding` table taking the layout the module's own `quantize` gives. A training app's package held `F32` weights and quantised them on loading, so it was no smaller on disk than the unquantised model; at `Q8_0` the file is now about a quarter of the `F32` one. Safetensors has no block dtypes, and a format of tensomite's own would be one more to maintain, while GGUF is the format tensomite already reads. The names are tensomite's, not llama.cpp's, so these files are not for llama.cpp; writing a Llama under llama.cpp's names and metadata, so llama.cpp can run it, is a later step if wanted.
+
+<a id="decision-dx"></a>
+## DX: what comes after 0.7.1
+
+Bookkeeping, then M13 (decided). The bookkeeping: `HANDOFF.md` rewritten, M13 and a later milestone on scale in `PLAN.md`, the FAQ pages for Q-CL to Q-DE, and M13's issues raised. Then M13 smallest first: RMSNorm without a weight, the elementwise helpers, optimizer groups and the hook, the BPE pattern, and the compile time. Metal's lanes kernel (DR) can come between them; the server's engine in the library, llama.cpp-format GGUF and CUDA graphs wait (Decision DC; a compiled step would be the better form of the last).
