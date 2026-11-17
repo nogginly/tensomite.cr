@@ -48,6 +48,25 @@ describe "Fused RMSNorm and RoPE" do
       end
     end
 
+    it "computes RMSNorm without a weight as by a weight of ones on #{device.class}, bit for bit" do
+      x_values = random_values(3 * 96, 7)
+      x = Tensor.from(x_values, [3, 96], device)
+      plain = x.rmsnorm(1e-6)
+      plain.node.op.should eq Op::RMSNorm
+      plain.node.srcs.size.should eq 1
+      plain.to_a(Float32).should eq x.rmsnorm(Tensor.full([96], 1, device: device), 1e-6).to_a(Float32)
+      odd = Tensor.from(x_values, [96, 3], device).transpose
+      odd.rmsnorm(1e-6).to_a(Float32).should eq odd.rmsnorm(Tensor.full([96], 1, device: device), 1e-6).to_a(Float32)
+    end
+
+    it "differentiates RMSNorm without a weight as by a weight of ones on #{device.class}, bit for bit" do
+      x = Tensor.from(random_values(3 * 96, 8), [3, 96], device)
+      ones = Tensor.full([96], 1, device: device)
+      plain = Tensomite.grad((x.rmsnorm * x).sum, [x]).first.to_a(Float32)
+      weighted = Tensomite.grad((x.rmsnorm(ones) * x).sum, [x]).first.to_a(Float32)
+      plain.should eq weighted
+    end
+
     it "computes RoPE as its composite on #{device.class}, bit for bit, through views" do
       cos_values, sin_values = random_values(4 * 96, 3), random_values(4 * 96, 4)
       x = Tensor.from(rope_values, [2, 4, 3, 96], device).permute([0, 2, 1, 3])
@@ -73,6 +92,7 @@ describe "Fused RMSNorm and RoPE" do
 
   it "gives RMSNorm's gradients" do
     check_gradients([[3, 8], [8]]) { |(x, weight)| x.rmsnorm(weight) }
+    check_gradients([[3, 8]]) { |(x)| x.rmsnorm }
   end
 
   it "gives RoPE's gradient" do

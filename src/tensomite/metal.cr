@@ -747,10 +747,10 @@ module Tensomite
       src = node.srcs.first
       case node.op
       when Op::RMSNorm
-        weight = node.srcs[1]
+        weight = node.srcs[1]? || src
         epsilon = node.epsilon || raise Error.new("rmsnorm needs an epsilon")
         dispatch_groups("rmsnorm_f32", {rows, 1}, {Metal.norm_threads(n), 1}, [mtl(src), mtl(weight), output.mtl],
-          [view_args(src.view), view_args(weight.view), u32(n), Slice[epsilon].to_unsafe_bytes])
+          [view_args(src.view), view_args(weight.view), u32(n), Slice[epsilon].to_unsafe_bytes, u32(node.srcs.size > 1 ? 1 : 0)])
       when Op::LayerNorm
         weight, bias = node.srcs[1], node.srcs[2]
         epsilon = node.epsilon || raise Error.new("layernorm needs an epsilon")

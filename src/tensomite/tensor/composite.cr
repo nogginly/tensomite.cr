@@ -156,6 +156,17 @@ module Tensomite
       self / ((self * self).mean(-1, keepdims: true) + eps).sqrt * weight
     end
 
+    # Returns RMS normalisation over the last axis without a weight: each row
+    # divided by its root mean square, `x / √(Σx²/n + ε)`, with the bits of
+    # `#rmsnorm` by a weight of ones, at no weight's cost. PyTorch's
+    # `F.rms_norm` with no `eps` uses `Float32::EPSILON`; pass it to match.
+    #
+    # With `F32` data it is one fused op (`Op::RMSNorm` with no weight).
+    def rmsnorm(eps : Number = 1e-5) : Tensor
+      return Tensor.lazy(Node.new(Op::RMSNorm, [self], shape, dtype, device, epsilon: eps.to_f32)) if fusable_row?(-1)
+      self / ((self * self).mean(-1, keepdims: true) + eps).sqrt
+    end
+
     # The most query rows per head, cached positions, and value columns that
     # `.attention` fuses.
     ATTENTION_ROWS      =    8

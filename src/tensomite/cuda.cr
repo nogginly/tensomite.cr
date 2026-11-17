@@ -783,6 +783,17 @@ module Tensomite
       current.pointer
     end
 
+    # RMSNorm: one block per row of `CUDA.norm_threads` threads; without a
+    # weight, the input stands in for it and the kernel leaves it unread.
+    private def launch_rmsnorm(kernels : Kernels, node : Node, output : CUDABuffer, rows : Int32, n : Int32) : Nil
+      src = node.srcs.first
+      weight = node.srcs[1]? || src
+      epsilon = node.epsilon || raise Error.new("rmsnorm needs an epsilon")
+      weighted = node.srcs.size > 1 ? 1_u32 : 0_u32
+      context.launch(kernels["rmsnorm_f32"], rows, CUDA.norm_threads(n), pointer(src), pointer(weight), output.pointer,
+        view_args(src.view), view_args(weight.view), n.to_u32, epsilon.to_f32, weighted)
+    end
+
     # Returns the threads RMSNorm's kernel gives a row of *n*: the smallest power
     # of two from 32 that gives each at most four elements, up to `NORM_THREADS`.
     def self.norm_threads(n : Int32) : Int32
@@ -803,10 +814,7 @@ module Tensomite
       threads = Math.min((n + REDUCE_CHUNK - 1) // REDUCE_CHUNK, REDUCE_THREADS)
       src = node.srcs.first
       if node.op == Op::RMSNorm
-        weight = node.srcs[1]
-        epsilon = node.epsilon || raise Error.new("rmsnorm needs an epsilon")
-        context.launch(kernels["rmsnorm_f32"], rows, CUDA.norm_threads(n), pointer(src), pointer(weight), output.pointer,
-          view_args(src.view), view_args(weight.view), n.to_u32, epsilon.to_f32)
+        launch_rmsnorm(kernels, node, output, rows, n)
       elsif node.op == Op::LayerNorm
         weight, bias = node.srcs[1], node.srcs[2]
         epsilon = node.epsilon || raise Error.new("layernorm needs an epsilon")
