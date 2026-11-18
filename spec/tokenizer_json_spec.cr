@@ -47,6 +47,31 @@ describe "BPE.from_json" do
   end
 end
 
+describe "BPE.from_json with a tiktoken tokeniser" do
+  dir = "#{__DIR__}/fixtures/tiktoken"
+  bpe = BPE.from_json("#{dir}/tokenizer.json")
+  expected = JSON.parse(File.read("#{dir}/expected.json"))
+  texts = expected["texts"].as_a.map(&.as_s)
+  ids = expected["ids"].as_a.map(&.as_a.map(&.as_i))
+  special_ids = expected["special_ids"].as_a.map(&.as_a.map(&.as_i))
+  decoded = expected["decoded"].as_a.map(&.as_s)
+
+  it "encodes like tiktoken's encode_ordinary, with its split pattern" do
+    texts.each_with_index { |text, i| bpe.encode(text, special: false).should eq ids[i] }
+  end
+
+  it "encodes special tokens like tiktoken's encode, and decodes them back" do
+    texts.each_with_index do |text, i|
+      bpe.encode(text).should eq special_ids[i]
+      bpe.decode(bpe.encode(text)).should eq decoded[i]
+    end
+  end
+
+  it "splits numbers into pairs of digits, unlike GPT-2" do
+    bpe.encode("12345", special: false).map { |id| bpe.decode([id]) }.should eq ["12", "34", "5"]
+  end
+end
+
 describe "M9: SmolLM2's tokeniser" do
   dir = ENV["TENSOMITE_SMOLLM2_DIR"]? || ""
   if File.exists?("#{dir}/tokenizer.json")

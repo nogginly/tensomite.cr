@@ -120,6 +120,7 @@ Fixture     |Contents                                                           
 ------------|-----------------------------------------------------------------------------------------------|-----------------------------
 `tiny_gpt2/`|a small trained byte-level BPE vocabulary, a random 2-layer GPT-2 (160 KB), and `expected.json`|PyPI packages only           
 `gpt2/`     |`expected.json` only; the weights are downloaded, not committed                                |GPT-2 small from Hugging Face
+`tiktoken/` |a small tiktoken BPE with the GPT-4-style split pattern, converted to `tokenizer.json`, and the ids tiktoken gives|`tiktoken` and `tokenizers`
 
 `expected.json` holds a Unicode tokeniser corpus and its ids, a prompt and its ids, reference logits, and the greedy continuation. The tiny tokeniser's ids are checked against both Hugging Face's Rust tokeniser and transformers' Python port of GPT-2's original one before they are written.
 
@@ -128,6 +129,7 @@ Running the specs needs no Python: the fixtures are committed, and only GPT-2 sm
 1. **Create a Python environment** with a Python that PyTorch publishes wheels for. 3.13 was used here; a newer release such as 3.15 can have none yet, and pip then reports "no matching distribution found for torch": `python3.13 -m venv .venv && .venv/bin/pip install torch transformers tokenizers safetensors`.
 2. **Tiny fixtures:** `.venv/bin/python scripts/make_fixtures.py tiny`.
 3. **GPT-2 small fixtures:** `scripts/fetch_gpt2.sh models/gpt2`, then `.venv/bin/python scripts/make_fixtures.py gpt2 models/gpt2`.
+4. **tiktoken fixture:** `.venv/bin/pip install tiktoken`, then `.venv/bin/python scripts/make_fixtures.py tiktoken`. It converts with `scripts/tiktoken_to_json.py`, the same script that converts a tiktoken tokeniser for use with tensomite.
 
 The GPT-2 small specs (the M4 exit) run only when `TENSOMITE_GPT2_DIR` names a directory holding the downloaded files and `spec/fixtures/gpt2/expected.json` exists; otherwise they are pending. CI downloads GPT-2 small, cached. Run them with `--release`: a debug build takes about 6 minutes, and a release build about 1 minute plus compilation.
 

@@ -2,9 +2,9 @@ require "json"
 require "./errors"
 
 module Tensomite
-  # GPT-2's byte-level byte-pair-encoding tokeniser.
+  # A byte-level byte-pair-encoding tokeniser, GPT-2's kind.
   #
-  # Text is split into words with GPT-2's pattern, each word's UTF-8 bytes are mapped
+  # Text is split into words with GPT-2's pattern or another, each word's UTF-8 bytes are mapped
   # onto printable characters, and adjacent symbols are merged in order of merge
   # rank until no ranked pair remains. Any byte sequence round-trips.
   #
@@ -66,7 +66,9 @@ module Tensomite
 
     # Returns the tokeniser in a Hugging Face `tokenizer.json`: a byte-level BPE
     # model, its added tokens, and a pre-tokeniser of `ByteLevel`, alone or after
-    # `Digits` with `individual_digits`.
+    # `Digits` with `individual_digits`, or after a `Split` by a regex, isolating
+    # its matches, with `ByteLevel`'s own pattern off, as GPT-4-style
+    # tokenisers are written.
     #
     # Raises `Error` for anything else, such as a normaliser, byte fallback or a
     # SentencePiece model, which this tokeniser would get wrong.
@@ -78,7 +80,7 @@ module Tensomite
         raise Error.new("#{path}: only byte-level BPE models are supported")
       end
       raise Error.new("#{path}: normalizers are not supported") unless json["normalizer"]?.try(&.raw).nil?
-      digits, prefix_space = pre_tokenizer(json["pre_tokenizer"], path)
+      digits, prefix_space, pattern = pre_tokenizer(json["pre_tokenizer"], path)
       vocab = model["vocab"].as_h.transform_values(&.as_i)
       merges = model["merges"].as_a.map do |merge|
         if pair = merge.as_a?
@@ -95,7 +97,7 @@ module Tensomite
         end
         specials[token["content"].as_s] = token["id"].as_i
       end
-      new(vocab.merge(specials), merges, specials, digits: digits, prefix_space: prefix_space)
+      new(vocab.merge(specials), merges, specials, digits: digits, prefix_space: prefix_space, pattern: pattern)
     end
 
     # Returns the tokeniser in a GGUF file's metadata: a `gpt2` (byte-level BPE)
@@ -122,24 +124,44 @@ module Tensomite
     end
 
     # Returns whether the pre-tokeniser *json* splits digits and adds a leading
-    # space, raising for one this tokeniser does not implement.
-    private def self.pre_tokenizer(json : JSON::Any, path : String) : {Bool, Bool}
+    # space, and the pattern that splits text into words, raising for one this
+    # tokeniser does not implement.
+    private def self.pre_tokenizer(json : JSON::Any, path : String) : {Bool, Bool, Regex}
       steps = json["type"].as_s == "Sequence" ? json["pretokenizers"].as_a : [json]
-      digits = steps.size == 2 && steps[0]["type"].as_s == "Digits" && steps[0]["individual_digits"].as_bool
       level = steps.last
-      unless (steps.size == 1 || digits) && level["type"].as_s == "ByteLevel" && level["use_regex"]?.try(&.as_bool) != false
-        raise Error.new("#{path}: pre-tokenizer #{json.to_json} is not supported")
+      unsupported = Error.new("#{path}: pre-tokenizer #{json.to_json} is not supported")
+      raise unsupported unless level["type"].as_s == "ByteLevel"
+      prefix_space = level["add_prefix_space"]?.try(&.as_bool) || false
+      if steps.size == 2 && steps[0]["type"].as_s == "Split"
+        return {false, prefix_space, split_pattern(steps[0], level) || raise unsupported}
       end
-      {digits, level["add_prefix_space"]?.try(&.as_bool) || false}
+      digits = steps.size == 2 && steps[0]["type"].as_s == "Digits" && steps[0]["individual_digits"].as_bool
+      raise unsupported unless (steps.size == 1 || digits) && level["use_regex"]?.try(&.as_bool) != false
+      {digits, prefix_space, PATTERN}
+    end
+
+    # Returns the regex of a `Split` pre-tokeniser that isolates its matches,
+    # before a `ByteLevel` with its own pattern off, or `nil` for any other.
+    private def self.split_pattern(split : JSON::Any, level : JSON::Any) : Regex?
+      source = split["pattern"]["Regex"]?.try(&.as_s) || return
+      return if split["behavior"]?.try(&.as_s) != "Isolated" || split["invert"]?.try(&.as_bool)
+      return unless level["use_regex"]?.try(&.as_bool) == false
+      Regex.new(source, Regex::Options::UCP)
     end
 
     # Returns a tokeniser of the token ids *ids* and ranked *merges*. Text that
     # matches one of *specials* encodes to its id whole. With *digits*, each
     # digit is a word of its own; with *prefix_space*, a space is added before
-    # text that does not start with one.
+    # text that does not start with one. *pattern* splits text into the words
+    # that are merged, by default GPT-2's; give a GPT-4-style one with
+    # `Regex::Options::UCP`, so `\p{L}` and `\s` match beyond ASCII:
+    #
+    # ```
+    # BPE.new(ids, merges, pattern: Regex.new(%q('(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+), Regex::Options::UCP))
+    # ```
     def initialize(@ids : Hash(String, Int32), merges : Array({String, String}),
                    @specials : Hash(String, Int32) = {} of String => Int32,
-                   @digits : Bool = false, @prefix_space : Bool = false)
+                   @digits : Bool = false, @prefix_space : Bool = false, @pattern : Regex = PATTERN)
       @tokens = @ids.invert
       @ranks = merges.each_with_index.to_h { |pair, rank| {pair, rank} }
       unless @specials.empty?
@@ -177,11 +199,12 @@ module Tensomite
     #
     # 1. Adds a leading space, with `prefix_space`, unless there is one.
     # 2. Splits off each digit as a word of its own, with `digits`.
-    # 3. Splits each piece with GPT-2's pattern, and merges each word.
+    # 3. Splits each piece with the pattern, GPT-2's by default, and merges
+    #    each word.
     private def encode_text(text : String) : Array(Int32)
       text = " " + text if @prefix_space && !text.starts_with?(' ')
       pieces = @digits ? text.split(/(\p{N})/).reject(&.empty?) : [text]
-      pieces.flat_map { |piece| piece.scan(PATTERN).flat_map { |match| encode_word(match[0]) } }
+      pieces.flat_map { |piece| piece.scan(@pattern).flat_map { |match| encode_word(match[0]) } }
     end
 
     # Returns the text of *ids*. Byte sequences that are not valid UTF-8, such as a

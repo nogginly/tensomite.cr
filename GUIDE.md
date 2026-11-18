@@ -446,6 +446,14 @@ bpe.encode("<|im_start|>user\nWhat is 12 + 345?")
 # => [1, 4093, 198, 1780, 314, 216, 33, 34, 1232, 216, 35, 36, 37, 47]: 1 is <|im_start|>; 33 to 37 are the digits 1 to 5
 ```
 
+A `tokenizer.json` whose pre-tokeniser is a `Split` regex followed by a `ByteLevel` with its own regex off, as GPT-4-style tokenisers have, encodes with that regex instead of GPT-2's. A `tiktoken` tokeniser, such as one pickled by a Python training script, converts to such a file with `scripts/tiktoken_to_json.py`, and then encodes as `tiktoken` does, bit for bit: `encode(text, special: false)` is `encode_ordinary`, and `encode(text)` is `encode` with every special token allowed.
+
+```sh
+python scripts/tiktoken_to_json.py tokenizer.pkl tokenizer.json   # needs pip install tiktoken
+```
+
+To set the regex directly, pass it as `BPE.new(..., pattern: Regex.new(source, Regex::Options::UCP))`.
+
 `model.forward_last(ids, cache)` is `forward` for the last position alone, `[1, vocab]`: the final norm and the head, the largest product, run on one row, as `generate` and `apps/server` use it. `generate` returns only the new tokens, and with `stop:` it ends after any of the given tokens, such as `<|endoftext|>`, which it returns last. Without a sampler it picks the likeliest token each time (greedy), so the output is always the same. With a `Sampler` it picks at random, in proportion to each token's probability, among the `top_k` likeliest tokens (all of them when `top_k` is 0, the default). A `temperature` above 1 makes unlikely tokens more likely to be picked, and below 1 less likely. The same seed gives the same text.
 
 **Many sequences at once.** A batch cache holds a row per sequence, each of its own length. Each call appends any number of tokens to each row, none for an idle row, and returns the logits of each active row's last position, in row order. The products run once for every row's tokens, so decoding 32 sequences together reads each weight once a step, not 32 times; attention runs per row on that row's own cache, so each row's logits are those it gets decoded alone, whatever else is in the batch, bit for bit on every device but `BLAS`. `reset(row)` empties a row for a new sequence. The cache's buffers hold every row at its full capacity from the first call: 64 rows of 2,048 positions for a model of 8 layers of width 512 take about 4.3 GB, so give `capacity:` no more than a sequence needs.
