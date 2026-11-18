@@ -7,6 +7,7 @@
     python scripts/make_fixtures.py tiny_llama          # spec/fixtures/tiny_llama/
     python scripts/make_fixtures.py tiny_gguf           # spec/fixtures/tiny_llama/*.gguf
     python scripts/make_fixtures.py quant               # spec/fixtures/quant/
+    python scripts/make_fixtures.py tiktoken            # spec/fixtures/tiktoken/
 
 `tokenizer` needs only `tokenizers`: it trains a small byte-level BPE with
 SmolLM2's pre-tokeniser (digits split, then GPT-2's pattern) and ChatML's
@@ -19,6 +20,10 @@ blocks, as hex bytes and dequantised values for Q8_0, Q4_0 and Q4_1.
 `tiny_gguf` writes `tiny_llama` and `tokenizer` as GGUF files, at F32, F16,
 Q8_0 and Q4_0 (every matrix quantised, the norms kept at F32),
 as llama.cpp's converter does, with each head's query and key rows reordered.
+`tiktoken` needs `tiktoken` (and `tokenizers`, which this script imports):
+it trains a small BPE with tiktoken's reference trainer and the GPT-4-style
+split pattern autoresearch uses, adds four reserved special tokens, converts
+it with scripts/tiktoken_to_json.py, and records the ids tiktoken gives.
 `tiny_llama` builds a randomly initialised 2-layer Llama, with grouped queries
 and an untied head, over `tokenizer`'s vocabulary, and records its logits.
 
@@ -38,6 +43,8 @@ Both write expected.json with:
   greedy                greedy continuation of the prompt
 """
 
+import contextlib
+import io
 import json
 import pathlib
 import sys
@@ -183,7 +190,43 @@ def tokenizer():
     write_token_ids(out, tok)
 
 
-CHAT_PROMPT = "<|im_start|>user\nWhat is the capital of France?<|im_end|>\n<|im_start|>assistant\n"
+TIKTOKEN_PATTERN = r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"""
+TIKTOKEN_SPECIALS = [f"<|reserved_{i}|>" for i in range(4)]
+TIKTOKEN_CHAT = [
+    "<|reserved_0|>Hello, world!<|reserved_1|>",
+    "a<|reserved_3|>b<|reserved_2|><|reserved_0|> 2024-11-08 ٣٤ ³",
+    "<|reserved_0|",
+]
+
+
+def tiktoken_fixture():
+    import tiktoken
+    from tiktoken._educational import SimpleBytePairEncoding
+    sys.dont_write_bytecode = True
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from tiktoken_to_json import convert
+
+    out = FIXTURES / "tiktoken"
+    out.mkdir(parents=True, exist_ok=True)
+    with contextlib.redirect_stdout(io.StringIO()):
+        trained = SimpleBytePairEncoding.train(
+            "\n".join(CORPUS + [PROMPT] * 3), vocab_size=400, pat_str=TIKTOKEN_PATTERN,
+        )
+    ranks = trained.mergeable_ranks
+    specials = {s: len(ranks) + i for i, s in enumerate(TIKTOKEN_SPECIALS)}
+    enc = tiktoken.Encoding("tiny", pat_str=TIKTOKEN_PATTERN, mergeable_ranks=ranks, special_tokens=specials)
+    (out / "tokenizer.json").write_text(json.dumps(convert(enc), ensure_ascii=False))
+    texts = CORPUS + TIKTOKEN_CHAT
+    expected = {
+        "texts": texts,
+        "ids": [enc.encode_ordinary(text) for text in texts],
+        "special_ids": [enc.encode(text, allowed_special="all") for text in texts],
+        "decoded": [enc.decode(enc.encode(text, allowed_special="all")) for text in texts],
+    }
+    (out / "expected.json").write_text(json.dumps(expected, ensure_ascii=False))
+
+
+CHAT_PROMPT ="<|im_start|>user\nWhat is the capital of France?<|im_end|>\n<|im_start|>assistant\n"
 
 
 def write_llama_logits(out: pathlib.Path, tok, model, prompt: str, logits_rows, greedy_count: int, eos: int):
@@ -369,5 +412,7 @@ if __name__ == "__main__":
         tiny_gguf()
     elif sys.argv[1:2] == ["quant"]:
         quant()
+    elif sys.argv[1:2] == ["tiktoken"]:
+        tiktoken_fixture()
     else:
         sys.exit(__doc__)
