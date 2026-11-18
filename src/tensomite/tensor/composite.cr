@@ -135,6 +135,30 @@ module Tensomite
       Kernels::SILU.call(self)
     end
 
+    # Returns ReLU, `max(0, x)`, as one `Op::Maximum` against a cached zero.
+    # Its gradient at exactly 0 is 0, as PyTorch's is: the tie goes to the zero.
+    def relu : Tensor
+      scalar(0).maximum(self)
+    end
+
+    # Returns `x · x` in one fused kernel (`Tensomite::Kernels::SQUARE`), with
+    # the bits of `self * self`.
+    def square : Tensor
+      Kernels::SQUARE.call(self)
+    end
+
+    # Returns the logistic sigmoid, `1 / (e^-x + 1)`, in one fused kernel
+    # (`Tensomite::Kernels::SIGMOID`), with the bits of its composite.
+    def sigmoid : Tensor
+      Kernels::SIGMOID.call(self)
+    end
+
+    # Returns `1 / √x` in one fused kernel (`Tensomite::Kernels::RSQRT`), with
+    # the bits of `1 / x.sqrt`.
+    def rsqrt : Tensor
+      Kernels::RSQRT.call(self)
+    end
+
     # Returns `silu(self) · up`, the gate of a SwiGLU MLP, in one fused kernel
     # (`Tensomite::Kernels::SWIGLU`); *up* has this tensor's shape.
     def swiglu(up : Tensor) : Tensor
