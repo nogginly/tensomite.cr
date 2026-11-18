@@ -1428,6 +1428,7 @@ kernel void rmsnorm_f32(device const float* a [[buffer(0)]],
                         constant View& vw [[buffer(4)]],
                         constant uint& n [[buffer(5)]],
                         constant float& epsilon [[buffer(6)]],
+                        constant uint& weighted [[buffer(7)]],
                         uint row [[threadgroup_position_in_grid]],
                         uint t [[thread_position_in_threadgroup]],
                         uint threads [[threads_per_threadgroup]]) {
@@ -1452,7 +1453,7 @@ kernel void rmsnorm_f32(device const float* a [[buffer(0)]],
     float root = precise::sqrt(partial[0] / float(n) + epsilon);
     for (uint s = t; s < n; s += threads) {
         float scaled = a[start + int(s) * stride] / root;
-        dst[base + s] = scaled * w[wstart + int(s) * wstride];
+        dst[base + s] = weighted ? scaled * w[wstart + int(s) * wstride] : scaled;
     }
 }
 

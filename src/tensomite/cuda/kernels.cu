@@ -896,7 +896,7 @@ extern "C" __global__ void layernorm_f32(const float* a, const float* w, const f
 // the threads' sums are then added in a tree, each element divided by
 // √(Σx²/n + ε) and scaled by the weight.
 extern "C" __global__ void rmsnorm_f32(const float* a, const float* w, float* dst, View v, View vw,
-                                       unsigned int n, float epsilon) {
+                                       unsigned int n, float epsilon, unsigned int weighted) {
     __shared__ float partial[NORM_THREADS];
     unsigned int row = blockIdx.x, t = threadIdx.x, threads = blockDim.x;
     unsigned int base = row * n;
@@ -919,7 +919,7 @@ extern "C" __global__ void rmsnorm_f32(const float* a, const float* w, float* ds
     float root = sqrtf(partial[0] / float(n) + epsilon);
     for (unsigned int s = t; s < n; s += threads) {
         float scaled = a[start + int(s) * stride] / root;
-        dst[base + s] = scaled * w[wstart + int(s) * wstride];
+        dst[base + s] = weighted ? scaled * w[wstart + int(s) * wstride] : scaled;
     }
 }
 

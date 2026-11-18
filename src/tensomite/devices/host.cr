@@ -388,13 +388,15 @@ module Tensomite
     # folded from zero, then each operation rounded as the composite's op would.
     private def rmsnorm_row(node : Node, xs : Slice(Float32), pos : Int32, stride : Int32,
                             dst : Slice(Float32), base : Int32, n : Int32) : Nil
-      weight = node.srcs[1]
-      ws, pw, sw = elements(Float32, weight), weight.view.offset_of(base), weight.view.run_stride
       epsilon = node.epsilon || raise Error.new("rmsnorm needs an epsilon")
       squares = 0f32
       n.times { |j| squares += xs[pos + j * stride] * xs[pos + j * stride] }
       root = Math.sqrt(squares / n.to_f32 + epsilon)
       row_out = dst.to_unsafe + base
+      unless weight = node.srcs[1]?
+        return n.times { |j| row_out[j] = xs[pos + j * stride] / root }
+      end
+      ws, pw, sw = elements(Float32, weight), weight.view.offset_of(base), weight.view.run_stride
       n.times { |j| row_out[j] = xs[pos + j * stride] / root * ws[pw + j * sw] }
     end
 

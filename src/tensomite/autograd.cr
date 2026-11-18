@@ -213,12 +213,12 @@ module Tensomite
     # is `ĝ / r - x · mean(ĝ · x) / r³`, and the weight's `g · x / r`, in the
     # expanded shape, so that accumulating it sums over the rows.
     private def self.rmsnorm_backward(node : Node, g : Tensor) : Array(Tensor?)
-      x, weight = node.srcs
+      x, weight = node.srcs[0], node.srcs[1]?
       epsilon = node.epsilon || raise Error.new("rmsnorm needs an epsilon")
       root = ((x * x).mean(-1, keepdims: true) + epsilon).sqrt
-      scaled = g * weight
+      scaled = weight ? g * weight : g
       dx = scaled / root - x * ((scaled * x).mean(-1, keepdims: true) / (root * root * root))
-      [dx, g * (x / root)] of Tensor?
+      weight ? [dx, g * (x / root)] of Tensor? : [dx] of Tensor?
     end
 
     # Returns the gradient of a softmax's input from *g* and its output *y*:

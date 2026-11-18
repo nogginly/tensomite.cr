@@ -75,8 +75,9 @@ module Tensomite
     # `x̂ = (x - mean) / σ`.
     LayerNormGrad
     # Root-mean-square normalisation of each row along the last axis, by
-    # `Node#epsilon`, then scaled by source 1 (the weight, expanded to the
-    # output shape), fused: `x / √(Σx²/n + ε) · w`.
+    # `Node#epsilon`, then scaled by source 1, if any (the weight, expanded to
+    # the output shape), fused: `x / √(Σx²/n + ε) · w`, or without a weight
+    # `x / √(Σx²/n + ε)`.
     RMSNorm
     # Rotary embeddings, fused: `x · cos + rotate_half(x) · sin` for x (source
     # 0) and its cosines and sines (sources 1 and 2, expanded to the output
