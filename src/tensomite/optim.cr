@@ -51,7 +51,7 @@ module Tensomite
         raise ShapeError.new("gradient #{grad.shape} for param #{param.shape}") unless param.shape == grad.shape
       end
       @steps += 1
-      updated = params.map_with_index { |param, i| update(i, param, grads[i]) }
+      updated = updates(params, grads)
       Tensor.realize(updated + @kept.map { |(state, i)| state[i] } + also, release: release)
       @kept.each { |(state, i)| state[i] = state[i].detach }
       @kept.clear
@@ -67,6 +67,16 @@ module Tensomite
     protected def keep(state : Hash(Int32, Tensor), index : Int32, value : Tensor) : Tensor
       @kept << {state, index}
       state[index] = value
+    end
+
+    # Returns the new values of *params*, lazily, one per param, from their
+    # *grads*: by default `#update` of each in turn. An optimizer that updates
+    # params together, such as one that stacks matrices of one shape and
+    # transforms them at once, overrides this; it still keeps state through
+    # `#keep` and `#tables`, so `#step` realises everything once and `#state`
+    # and `#restore` work as for any other.
+    protected def updates(params : Array(Tensor), grads : Array(Tensor)) : Array(Tensor)
+      params.map_with_index { |param, i| update(i, param, grads[i]) }
     end
 
     # Returns the new value of param *index*, lazily. State it carries to the
@@ -151,25 +161,128 @@ module Tensomite
   # 2. `m = β₁m + (1 - β₁)g` and `v = β₂v + (1 - β₂)g²`
   # 3. `p -= lr * m̂ / (√v̂ + eps)`, where `m̂` and `v̂` divide out the bias of
   #    starting from zero: `m̂ = m / (1 - β₁ᵗ)` and `v̂ = v / (1 - β₂ᵗ)`.
+  #
+  # Parameters can be split into groups, each with its own settings:
+  #
+  # ```
+  # head = AdamW::Group.new(model.head_params, lr: 4e-3)
+  # lambdas = AdamW::Group.new(model.scalar_params, lr: 0.5, beta1: 0.96, beta2: 0.95)
+  # optimizer = AdamW.new([head, lambdas], weight_decay: 0.0) # the rest of each group's settings
+  # optimizer.groups.each { |group| group.lr = group.initial_lr * multiplier }
+  # ```
   class AdamW < Optimizer
-    property lr : Float64
-    getter beta1 : Float64
-    getter beta2 : Float64
-    getter eps : Float64
-    getter weight_decay : Float64
+    # Parameters that share settings within an `AdamW`. A setting left out
+    # takes the optimizer's when the group is given to it.
+    class Group
+      getter params : Array(Parameter)
+
+      # Returns the learning rate the group started with, for schedules that
+      # scale it.
+      getter initial_lr : Float64 { lr }
+
+      @lr : Float64?
+      @beta1 : Float64?
+      @beta2 : Float64?
+      @eps : Float64?
+      @weight_decay : Float64?
+
+      def initialize(@params : Array(Parameter), @lr : Float64? = nil, @beta1 : Float64? = nil,
+                     @beta2 : Float64? = nil, @eps : Float64? = nil, @weight_decay : Float64? = nil)
+      end
+
+      def lr : Float64
+        @lr || raise Error.new("this group's settings come from the AdamW it is given to")
+      end
+
+      def lr=(@lr : Float64)
+      end
+
+      def beta1 : Float64
+        @beta1 || raise Error.new("this group's settings come from the AdamW it is given to")
+      end
+
+      def beta2 : Float64
+        @beta2 || raise Error.new("this group's settings come from the AdamW it is given to")
+      end
+
+      def eps : Float64
+        @eps || raise Error.new("this group's settings come from the AdamW it is given to")
+      end
+
+      def weight_decay : Float64
+        @weight_decay || raise Error.new("this group's settings come from the AdamW it is given to")
+      end
+
+      # Fills each setting the group left out from the optimizer's.
+      protected def settle(lr : Float64, beta1 : Float64, beta2 : Float64, eps : Float64, weight_decay : Float64) : Nil
+        @lr ||= lr
+        @beta1 ||= beta1
+        @beta2 ||= beta2
+        @eps ||= eps
+        @weight_decay ||= weight_decay
+        initial_lr
+      end
+    end
+
+    # Returns the groups, in order: one for an optimizer made from one list of
+    # params, or without params.
+    getter groups : Array(Group)
 
     @m = {} of Int32 => Tensor
     @v = {} of Int32 => Tensor
 
-    def initialize(@lr : Float64 = 1e-3, @beta1 : Float64 = 0.9, @beta2 : Float64 = 0.999,
-                   @eps : Float64 = 1e-8, @weight_decay : Float64 = 0.01)
+    # Returns which group each param index belongs to.
+    @group_of : Array(Int32)
+
+    def initialize(lr : Float64 = 1e-3, beta1 : Float64 = 0.9, beta2 : Float64 = 0.999,
+                   eps : Float64 = 1e-8, weight_decay : Float64 = 0.01)
+      @groups = [Group.new([] of Parameter).tap(&.settle(lr, beta1, beta2, eps, weight_decay))]
+      @group_of = [] of Int32
     end
 
     # Creates an optimizer for *params*, for `#step(loss)`. Weight decay applies
     # only to the parameters whose `Parameter#decay?` is true.
-    def initialize(params : Array(Parameter), @lr : Float64 = 1e-3, @beta1 : Float64 = 0.9, @beta2 : Float64 = 0.999,
-                   @eps : Float64 = 1e-8, @weight_decay : Float64 = 0.01)
-      @slots = params
+    def initialize(params : Array(Parameter), lr : Float64 = 1e-3, beta1 : Float64 = 0.9, beta2 : Float64 = 0.999,
+                   eps : Float64 = 1e-8, weight_decay : Float64 = 0.01)
+      initialize([Group.new(params)], lr, beta1, beta2, eps, weight_decay)
+    end
+
+    # Creates an optimizer for *groups*' params, in order, for `#step(loss)`:
+    # each group's settings, and for those it leaves out these. Its state is
+    # numbered across the groups, so one group saves what `.new(params)` does.
+    def initialize(groups : Array(Group), lr : Float64 = 1e-3, beta1 : Float64 = 0.9, beta2 : Float64 = 0.999,
+                   eps : Float64 = 1e-8, weight_decay : Float64 = 0.01)
+      groups.each(&.settle(lr, beta1, beta2, eps, weight_decay))
+      @groups = groups
+      @group_of = groups.each_with_index.flat_map { |(group, i)| Array.new(group.params.size, i) }.to_a
+      @slots = groups.flat_map(&.params)
+    end
+
+    # Returns the first group's learning rate.
+    def lr : Float64
+      groups.first.lr
+    end
+
+    # Sets every group's learning rate to *rate*.
+    def lr=(rate : Float64)
+      groups.each(&.lr=(rate))
+    end
+
+    # Returns the first group's settings.
+    def beta1 : Float64
+      groups.first.beta1
+    end
+
+    def beta2 : Float64
+      groups.first.beta2
+    end
+
+    def eps : Float64
+      groups.first.eps
+    end
+
+    def weight_decay : Float64
+      groups.first.weight_decay
     end
 
     protected def tables : Hash(String, Hash(Int32, Tensor))
@@ -179,6 +292,8 @@ module Tensomite
     # Each step after the first runs three fused kernels per parameter, for `m`,
     # `v` and the update, with the composite's bits.
     protected def update(index : Int32, param : Tensor, grad : Tensor) : Tensor
+      group = groups[@group_of[index]? || 0]
+      beta1, beta2 = group.beta1, group.beta2
       if prev = @m[index]?
         m = Kernels::ADAMW_MOMENT.call(prev, grad, constant(param, beta1), constant(param, 1 - beta1))
         v = Kernels::ADAMW_SECOND_MOMENT.call(@v[index], grad, constant(param, beta2), constant(param, 1 - beta2))
@@ -188,9 +303,9 @@ module Tensomite
       end
       m = keep(@m, index, m)
       v = keep(@v, index, v)
-      decay = weight_decay == 0 || !decays?(index) ? 1.0 : 1 - lr * weight_decay
-      Kernels::ADAMW_UPDATE.call(param, m, v, constant(param, decay), constant(param, 1 - beta1 ** steps),
-        constant(param, 1 - beta2 ** steps), constant(param, eps), constant(param, lr))
+      decay = group.weight_decay == 0 || !decays?(index) ? 1.0 : 1 - group.lr * group.weight_decay
+      Kernels::ADAMW_UPDATE.call(param, m, v, constant(param, decay), constant(param, 1 - group.beta1 ** steps),
+        constant(param, 1 - group.beta2 ** steps), constant(param, group.eps), constant(param, group.lr))
     end
 
     @constants = {} of {UInt64, Float64} => Tensor
