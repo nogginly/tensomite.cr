@@ -16,3 +16,12 @@ Tensomite.kernel(:silu) { |x| x / ((-x).exp + 1) }
 
 # SwiGLU's gate, `silu(gate) · up`, as `Tensor#swiglu`.
 Tensomite.kernel(:swiglu) { |gate, value| gate / ((-gate).exp + 1) * value }
+
+# The square, `x · x`, as `Tensor#square`.
+Tensomite.kernel(:square) { |x| x * x }
+
+# The logistic sigmoid, `1 / (e^-x + 1)`, as `Tensor#sigmoid`.
+Tensomite.kernel(:sigmoid) { |x| 1 / ((-x).exp + 1) }
+
+# The reciprocal square root, `1 / √x`, as `Tensor#rsqrt`.
+Tensomite.kernel(:rsqrt) { |x| 1 / x.sqrt }

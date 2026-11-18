@@ -100,19 +100,21 @@ a.mean(1, keepdims: true).shape  # => [2, 1]
 
 These change how a tensor's data is read, without copying it:
 
-Method                     |What it does                           |Example on `a` (`[2, 3]`)               
----------------------------|---------------------------------------|----------------------------------------
-`reshape(shape)`           |same elements, new shape               |`a.reshape([3, 2])`                     
-`transpose(i = -2, j = -1)`|swaps two axes                         |`a.transpose.shape # => [3, 2]`         
-`permute(axes)`            |reorders all axes                      |`a.permute([1, 0])`                     
-`slice(axis, start, stop)` |a range along one axis, `stop` excluded|`a.slice(1, 1, 3) # => [[2, 3], [5, 6]]`
-`expand(shape)`            |repeats size-1 axes                    |`row.reshape([1, 3]).expand([2, 3])`    
-`contiguous`               |copies into row-major order, if needed |`a.transpose.contiguous`                
+Method                     |What it does                                                        |Example on `a` (`[2, 3]`)                 
+---------------------------|--------------------------------------------------------------------|------------------------------------------
+`reshape(shape)`           |same elements, new shape                                            |`a.reshape([3, 2])`                       
+`transpose(i = -2, j = -1)`|swaps two axes                                                      |`a.transpose.shape # => [3, 2]`           
+`permute(axes)`            |reorders all axes                                                   |`a.permute([1, 0])`                       
+`slice(axis, start, stop)` |a range along one axis, `stop` excluded                             |`a.slice(1, 1, 3) # => [[2, 3], [5, 6]]`  
+`expand(shape)`            |repeats size-1 axes                                                 |`row.reshape([1, 3]).expand([2, 3])`      
+`contiguous`               |copies into row-major order, if needed                              |`a.transpose.contiguous`                  
+`unbind(axis = 0)`         |its slices along one axis, each without it: `Tensor.stack`'s inverse|`a.unbind(0).map(&.shape) # => [[3], [3]]`
 
-And two that build new tensors:
+And three that build new tensors:
 
 ```crystal
 Tensor.cat([a, a], 0).shape   # => [4, 3]   (joined along axis 0)
+Tensor.stack([a, a], 0).shape # => [2, 2, 3] (stacked along a new axis 0)
 
 table = Tensor.from([0, 1, 10, 11, 20, 21].map(&.to_f32), [3, 2])
 table.gather(Tensor.from([2, 0], [2])).to_a(Float32)   # => [20.0, 21.0, 0.0, 1.0]   (rows 2 and 0)
@@ -158,6 +160,7 @@ Method                                             |Use
 `rmsnorm(weight, eps = 1e-5)`                      |divides each row by its root mean square, then scales, as in Llama, in one fused op                                                                                            
 `rmsnorm(eps = 1e-5)`                              |the same without a weight, as by a weight of ones, bit for bit; PyTorch's `F.rms_norm` with no `eps` uses `Float32::EPSILON`                                                   
 `silu`, `swiglu(up)`                               |SiLU, `x · sigmoid(x)`, and Llama's gate `silu(x) · up`, each one fused kernel                                                                                                 
+`relu`, `square`, `sigmoid`, `rsqrt`               |`max(0, x)` (its gradient at 0 is 0, as PyTorch's), `x · x`, `1 / (e^-x + 1)` and `1 / √x`; each one op, the last three fused kernels with their composites' bits              
 `rotate_half`, `rope(cos, sin)`                    |swaps the last axis's halves and negates the first, `[x₁, x₂] → [-x₂, x₁]`; and `x · cos + rotate_half(x) · sin`, rotary embeddings in one fused op                            
 `cross_entropy(targets, reduction:, ignore_index:)`|the loss of `[n, classes]` scores against `[n]` `I32` class indices: their mean, by default, `:sum`, or `:none` for each row's; rows whose target is `ignore_index` add nothing
 `Tensor.causal_mask(rows, cols)`                   |0 where a position may look, -∞ where it may not, for attention                                                                                                                

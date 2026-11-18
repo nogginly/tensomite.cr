@@ -19,6 +19,35 @@ module Tensomite
       Tensor.lazy(Node.new(Op::Cat, tensors, shape, first.dtype, first.device, axis))
     end
 
+    # Returns *tensors*, all of one shape, stacked along a new axis *axis*:
+    # each gains a dimension of 1 there, and they are joined along it.
+    #
+    # ```
+    # Tensor.stack([a, b], 0) # two [2, 3] give [2, 2, 3]
+    # ```
+    def self.stack(tensors : Array(Tensor), axis : Int32 = 0) : Tensor
+      first = tensors.first? || raise ShapeError.new("stack of no tensors")
+      unless tensors.all? { |tensor| tensor.shape == first.shape }
+        raise ShapeError.new("cannot stack #{tensors.map(&.shape).uniq!.join(", ")}: shapes differ")
+      end
+      axis += first.ndim + 1 if axis < 0
+      raise ShapeError.new("stack axis #{axis} out of range for #{first.ndim + 1} dimensions") unless 0 <= axis <= first.ndim
+      shape = first.shape.dup.insert(axis, 1)
+      cat(tensors.map(&.reshape(shape)), axis)
+    end
+
+    # Returns this tensor's slices along *axis*, each without that axis: the
+    # inverse of `.stack`. Each is a view; no data is copied.
+    #
+    # ```
+    # Tensor.stack([a, b], 0).unbind(0) # [a, b]
+    # ```
+    def unbind(axis : Int32 = 0) : Array(Tensor)
+      axis = view.normalize_axis(axis)
+      shape = self.shape.dup.tap(&.delete_at(axis))
+      Array.new(self.shape[axis]) { |i| slice(axis, i, i + 1).reshape(shape) }
+    end
+
     # Returns this tensor with *value* written in place at positions *start*
     # onwards along *axis*, as a tensor sharing its buffer. *value* matches this
     # tensor's shape except along *axis*.
