@@ -209,6 +209,14 @@ flowchart LR
 2. **Write the expression in the same order as the composite it replaces,** operation for operation, so the two give the same bits on the CPU.
 3. **Spec it** in `kernel_spec.cr`: bit-for-bit against the composite on every device, a finite-difference check of its gradients, and a case in `gpu_spec.cr`.
 
+### Adding an optimizer
+
+1. Subclass `Optimizer`, and take the params as `AdamW` does, setting `@slots`.
+2. Keep any state the optimizer carries from step to step in hashes from param index to tensor, return them by name from `tables`, and store each step's new values with `keep(table, index, value)`, so that they are realised with the updates and `state` and `restore` save and load them.
+3. Implement `update(index, param, grad)`, returning the param's new value lazily. An optimizer that updates params together, as Muon orthogonalises stacked matrices of one shape, overrides `updates(params, grads)` instead, which sees every param and gradient of the step; still keep state through `keep`.
+4. Never realise anything inside: `step` realises every update, the new state and the loss once, releasing intermediates as it goes.
+5. Spec it against hand-computed values or a composite, and check that `state` and `restore` resume a run bit for bit (`spec/optim_spec.cr` has an optimizer that updates params in pairs).
+
 ### Adding a dtype
 
 1. **Add the member to `DType`** and its `bytes_for`. A block format returns the bytes for whole blocks, and follows Decision N's rules: block tensors are leaves only, sliced by whole rows, and read only by `BlockMatMul` (as the weight) and `Gather` (as the table).

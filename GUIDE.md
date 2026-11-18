@@ -338,6 +338,23 @@ line.weight.value.to_a(Float32)   # => [2.9999998]
 
 This is the same fit as in "Training", with the same result. `AdamW` applies weight decay only to parameters flagged for it: weight matrices and embeddings, not biases or normalisation parameters.
 
+**Parameter groups.** To give some parameters their own settings, such as a faster learning rate for the weights than for the bias, split them into `AdamW::Group`s. A setting a group leaves out comes from the optimizer, and `initial_lr` keeps each group's starting rate, so a schedule can scale every group by one multiplier:
+
+```crystal
+weight = Parameter.new(Tensor.from([0f32], [1]))
+bias = Parameter.new(Tensor.from([0f32], [1]), decay: false)
+optimizer = AdamW.new([AdamW::Group.new([weight], lr: 0.1), AdamW::Group.new([bias], lr: 0.01)], weight_decay: 0.0)
+x, y = Tensor.from([1, 2, 3].map(&.to_f32), [3, 1]), Tensor.from([3, 6, 9].map(&.to_f32), [3, 1])
+100.times do |step|
+  optimizer.groups.each { |group| group.lr = group.initial_lr * (1 - step / 100) }
+  optimizer.step((x * weight.value + bias.value - y).square.mean)
+end
+weight.value.to_a(Float32)   # => [2.8941896]
+bias.value.to_a(Float32)     # => [0.2861032]
+```
+
+Each group's parameters move exactly as under an `AdamW` of their own with its settings. `optimizer.lr = rate` still sets every group's rate, and state is numbered across the groups in order, so an optimizer of one group saves and restores exactly what `AdamW.new(params)` does.
+
 **Other things modules do:**
 
 - `model.save(path)` writes every parameter to a safetensors file under its name, or, for a path ending in `.gguf`, a GGUF file, which also holds quantised weights (see "Quantised models"); `model.load(path)` replaces each parameter with the tensor of the same name. A missing or extra name raises `Error`, unless `strict: false`; a different shape raises `ShapeError`. The file can be read by other tools, such as Hugging Face's `safetensors` package.

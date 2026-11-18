@@ -299,6 +299,7 @@ Recorded in full, with their reasoning and measurements, in [`DECISIONS.md`](DEC
 - [DV](DECISIONS.md#decision-dv): fewer, wider ops for a step of many rows (decided).
 - [DW](DECISIONS.md#decision-dw): saving quantised weights (decided).
 - [DX](DECISIONS.md#decision-dx): what comes after 0.7.1 (decided).
+- [DY](DECISIONS.md#decision-dy): optimizer groups and grouped updates (decided).
 
 ## Risks
 

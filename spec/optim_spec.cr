@@ -135,3 +135,110 @@ describe Optimizer do
     end
   end
 end
+
+# Returns fresh parameters with the same values as *values*, each decaying as *decay* says.
+private def params_of(values : Array(Array(Float32)), decay : Array(Bool)) : Array(Parameter)
+  values.map_with_index { |value, i| Parameter.new(Tensor.from(value, [value.size]), decay: decay[i]) }
+end
+
+# Takes *steps* steps of *optimizers*, each over its own parameters, on the
+# same quadratic loss, and returns every parameter's values.
+private def train(optimizers : Array({Optimizer, Array(Parameter)}), steps : Int32, &schedule : Int32 ->) : Array(Array(Float32))
+  steps.times do |step|
+    schedule.call(step)
+    optimizers.each do |(optimizer, params)|
+      loss = params.map { |param| (param.value * param.value * param.value).sum }.reduce { |a, b| a + b }
+      optimizer.step(loss)
+    end
+  end
+  optimizers.flat_map { |(_, params)| params.map(&.value.to_a(Float32)) }
+end
+
+describe AdamW::Group do
+  values = [random_values(4, 1), random_values(3, 2), random_values(5, 3)]
+  decay = [true, false, true]
+
+  it "gives each group the bits of a separate AdamW with its settings" do
+    grouped = params_of(values, decay)
+    a = AdamW::Group.new(grouped[0, 2], lr: 0.05)
+    b = AdamW::Group.new(grouped[2, 1], lr: 0.02, beta1: 0.8, beta2: 0.95, weight_decay: 0.1)
+    optimizer = AdamW.new([a, b], weight_decay: 0.01)
+    got = train([{optimizer.as(Optimizer), grouped}], 4) { }
+
+    first, second = params_of(values, decay)[0, 2], params_of(values, decay)[2, 1]
+    apart = [{AdamW.new(first, lr: 0.05, weight_decay: 0.01).as(Optimizer), first},
+             {AdamW.new(second, lr: 0.02, beta1: 0.8, beta2: 0.95, weight_decay: 0.1).as(Optimizer), second}]
+    train(apart, 4) { }.should eq got
+  end
+
+  it "lets a schedule scale each group's rate from its initial one" do
+    params = params_of(values, decay)
+    a, b = AdamW::Group.new(params[0, 1], lr: 0.1), AdamW::Group.new(params[1, 2])
+    optimizer = AdamW.new([a, b], lr: 0.01)
+    b.initial_lr.should eq 0.01
+    optimizer.groups.each { |group| group.lr = group.initial_lr * 0.5 }
+    {a.lr, b.lr, a.initial_lr}.should eq({0.05, 0.005, 0.1})
+    optimizer.lr = 0.2
+    optimizer.groups.map(&.lr).should eq [0.2, 0.2]
+  end
+
+  it "keeps state named across the groups, as one list of params is" do
+    params = params_of(values, decay)
+    optimizer = AdamW.new([AdamW::Group.new(params[0, 1]), AdamW::Group.new(params[1, 2], lr: 0.1)])
+    train([{optimizer.as(Optimizer), params}], 1) { }
+    optimizer.state.keys.sort!.should eq ["m.0", "m.1", "m.2", "v.0", "v.1", "v.2"]
+    single = params_of(values, decay)
+    one = AdamW.new(single)
+    train([{one.as(Optimizer), single}], 1) { }
+    one.state.keys.sort!.should eq optimizer.state.keys.sort!
+  end
+end
+
+# An optimizer that updates its params two at a time: each pair moves against
+# the mean of its gradients, with a running sum of steps as its state.
+private class PairOptimizer < Optimizer
+  @moves = {} of Int32 => Tensor
+
+  def initialize(params : Array(Parameter))
+    @slots = params
+  end
+
+  protected def tables : Hash(String, Hash(Int32, Tensor))
+    {"moves" => @moves}
+  end
+
+  protected def updates(params : Array(Tensor), grads : Array(Tensor)) : Array(Tensor)
+    params.each_slice(2).with_index.flat_map do |(pair, n)|
+      i = n * 2
+      mean = (grads[i] + grads[i + 1]) * 0.5
+      move = keep(@moves, i, @moves[i]?.try { |prev| prev + mean } || mean)
+      pair.map { |param| param - move * 0.1 }
+    end.to_a
+  end
+
+  protected def update(index : Int32, param : Tensor, grad : Tensor) : Tensor
+    raise "a pair optimizer updates params in pairs"
+  end
+end
+
+describe "Optimizer#updates" do
+  it "lets an optimizer update params together, with its state saved and restored" do
+    make = -> { [Parameter.new(Tensor.from(f32(1, 2), [2])), Parameter.new(Tensor.from(f32(3, -1), [2]))] }
+    loss_of = ->(params : Array(Parameter)) { (params[0].value * params[0].value).sum + (params[1].value * 3).sum }
+    straight = make.call
+    optimizer = PairOptimizer.new(straight)
+    3.times { optimizer.step(loss_of.call(straight)) }
+
+    resumed_params = make.call
+    first = PairOptimizer.new(resumed_params)
+    2.times { first.step(loss_of.call(resumed_params)) }
+    first.state.keys.should eq ["moves.0"]
+    path = File.tempname("pairs", ".safetensors")
+    SafeTensors.write(path, first.state)
+    second = PairOptimizer.new(resumed_params).restore(SafeTensors.open(path), steps: first.steps)
+    second.step(loss_of.call(resumed_params))
+    resumed_params.map(&.value.to_a(Float32)).should eq straight.map(&.value.to_a(Float32))
+  ensure
+    File.delete(path) if path && File.exists?(path)
+  end
+end
