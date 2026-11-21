@@ -946,9 +946,23 @@ Workload                                                                        
 Shakespeare, Decision R's larger model (4 layers, width 192, 16 × 128 characters)|M5 Pro         |`Metal`|18.7 ms a step           |`examples/shakespeare.cr --device metal`|BP       
 the same                                                                         |GB10           |`CUDA` |12.9 ms a step           |`examples/shakespeare.cr --device cuda` |BP       
 the same, to 1.494 nats/char in 5,000 steps                                      |Linux container|`BLAS` |431 ms a step, 36 minutes|`examples/shakespeare.cr`               |M7's exit
-GPT-2 small, a training step                                                     |GB10           |`CUDA` |388 ms a step            |`bench/train_gpt2.cr` with `-Dcuda`     |CI       
+GPT-2 small, a training step                                                     |GB10           |`CUDA` |383 ms a step            |`bench/train_gpt2.cr` with `-Dcuda`     |CI, EB   
+the same                                                                         |M5 Pro         |`Metal`|749 ms a step            |`bench/train_gpt2.cr --device metal`    |EB       
 
 Each training run gives the same losses from run to run on the same device.
+
+**Building (Decision EB).** `scripts/time_builds.sh PROGRAM [FLAGS]` times a build from an empty cache, again with it warm, and after a one-line change. For `bench/train_gpt2.cr`, with the step it then runs:
+
+Machine        |Flags                  |Cold  |Warm |After an edit|Training step                      
+---------------|-----------------------|------|-----|-------------|-----------------------------------
+GB10           |`--release -Dcuda`     |17.8 s|1.5 s|17.6 s       |383.5 ms (launching 12.6, rest 3.8)
+GB10           |`-O3 -Dcuda`           |3.5 s |1.8 s|2.2 s        |385.4 ms (launching 12.3, rest 5.1)
+M5 Pro         |`--release`            |9.4 s |1.1 s|8.9 s        |749.0 ms (encoding 1.0, rest 2.4)  
+M5 Pro         |`-O3`                  |2.6 s |1.5 s|1.7 s        |737.8 ms (encoding 1.5, rest 2.9)  
+Linux container|`--release`, `finetune`|40.1 s|3.1 s|41.2 s       |30 `BLAS` Shakespeare steps: 3.1 s 
+Linux container|`-O3`, `finetune`      |22.8 s|3.1 s|3.7 s        |the same: 9.5 s                    
+
+In a `--release` build LLVM takes nearly all the time (38 of 40 s in the container, where even hello world takes 11.5 s), and no change reuses anything, since the program is one module. `-O2` in one module is no faster to build (37 s) and is slower to run (4.2 s), so the split into modules, not the optimisation level, is what trades build time for host speed.
 
 ## Current limits
 
