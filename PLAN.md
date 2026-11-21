@@ -158,8 +158,9 @@ Met (25 Oct 2026, the Linux container and the M5 Pro):
 13. **Ready for autoresearch (Decision DO).** Close the library's gaps for a Crystal port of `karpathy/autoresearch`, an agent that edits a training script, trains for a fixed time and keeps or discards the change on validation bits per byte. Each gap is a GitHub issue, under the epic #156.
     - Optimizer parameter groups, each with its own learning rate, betas, epsilon and weight decay (G-02, #158), and a documented hook for optimizers that update parameters in groups, as Muon does (G-03, #159).
     - `relu`, `square`, `sigmoid`, `Tensor.stack` and `unbind` (G-04, #160); RMSNorm without a weight (G-06, #162).
-    - Per-token cross-entropy (G-05, #161): `reduction:` and `ignore_index:` came in 0.4.0; computing the targets' gather on the device remains.
+    - Per-token cross-entropy (G-05, #161): `reduction:` and `ignore_index:` came in 0.4.0, and each row's target is picked on the device by `Pick` and `Place` (Decision DZ).
     - A configurable BPE pre-tokenizer pattern, and a tokenizer exported from `tiktoken` (D-01, #166); the compile time of an app, measured (G-09, #165).
+    - Library part done (21 Nov 2026, 0.8.0): every item above is on `main`, with specs on every device; `tiktoken` encodings match bit for bit through `scripts/tiktoken_to_json.py`; an app's rebuild takes 2.2 s on the GB10 and 1.7 s on the M5 Pro with `-O3`, within 1 ms a training step of `--release` on the GPUs (Decision EB).
     - Exit: the port's GPT model and MuonAdamW match fixtures from the PyTorch original on CPU, CUDA and Metal, and a scaled-down configuration trains inside its time budget. The port's data tools and the app itself are apps, not the milestone.
 14. **Scale (later).** 64-bit element counts and offsets (G-01, #157), fused causal and windowed attention for training (G-07, #163), `BF16` and `F16` compute (G-08, #164), and a fused cross-entropy (#183, Decision EA): what a full-size autoresearch run needs once M13's scaled-down one works. At 16 sequences of 2,048 tokens a micro-batch fits under 2 GiB, and composite attention gives the same answer, so none blocks M13.
 
@@ -300,6 +301,9 @@ Recorded in full, with their reasoning and measurements, in [`DECISIONS.md`](DEC
 - [DW](DECISIONS.md#decision-dw): saving quantised weights (decided).
 - [DX](DECISIONS.md#decision-dx): what comes after 0.7.1 (decided).
 - [DY](DECISIONS.md#decision-dy): optimizer groups and grouped updates (decided).
+- [DZ](DECISIONS.md#decision-dz): cross-entropy's targets on the device (decided).
+- [EA](DECISIONS.md#decision-ea): a fused cross-entropy, in M14 (decided).
+- [EB](DECISIONS.md#decision-eb): the compile time of an app (decided).
 
 ## Risks
 

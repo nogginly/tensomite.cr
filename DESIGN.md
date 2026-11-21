@@ -859,11 +859,11 @@ flowchart LR
 
 ### Tokeniser
 
-`BPE` reproduces GPT-2's byte-level byte-pair encoding from a `vocab.json` and a `merges.txt`:
+`BPE` reproduces GPT-2's byte-level byte-pair encoding from a `vocab.json` and a `merges.txt`, or a `tokenizer.json`:
 
 ```mermaid
 flowchart LR
-    Text["text"] --> Words["split by GPT-2's pattern (Unicode-aware)"]
+    Text["text"] --> Words["split by a pattern: GPT-2's, or the tokeniser's own (Unicode-aware)"]
     Words --> Bytes["each word's UTF-8 bytes"]
     Bytes --> Chars["bytes mapped to printable characters"]
     Chars --> Merge["merge the lowest-ranked adjacent pair, repeatedly"]
@@ -871,7 +871,7 @@ flowchart LR
 ```
 
 - **Every byte maps to a printable character** (space becomes `Ġ`, newline `Ċ`), so any byte sequence round-trips, including emoji and broken UTF-8.
-- **The pattern is compiled with `Regex::Options::UCP`,** so `\s` matches Unicode whitespace, such as a no-break space, as in the reference implementations.
+- **The pattern is compiled with `Regex::Options::UCP`,** so `\s` matches Unicode whitespace, such as a no-break space, as in the reference implementations. A `tokenizer.json` with a `Split` regex before a `ByteLevel` whose own regex is off, as GPT-4-style and converted `tiktoken` tokenisers have, supplies its own pattern, such as one that splits numbers into pairs of digits; PCRE2 matches it as Python's `regex` module does.
 - **Decoding** maps characters back to bytes and replaces invalid UTF-8 with U+FFFD, as the reference does.
 - **Words are cached** after their first encoding.
 

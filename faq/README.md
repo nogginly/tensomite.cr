@@ -24,6 +24,7 @@ flowchart LR
     quantgpu --> batched
     training --> finetune["Fine-tuning"]
     finetune --> evaluate["Evaluating code"]
+    training --> ready["Ready for autoresearch"]
     style order stroke:#1971c2,stroke-width:3px
 ```
 
@@ -237,4 +238,15 @@ Question                                 |In one line
 [Q-DD](q-dd-a-ragged-attention-kernel.md)|Why does a shared cache need a new attention kernel? Rows differ in start and length; a table supplies them.        
 [Q-DE](q-de-one-dispatch-for-all-rows.md)|Why one dispatch for all rows' attention? 512 tiny dispatches pay the fixed cost 512 times; one pays it once.       
 
-Q-C and Q-P were labels on a decision and a list, not questions, so they have no page; nor do Q-BQ, Q-BS and Q-CD, which were decisions, recorded in `DECISIONS.md`. Q-CK, Q-CM, Q-CW and Q-CZ were questions about preferences or decisions, recorded in `DECISIONS.md` where they led to one.
+## Ready for autoresearch
+
+The running example: a GPT-2 small training step on the GB10 and the M5 Pro, 2,048 rows over a vocabulary of 50,257 (`bench/train_gpt2.cr`), and the gaps M13 closed for a Crystal port of `karpathy/autoresearch`. Decisions DO, DZ, EA and EB.
+
+Question                                      |In one line                                                                                                                        
+----------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------
+[Q-DH](q-dh-a-new-op-to-pick-targets.md)      |Why a new op to pick each row's target? The GPUs have no `I32` kernels, and a one-hot product needs a 10 GB identity.              
+[Q-DI](q-di-the-size-of-the-losss-gradient.md)|Why did `Place` take 2 ms, not 0.1? GPT-2's 50,257 classes make the loss's gradient 412 MB, written at memory speed.               
+[Q-DJ](q-dj-recovering-merges-from-ranks.md)  |How can a tiktoken file become a `tokenizer.json`? Replay its merging below each token's rank to find the token's merge.           
+[Q-DK](q-dk-one-module-or-many.md)            |Why does `-O3` rebuild fast but run the host slowly? One module inlines across types; a module per type rebuilds only what changed.
+
+Q-C and Q-P were labels on a decision and a list, not questions, so they have no page; nor do Q-BQ, Q-BS and Q-CD, which were decisions, recorded in `DECISIONS.md`. Q-CK, Q-CM, Q-CW and Q-CZ were questions about preferences or decisions, recorded in `DECISIONS.md` where they led to one. After Q-DE, the labels Q-DA to Q-DG were reused in conversation for requests to run checks and for choices of what came next, recorded in `DECISIONS.md` where they led to one; the pages continue from Q-DH.
