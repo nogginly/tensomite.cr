@@ -23,6 +23,13 @@ include Tensomite
 
 `include Tensomite` lets you write `Tensor` rather than `Tensomite::Tensor`. The faster devices are opt-in (see "Devices" below).
 
+**Which build.** `--release` optimises the whole program as one module, so every change rebuilds all of it: about 9 s on an M5 Pro and 18 s on a GB10 for a GPT-2 training program. `-O3` without `--release` optimises each type on its own and rebuilds only what changed, in about 2 s, but cannot inline across types, so host code runs slower: about three times on `BLAS`, 1.7 times on `CPU`. On `Metal` and `CUDA` the host only builds and launches the graph, and a GPT-2 training step is within 1 ms either way. So for a loop that edits and reruns a program on a GPU, build with `-O3`; for anything that computes on the host, and for runs you measure, with `--release`.
+
+```sh
+crystal build -O3 -Dcuda train.cr      # edit, rebuild in seconds, train on the GPU
+crystal build --release train.cr       # host devices, benchmarks, releases
+```
+
 ## The idea: describe now, compute later
 
 A tensor in tensomite is **lazy**. Writing `a * 2 + 1` does no arithmetic. It records what you asked for, as a node in a graph. The work happens when you ask for the numbers, with `to_a` or `realize`.
