@@ -160,9 +160,9 @@ Met (25 Oct 2026, the Linux container and the M5 Pro):
     - `relu`, `square`, `sigmoid`, `Tensor.stack` and `unbind` (G-04, #160); RMSNorm without a weight (G-06, #162).
     - Per-token cross-entropy (G-05, #161): `reduction:` and `ignore_index:` came in 0.4.0, and each row's target is picked on the device by `Pick` and `Place` (Decision DZ).
     - A configurable BPE pre-tokenizer pattern, and a tokenizer exported from `tiktoken` (D-01, #166); the compile time of an app, measured (G-09, #165).
-    - Library part done (21 Nov 2026, 0.8.0): every item above is on `main`, with specs on every device; `tiktoken` encodings match bit for bit through `scripts/tiktoken_to_json.py`; an app's rebuild takes 2.2 s on the GB10 and 1.7 s on the M5 Pro with `-O3`, within 1 ms a training step of `--release` on the GPUs (Decision EB).
-    - Exit: the port's GPT model and MuonAdamW match fixtures from the PyTorch original on CPU, CUDA and Metal, and a scaled-down configuration trains inside its time budget. The port's data tools and the app itself are apps, not the milestone.
-14. **Scale (later).** 64-bit element counts and offsets (G-01, #157), fused causal and windowed attention for training (G-07, #163), `BF16` and `F16` compute (G-08, #164), and a fused cross-entropy (#183, Decision EA): what a full-size autoresearch run needs once M13's scaled-down one works. At 16 sequences of 2,048 tokens a micro-batch fits under 2 GiB, and composite attention gives the same answer, so none blocks M13.
+    - Exit: every gap above closed in the library, with specs on every device (Decision EC).
+    - Met (21 Nov 2026, 0.8.0): every item above is on `main`; `tiktoken` encodings match bit for bit through `scripts/tiktoken_to_json.py`; an app's rebuild takes 2.2 s on the GB10 and 1.7 s on the M5 Pro with `-O3`, within 1 ms a training step of `--release` on the GPUs (Decision EB). The port, its data tools and its own exit (its GPT model and MuonAdamW matching the PyTorch original, and a scaled-down run inside its time budget) live in their own repository, with tensomite as a dependency; gaps it finds come back as issues under #156.
+14. **Scale (later).** 64-bit element counts and offsets (G-01, #157), fused causal and windowed attention for training (G-07, #163), `BF16` and `F16` compute (G-08, #164), and a fused cross-entropy (#183, Decision EA): what a full-size autoresearch run needs once the port's scaled-down one works. At 16 sequences of 2,048 tokens a micro-batch fits under 2 GiB, and composite attention gives the same answer, so none blocked M13.
 
 
 **Apps (Decisions BT to CF).** Not a milestone: apps under `apps/` that use tensomite as a library on real work, and find what the library still lacks. Two so far.
@@ -304,6 +304,7 @@ Recorded in full, with their reasoning and measurements, in [`DECISIONS.md`](DEC
 - [DZ](DECISIONS.md#decision-dz): cross-entropy's targets on the device (decided).
 - [EA](DECISIONS.md#decision-ea): a fused cross-entropy, in M14 (decided).
 - [EB](DECISIONS.md#decision-eb): the compile time of an app (decided).
+- [EC](DECISIONS.md#decision-ec): M13 met with its library part; the port in its own repository (decided).
 
 ## Risks
 
