@@ -62,7 +62,7 @@ module Tensomite
       Op::Exp => "exp_f32", Op::Log => "log_f32", Op::Tanh => "tanh_f32", Op::Sqrt => "sqrt_f32",
       Op::Copy => "copy_f32",
     }
-    private OTHER    = %w[copy_into_f32 write_rows_f32 sum_f32 max_f32 sum_short_f32 max_short_f32 gather_f32 fill_zero_f32 scatter_add_f32 scatter_add_column_f32 unview_f32 matmul_f32 matmul_split_f32 matmul_tiled_chunks_64x64_f32 matmul_chunk_sums_f32 matmul_tiled_32x32_f32 matmul_tiled_64x64_f32 matmul_tiled_32x64_f32 dropout_f32 softmax_f32 softmax_scaled_f32 softmax_grad_f32 log_softmax_grad_f32 log_softmax_f32 layernorm_f32 layernorm_grad_f32 rmsnorm_f32 rope_f32 attention_f32 attention_ragged_f32 gather_blocks_f32 quantize_rows_q8_f32 block_matmul_f32 block_matmul_lanes_f32 block_matmul_loads_f32 block_matmul_stream_f32 block_matmul_stream_activations_f32]
+    private OTHER    = %w[copy_into_f32 write_rows_f32 sum_f32 max_f32 sum_short_f32 max_short_f32 gather_f32 pick_f32 place_f32 fill_zero_f32 scatter_add_f32 scatter_add_column_f32 unview_f32 matmul_f32 matmul_split_f32 matmul_tiled_chunks_64x64_f32 matmul_chunk_sums_f32 matmul_tiled_32x32_f32 matmul_tiled_64x64_f32 matmul_tiled_32x64_f32 dropout_f32 softmax_f32 softmax_scaled_f32 softmax_grad_f32 log_softmax_grad_f32 log_softmax_f32 layernorm_f32 layernorm_grad_f32 rmsnorm_f32 rope_f32 attention_f32 attention_ragged_f32 gather_blocks_f32 quantize_rows_q8_f32 block_matmul_f32 block_matmul_lanes_f32 block_matmul_loads_f32 block_matmul_stream_f32 block_matmul_stream_activations_f32]
     private OPTIONAL = %w[matmul_atomic_f32 block_matmul_unordered_f32]
     private COLS     = 32
     # SIMD groups in each threadgroup of a quantised matmul on lanes.

@@ -244,6 +244,8 @@ type-checks and generates code for the Metal path without linking it, so mistake
 
 **Kernels on Linux.** MSL is close enough to C++ that a kernel can be run on the CPU before it reaches a GPU: compile its source with `g++ -std=c++20` behind a few defines (`kernel`, `device` and `constant` empty, `threadgroup` as `static`), run each threadgroup's threads as `std::thread`s, and make `threadgroup_barrier` a `std::barrier`. That checks indexing and order of arithmetic, though not MSL's own rules, such as matching widths of position attributes. `scripts/emulate_metal/run.sh` does this for the matmul kernels, checking every tiled variant and the tiled two passes against split-K bit for bit, and `scripts/emulate_metal/blocks.sh` for the block-format kernels, checking them against the host's bits. They are references, not part of CI, and the pattern carries over to other kernels.
 
+**A new MSL kernel** must also be named in one of `Metal`'s kernel lists, such as `OTHER` in `metal.cr`, which build its pipelines when the device starts. A name left out raises `KeyError` at its first dispatch; the cross-compile cannot catch it, and macOS CI does.
+
 CI runs the specs on macOS too. A hosted runner may have no usable GPU, in which case the Metal specs are pending rather than failing.
 
 ## Working on the CUDA device
