@@ -27,3 +27,4 @@ CLAUDE.md
 
 # Git worktrees that Claude Code subagents work in
 /.claude/worktrees/
+/zz_*.cr
