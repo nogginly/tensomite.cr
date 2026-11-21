@@ -3,7 +3,7 @@
 # with the cache warm, and after a one-line code change, for `--release` (one
 # LLVM module) and `-O3` split into a module per type. Prints a Markdown table.
 #
-#     scripts/time_builds.sh [PROGRAM.cr] [EXTRA_FLAGS...]
+#     scripts/time_builds.sh [PROGRAM.cr] [EXTRA_FLAGS...]   # PROGRAM relative to the root
 #     scripts/time_builds.sh apps/finetune/finetune.cr
 #     scripts/time_builds.sh bench/train_gpt2.cr -Dcuda
 #
@@ -36,5 +36,5 @@ for flags in "--release" "-O3"; do
   printf 'require "./%s"\nputs "time_builds 2" if ARGV.includes?("--time-builds")\n' "$program" > "$wrapper"
   # shellcheck disable=SC2086
   edit=$(seconds $flags "$@")
-  echo "$flags $*|$cold|$warm|$edit"
+  echo "$flags${*:+ $*}|$cold|$warm|$edit"
 done
