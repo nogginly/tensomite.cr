@@ -196,6 +196,38 @@ extern "C" __global__ void gather_f32(const float* table, const int* ids, float*
     dst[i] = table[offset_of(vt, id * width + i % width)];
 }
 
+// Output element r is table[r, ids[r]], or 0 where ignoring and ids[r] is ignore.
+extern "C" __global__ void pick_f32(const float* table, const int* ids, float* dst, int* errors,
+                                    View vt, View vi, int columns, int ignoring, int ignore, unsigned int n) {
+    unsigned int r = thread_index();
+    if (r >= n) return;
+    int id = ids[offset_of(vi, r)];
+    if (ignoring && id == ignore) {
+        dst[r] = 0.0f;
+        return;
+    }
+    if (id < 0 || id >= columns) {
+        report(errors, id, columns);
+        dst[r] = 0.0f;
+        return;
+    }
+    dst[r] = table[offset_of(vt, r * columns + id)];
+}
+
+// Output element i, column c of row r, is 0 + src[r] where c is ids[r], and 0
+// elsewhere or where ignoring and ids[r] is ignore. Column 0 reports an id
+// out of range.
+extern "C" __global__ void place_f32(const float* src, const int* ids, float* dst, int* errors,
+                                     View vs, View vi, int columns, int ignoring, int ignore, unsigned int n) {
+    unsigned int i = thread_index();
+    if (i >= n) return;
+    unsigned int r = i / columns, c = i % columns;
+    int id = ids[offset_of(vi, r)];
+    bool bad = !(ignoring && id == ignore) && (id < 0 || id >= columns);
+    if (bad && c == 0) report(errors, id, columns);
+    dst[i] = !bad && (int)c == id && !(ignoring && id == ignore) ? 0.0f + src[offset_of(vs, r)] : 0.0f;
+}
+
 // Zeroes dst, one thread per element.
 extern "C" __global__ void fill_zero_f32(float* dst, unsigned int n) {
     unsigned int i = thread_index();

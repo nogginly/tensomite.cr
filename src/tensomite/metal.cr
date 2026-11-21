@@ -380,7 +380,7 @@ module Tensomite
       when Op::Sum, Op::Max                                                                                                then encode_reduce(node, output)
       when Op::Cat                                                                                                         then encode_cat(node, output)
       when Op::Write, Op::WriteRows                                                                                        then encode_write(node, output)
-      when Op::Gather, Op::ScatterAdd                                                                                      then encode_rows(node, output)
+      when Op::Gather, Op::ScatterAdd, Op::Pick, Op::Place                                                                 then encode_rows(node, output)
       when Op::Unview                                                                                                      then return encode_unview(node, output)
       when Op::MatMul                                                                                                      then encode_matmul(node, output)
       when Op::Kernel, Op::Dropout, Op::Rope                                                                               then encode_pointwise(node, output)
@@ -602,7 +602,9 @@ module Tensomite
     # Gather, one thread per output element, and ScatterAdd, one thread per output
     # element to zero it and then one per column, or for one column one per id.
     # Both report an id out of range through the error buffer (see `#flush`).
+    # Pick and Place go to `#encode_pick`.
     private def encode_rows(node : Node, output : MetalBuffer) : Nil
+      return encode_pick(node, output) if node.op.in?(Op::Pick, Op::Place)
       rows_src, ids = node.srcs
       rows, width = node.op == Op::Gather ? rows_src.shape : node.shape
       buffers = [mtl(rows_src), mtl(ids), output.mtl, errors.mtl]
@@ -614,6 +616,17 @@ module Tensomite
         name, threads = width == 1 ? {"scatter_add_column_f32", ids.size} : {"scatter_add_f32", width}
         dispatch(name, threads, buffers, constants << u32(ids.size))
       end
+    end
+
+    # Pick, one thread per row, and Place, one thread per output element. Both
+    # report an id out of range through the error buffer (see `#flush`).
+    private def encode_pick(node : Node, output : MetalBuffer) : Nil
+      src, ids = node.srcs
+      columns = node.op == Op::Pick ? src.shape[1] : node.shape[1]
+      ignore = node.ignore
+      name = node.op == Op::Pick ? "pick_f32" : "place_f32"
+      dispatch(name, node.size, [mtl(src), mtl(ids), output.mtl, errors.mtl],
+        [view_args(src.view), view_args(ids.view), i32(columns), i32(ignore ? 1 : 0), i32(ignore || 0), u32(node.size)])
     end
 
     # Unview: one thread per output position, summing what the view reads from it.

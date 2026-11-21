@@ -116,11 +116,11 @@ models/, data/              downloaded weights and datasets (git-ignored)
 
 Model specs compare tensomite against Hugging Face `transformers` and PyTorch on the same files. The fixtures are generated once by `scripts/make_fixtures.py` and committed, so specs and CI need no Python.
 
-Fixture     |Contents                                                                                       |Needs                        
-------------|-----------------------------------------------------------------------------------------------|-----------------------------
-`tiny_gpt2/`|a small trained byte-level BPE vocabulary, a random 2-layer GPT-2 (160 KB), and `expected.json`|PyPI packages only           
-`gpt2/`     |`expected.json` only; the weights are downloaded, not committed                                |GPT-2 small from Hugging Face
-`tiktoken/` |a small tiktoken BPE with the GPT-4-style split pattern, converted to `tokenizer.json`, and the ids tiktoken gives|`tiktoken` and `tokenizers`
+Fixture     |Contents                                                                                                          |Needs                        
+------------|------------------------------------------------------------------------------------------------------------------|-----------------------------
+`tiny_gpt2/`|a small trained byte-level BPE vocabulary, a random 2-layer GPT-2 (160 KB), and `expected.json`                   |PyPI packages only           
+`gpt2/`     |`expected.json` only; the weights are downloaded, not committed                                                   |GPT-2 small from Hugging Face
+`tiktoken/` |a small tiktoken BPE with the GPT-4-style split pattern, converted to `tokenizer.json`, and the ids tiktoken gives|`tiktoken` and `tokenizers`  
 
 `expected.json` holds a Unicode tokeniser corpus and its ids, a prompt and its ids, reference logits, and the greedy continuation. The tiny tokeniser's ids are checked against both Hugging Face's Rust tokeniser and transformers' Python port of GPT-2's original one before they are written.
 

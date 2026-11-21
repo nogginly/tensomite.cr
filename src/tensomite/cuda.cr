@@ -490,7 +490,7 @@ module Tensomite
       when Op::Sum, Op::Max                                                                                                then launch_reduce(kernels, node, output)
       when Op::Cat                                                                                                         then launch_cat(kernels, node, output)
       when Op::Write, Op::WriteRows                                                                                        then launch_write(kernels, node, output)
-      when Op::Gather, Op::ScatterAdd                                                                                      then launch_rows(kernels, node, output)
+      when Op::Gather, Op::ScatterAdd, Op::Pick, Op::Place                                                                 then launch_rows(kernels, node, output)
       when Op::Unview                                                                                                      then return launch_unview(kernels, node, output)
       when Op::MatMul                                                                                                      then launch_matmul(kernels, node, output)
       when Op::Softmax, Op::SoftmaxGrad, Op::LogSoftmax, Op::LogSoftmaxGrad, Op::LayerNorm, Op::LayerNormGrad, Op::RMSNorm then launch_row_op(kernels, node, output)
@@ -612,7 +612,9 @@ module Tensomite
     # Gather, one thread per output element, and ScatterAdd, one thread per output
     # element to zero it and then one per column, or for one column one per id.
     # Both report an id out of range through the error buffer (see `#sync`).
+    # Pick and Place go to `#launch_pick`.
     private def launch_rows(kernels : Kernels, node : Node, output : CUDABuffer) : Nil
+      return launch_pick(kernels, node, output) if node.op.in?(Op::Pick, Op::Place)
       rows_src, ids = node.srcs
       rows, width = node.op == Op::Gather ? rows_src.shape : node.shape
       @errors_pending = true
@@ -627,6 +629,18 @@ module Tensomite
           run(kernels["scatter_add_f32"], width, *args, ids.size.to_u32)
         end
       end
+    end
+
+    # Pick, one thread per row, and Place, one thread per output element. Both
+    # report an id out of range through the error buffer (see `#sync`).
+    private def launch_pick(kernels : Kernels, node : Node, output : CUDABuffer) : Nil
+      src, ids = node.srcs
+      columns = node.op == Op::Pick ? src.shape[1] : node.shape[1]
+      ignore = node.ignore
+      @errors_pending = true
+      name = node.op == Op::Pick ? "pick_f32" : "place_f32"
+      run(kernels[name], node.size, pointer(src), pointer(ids), output.pointer, errors, view_args(src.view), view_args(ids.view),
+        columns, ignore ? 1 : 0, ignore || 0, node.size.to_u32)
     end
 
     # Unview: one thread per output position, summing what the view reads from it.

@@ -55,8 +55,10 @@ module Tensomite
     # sum and the mean's count, and their loss is 0 with `:none`. With every
     # row ignored, the mean is NaN.
     #
-    # The targets are read on the host to pick each row's entry, so *targets* is
-    # realised when this is called.
+    # Each row's entry is picked on the device (`#pick`), so the targets are
+    # never read on the host and nothing waits for the device. A target outside
+    # the classes that is not *ignore_index* raises `ExecutionError` when the
+    # loss is realised.
     #
     # ```
     # logits.cross_entropy(targets)                   # the mean, a scalar
@@ -65,40 +67,16 @@ module Tensomite
     # ```
     def cross_entropy(targets : Tensor, reduction : Reduction = :mean, ignore_index : Int32? = nil) : Tensor
       raise ShapeError.new("cross_entropy needs [n, classes] logits, not #{shape}") unless ndim == 2
-      rows, classes = shape
-      ids = target_ids(targets, rows, classes, ignore_index)
-      flat = log_softmax.reshape([rows * classes, 1])
-      return row_losses(flat, ids, classes, ignore_index) if reduction.none?
-      picks = [] of Int32
-      ids.each_with_index { |target, row| picks << row * classes + target unless target == ignore_index }
-      if picks.empty?
-        return Tensor.from([reduction.mean? ? Float32::NAN : 0f32], [] of Int32, device)
-      end
-      picked = flat.gather(Tensor.from(picks, [picks.size], device))
-      reduction.mean? ? -picked.mean : -picked.sum
-    end
-
-    # Returns *targets* read on the host, after checking that they are `I32`,
-    # one per row, and each a class index or *ignore_index*.
-    private def target_ids(targets : Tensor, rows : Int32, classes : Int32, ignore_index : Int32?) : Array(Int32)
+      rows = shape[0]
       raise ShapeError.new("#{targets.size} targets for #{rows} rows") unless targets.size == rows
       raise DTypeError.new("targets must be I32, not #{targets.dtype}") unless targets.dtype.i32?
-      ids = targets.to_a(Int32)
-      ids.each do |target|
-        next if target == ignore_index || 0 <= target < classes
-        raise ShapeError.new("target #{target} out of range for #{classes} classes")
-      end
-      ids
-    end
-
-    # Returns each row's `-log_softmax[row, target]` from *flat*, the
-    # log-softmax as one column, and 0 for rows whose target is *ignore_index*.
-    private def row_losses(flat : Tensor, ids : Array(Int32), classes : Int32, ignore_index : Int32?) : Tensor
-      rows = ids.size
-      picks = ids.map_with_index { |target, row| row * classes + (target == ignore_index ? 0 : target) }
-      losses = -flat.gather(Tensor.from(picks, [rows], device)).reshape([rows])
-      return losses unless ignore_index && ids.includes?(ignore_index)
-      losses * Tensor.from(ids.map { |target| target == ignore_index ? 0f32 : 1f32 }, [rows], device)
+      ids = targets.reshape([rows])
+      picked = log_softmax.pick(ids, ignore_index)
+      return -picked if reduction.none?
+      return -picked.sum if reduction.sum?
+      return -picked.mean unless ignore_index
+      kept = scalar(1).expand(shape).pick(ids, ignore_index).sum
+      -(picked.sum / kept)
     end
 
     # Returns layer normalisation over the last axis: each row is shifted to mean 0,

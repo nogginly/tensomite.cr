@@ -230,16 +230,16 @@ flowchart LR
 
 Devices implement only the primitive ops in `Op`. Everything else is a composite: a `Tensor` method that builds a small graph of primitives. A new device therefore needs kernels for the primitives and nothing more.
 
-Kind      |Primitive ops (`Op`)                  |`Tensor` API                                                          
-----------|--------------------------------------|----------------------------------------------------------------------
-Binary    |`Add`, `Sub`, `Mul`, `Div`, `Maximum` |`+`, `-`, `*`, `/`, `maximum`, with tensors or scalars                
-Unary     |`Exp`, `Log`, `Tanh`, `Sqrt`          |`exp`, `log`, `tanh`, `sqrt`, unary `-`                               
-Reduction |`Sum`, `Max`                          |`sum`, `max`, with optional `axis` and `keepdims`                     
-Structural|`Copy`, `Cat`, `Gather`, `MatMul`     |`contiguous`, `Tensor.cat`, `gather`, `matmul` (with an optional bias)
-Adjoint   |`GreaterEqual`, `Unview`, `ScatterAdd`|`greater_equal`; the other two only through `Tensomite.grad`          
-Fused     |`Kernel`                              |any `Tensomite.kernel`, such as `gelu`                                
-Row       |`Softmax`, `LogSoftmax`, `LayerNorm`  |`softmax`, `log_softmax` and `layernorm` along the last axis          
-Composite |none: built from the rows above       |`mean`, `softmax`, `log_softmax`, `cross_entropy`, `layernorm`, `gelu`
+Kind      |Primitive ops (`Op`)                           |`Tensor` API                                                                     
+----------|-----------------------------------------------|---------------------------------------------------------------------------------
+Binary    |`Add`, `Sub`, `Mul`, `Div`, `Maximum`          |`+`, `-`, `*`, `/`, `maximum`, with tensors or scalars                           
+Unary     |`Exp`, `Log`, `Tanh`, `Sqrt`                   |`exp`, `log`, `tanh`, `sqrt`, unary `-`                                          
+Reduction |`Sum`, `Max`                                   |`sum`, `max`, with optional `axis` and `keepdims`                                
+Structural|`Copy`, `Cat`, `Gather`, `Pick`, `MatMul`      |`contiguous`, `Tensor.cat`, `gather`, `pick`, `matmul` (with an optional bias)   
+Adjoint   |`GreaterEqual`, `Unview`, `ScatterAdd`, `Place`|`greater_equal`, `place`; `Unview` and `ScatterAdd` only through `Tensomite.grad`
+Fused     |`Kernel`                                       |any `Tensomite.kernel`, such as `gelu`                                           
+Row       |`Softmax`, `LogSoftmax`, `LayerNorm`           |`softmax`, `log_softmax` and `layernorm` along the last axis                     
+Composite |none: built from the rows above                |`mean`, `softmax`, `log_softmax`, `cross_entropy`, `layernorm`, `gelu`           
 
 - **Scalars** become rank-0 leaf tensors of the operand's dtype (`Tensor.scalar`), which then broadcast like any other tensor. So `x * 0.5` is `Mul` of `x` and a broadcast scalar.
 - **Float-only ops** (`/`, `exp`, `log`, `tanh`, `sqrt`, `mean` and the composites) raise `DTypeError` on `I32` when called.
@@ -364,7 +364,7 @@ Op          |Threads                                                            
 
 **Reductions in chunks (Decision X).** One thread per output made a long reduction slow: each of a GPT-2 layer norm's means was a single thread adding 768 numbers one after another, 126 µs each and 57% of a decoded token's GPU time. Each output now has a threadgroup, with each thread folding chunks of 16 at fixed offsets. As with [split-K](#glossary), chunk boundaries never depend on the run's length or on the number of threads, so a row padded with zeros (or, for `Max`, with -∞), as a masked attention row is, keeps its bits, and prefill still equals decode. `Max` is exact in any order and still matches the host bit for bit. `Sum` of more than one chunk adds in a different order from the host's and is compared within 1e-5. A run of one chunk or less (16 elements) keeps one thread per output, which is the host's arithmetic exactly. Within a run along the last axis, threads step by the view's stride rather than calling `offset_of` for every element.
 
-**Errors.** A GPU kernel cannot raise. `Gather` and `ScatterAdd` report an id out of range through a small shared error buffer, and `flush` raises the host's `ExecutionError` when it finds a report. The error therefore surfaces when the command buffer completes, at `realize`, as it does on the host. One difference remains: the nodes encoded before the error are marked realised, with undefined contents for the failing one.
+**Errors.** A GPU kernel cannot raise. `Gather`, `ScatterAdd`, `Pick` and `Place` report an id out of range through a small shared error buffer, and `flush` raises the host's `ExecutionError` when it finds a report. The error therefore surfaces when the command buffer completes, at `realize`, as it does on the host. One difference remains: the nodes encoded before the error are marked realised, with undefined contents for the failing one.
 
 **`MatMul`** has five modes (`Metal#matmul_mode`). A matrix-vector product (`m` = 1), which is what decoding mostly does, has too few outputs to fill the GPU with one thread each; a prefill has enough outputs that reading the operands, not adding them, is the cost:
 
@@ -506,7 +506,7 @@ The integer part can be added in any order without changing a bit; the sum over 
   ```
 
   So a graph of host ops downloads each source once, not once per reader, and uploads each output once. Device memory comes from a pool, as on Metal. A buffer's finalizer hands its memory to a retired list, which the device moves into the pool at its next allocation or sync. If the list is busy, the finalizer frees the memory at once instead, making the context current on its thread first, so it never waits.
-- **Kernels** (`cuda/kernels.cu`) are ports of the Metal ones: elementwise arithmetic and comparisons, `exp`, `log`, `tanh`, `sqrt`, copies and `Cat`, `Sum` and `Max` in chunks of 16 at fixed offsets, `Gather`, `ScatterAdd` and `Unview`. Views reach them as a struct of 19 integers, passed by value. They are compiled once, on the first op, for the GPU's architecture, and queued in order on the default stream; a plain copy to or from the host waits for the kernels before it, so no explicit stream is needed yet. `Gather` and `ScatterAdd` report an id out of range in a small error buffer, which `sync` reads and clears, raising `ExecutionError`. - **Matmul, row ops and macro kernels** are ports too. `MatMul` has Metal's modes (`CUDA::MatMulMode`): serial, with the host's bits; split, in chunks of `k` at fixed offsets; and tiled, in the three tile sizes of `CUDA::MatMulTile`, with split's bits, so `Auto` picks tiled at 16 rows or more and split below, and a tiled prefill gives a split decode's bits. Softmax, log-softmax and layernorm fold rows in chunks as the reductions do, so a row padded with `-inf` keeps its bits. `Kernel#cuda` emits a macro kernel as CUDA C++, one statement per operation, as `#msl` emits MSL; each is compiled on its first launch and kept. With these, GPT-2's forward pass runs no host ops on CUDA.
+- **Kernels** (`cuda/kernels.cu`) are ports of the Metal ones: elementwise arithmetic and comparisons, `exp`, `log`, `tanh`, `sqrt`, copies and `Cat`, `Sum` and `Max` in chunks of 16 at fixed offsets, `Gather`, `ScatterAdd`, `Pick`, `Place` and `Unview`. Views reach them as a struct of 19 integers, passed by value. They are compiled once, on the first op, for the GPU's architecture, and queued in order on the default stream; a plain copy to or from the host waits for the kernels before it, so no explicit stream is needed yet. `Gather`, `ScatterAdd`, `Pick` and `Place` report an id out of range in a small error buffer, which `sync` reads and clears, raising `ExecutionError`. - **Matmul, row ops and macro kernels** are ports too. `MatMul` has Metal's modes (`CUDA::MatMulMode`): serial, with the host's bits; split, in chunks of `k` at fixed offsets; and tiled, in the three tile sizes of `CUDA::MatMulTile`, with split's bits, so `Auto` picks tiled at 16 rows or more and split below, and a tiled prefill gives a split decode's bits. Softmax, log-softmax and layernorm fold rows in chunks as the reductions do, so a row padded with `-inf` keeps its bits. `Kernel#cuda` emits a macro kernel as CUDA C++, one statement per operation, as `#msl` emits MSL; each is compiled on its first launch and kept. With these, GPT-2's forward pass runs no host ops on CUDA.
 - **Testing without a GPU.** `scripts/cuda_stub/libcuda.c` stands in for the driver: one "GPU" whose memory is host memory. It cannot run PTX, but with `TENSOMITE_CUDA_KERNELS` it loads `prelude.cu`, `kernels.cu` and every macro kernel's CUDA C++ (written out by `scripts/cuda_stub/macro_kernels.cr`), compiled as host C++ behind `emulate.h`. That header defines CUDA's built-ins and runs a block's threads in a loop, or, for a kernel with shared memory, as one OS thread per GPU thread, all meeting at a barrier inside the kernel and between blocks. NVRTC, from PyPI, still compiles the real source. So CI compiles every kernel, runs each on the host, and compares it with the CPU in `gpu_spec`, as `scripts/emulate_metal` does for MSL. What it cannot catch is a difference in CUDA's own semantics, such as its maths library; the GB10 runs the same specs on the real GPU.
 
 > [!NOTE]
@@ -667,6 +667,8 @@ Op            |Gradient for each source
 `Gather`      |`ScatterAdd` of `g`'s rows into the table's rows; ids get none                
 `MatMul`      |`g·bᵀ`, `aᵀ·g`                                                                
 `ScatterAdd`  |`g` gathered by the ids                                                       
+`Pick`        |`Place` of `g` at the ids' columns; ids get none                              
+`Place`       |`Pick` of `g` at the ids' columns                                             
 `Unview`      |`g` read through the inverted view                                            
 `GreaterEqual`|none: it is a step function                                                   
 
@@ -709,7 +711,7 @@ flowchart LR
 
 ### Cross-entropy
 
-`logits.cross_entropy(targets)` is the mean of `-log_softmax(logits)[row, target]` over rows. `log_softmax` is `x - max - log(Σ exp(x - max))`, which never takes the log of an underflowed probability. The entries are picked by `gather` from the log-probabilities flattened to a `[rows × classes, 1]` table, with indices `row × classes + target` computed on the host. So the targets are realised when the op is built, and the gradient arrives through the `Gather` rule.
+`logits.cross_entropy(targets)` is the mean of `-log_softmax(logits)[row, target]` over rows. `log_softmax` is `x - max - log(Σ exp(x - max))`, which never takes the log of an underflowed probability. Each row's entry is picked on the device by `Pick`, which reads row *r*'s element at column `targets[r]`; its gradient is `Place`, which writes `g[r]` there in a tensor of zeros. So the targets are never read on the host and building the loss waits for nothing (Decision DZ). Both copy, and `Place` adds to zero as `ScatterAdd` does, so the loss and its gradient have the bits of the flat `gather` they replaced. With `ignore_index`, `Pick` gives 0 for an ignored row, and the mean divides the sum by the count of kept rows, itself a `Pick` of ones, so the count stays on the device too. A target out of range raises `ExecutionError` when the loss is realised, as a `gather` id does.
 
 ## Modules
 

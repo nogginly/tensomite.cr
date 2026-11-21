@@ -118,6 +118,38 @@ module Tensomite
       Tensor.lazy(Node.new(Op::Gather, [self, ids], ids.shape + [shape[1]], dtype.block? ? DType::F32 : dtype, device))
     end
 
+    # Returns one element of each row of this 2-D table, `[rows]`: the column
+    # *ids*, `I32` `[rows]`, selects, or 0 for a row whose id is *ignore*. It
+    # picks each row's target on the device, so the ids are never read on the
+    # host.
+    #
+    # An id outside the columns that is not *ignore* raises `ExecutionError`
+    # when the result is realised.
+    #
+    # ```
+    # log_probs.pick(targets) # [rows]: each row's log-probability of its target
+    # ```
+    def pick(ids : Tensor, ignore : Int32? = nil) : Tensor
+      check_pick("pick", ids, shape[0]? || 0)
+      raise ShapeError.new("pick needs a 2-D table, not #{shape}") unless ndim == 2
+      Tensor.lazy(Node.new(Op::Pick, [self, ids], [shape[0]], dtype, device, ignore: ignore))
+    end
+
+    # Returns the adjoint of `#pick`: a `[rows, columns]` tensor, zero but for
+    # each row's element at the column *ids* selects, which holds this `[rows]`
+    # tensor's element; a row whose id is *ignore* is all zero.
+    def place(ids : Tensor, columns : Int32, ignore : Int32? = nil) : Tensor
+      raise ShapeError.new("place needs [rows] values, not #{shape}") unless ndim == 1
+      check_pick("place", ids, shape[0])
+      Tensor.lazy(Node.new(Op::Place, [self, ids], [shape[0], columns], dtype, device, ignore: ignore))
+    end
+
+    private def check_pick(name : String, ids : Tensor, rows : Int32) : Nil
+      raise DTypeError.new("#{name} ids must be I32, not #{ids.dtype}") unless ids.dtype.i32?
+      raise DeviceError.new("#{name} of tensors on different devices") unless device.same?(ids.device)
+      raise ShapeError.new("#{name} needs one id per row, [#{rows}], not #{ids.shape}") unless ids.shape == [rows]
+    end
+
     # Returns `x · weightᵀ (+ bias)` for rows `x` of `[..., K]` and *weight* of
     # `[N, K]`, as PyTorch's `linear` does, so a weight stored as GGUF and
     # PyTorch store it, `[outputs, inputs]`, needs no transpose.

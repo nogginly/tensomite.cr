@@ -29,6 +29,15 @@ module Tensomite
     Cat
     # Rows of source 0, a 2-D table, selected by the `I32` indices in source 1.
     Gather
+    # One element of each row of source 0, a 2-D table: the column the `I32`
+    # index of that row in source 1 selects, or 0 where the index is
+    # `Node#ignore`.
+    Pick
+    # The adjoint of `Pick`: a 2-D output, zero but for each row's element at
+    # the column the `I32` index of that row in source 1 selects, which holds
+    # that row's element of source 0, `[rows]`. Rows whose index is
+    # `Node#ignore` are all zero.
+    Place
     # Matrix product of `[..., M, K]` and `[..., K, N]`; batch dimensions are already
     # broadcast. An optional third source, a contiguous `[N]` bias, is added to
     # each output after its sum, as a separate `Add` would.
@@ -157,6 +166,8 @@ module Tensomite
     getter kernel : Kernel?
     # The epsilon a `LayerNorm` node adds to each row's variance.
     getter epsilon : Float32?
+    # The index for which a `Pick` or `Place` node gives 0.
+    getter ignore : Int32?
     # The factor a `Softmax` or `Attention` node multiplies its scores by, or a
     # `SoftmaxGrad` node its result by.
     getter scale : Float32?
@@ -173,7 +184,7 @@ module Tensomite
     # Raises `DTypeError` when the result is in a block format, which no op
     # makes, or when a source is, except `BlockMatMul`'s weight and `Gather`'s
     # table (Decision N).
-    def initialize(@op : Op, @srcs : Array(Tensor), @shape, @dtype, @device, @axis = nil, @source_view = nil, @kernel = nil, @epsilon = nil, @scale = nil, @dropout = nil)
+    def initialize(@op : Op, @srcs : Array(Tensor), @shape, @dtype, @device, @axis = nil, @source_view = nil, @kernel = nil, @epsilon = nil, @scale = nil, @dropout = nil, @ignore = nil)
       raise DTypeError.new("#{op} cannot make #{dtype} tensors") if dtype.block?
       srcs.each_with_index do |src, i|
         next unless src.dtype.block?
