@@ -73,7 +73,7 @@ Tensomite is a Crystal tensor library with lazy tensors, automatic gradients, op
    end
    ```
 
-   `cross_entropy(targets)` takes `[n, classes]` scores and `[n]` `I32` class ids. For regression, use `error = model.call(x) - y` and `(error * error).mean`. `SGD.new(params, lr:, momentum:)` is the simpler optimizer. For a learning-rate schedule, assign `optimizer.lr = rate` on an `AdamW` before each step.
+   `cross_entropy(targets)` takes `[n, classes]` scores and `[n]` `I32` class ids; `reduction: :none` gives each row's loss, and `ignore_index:` leaves rows out. For different settings per set of parameters, pass `AdamW.new([AdamW::Group.new(params, lr: ...), ...])`. For regression, use `error = model.call(x) - y` and `(error * error).mean`. `SGD.new(params, lr:, momentum:)` is the simpler optimizer. For a learning-rate schedule, assign `optimizer.lr = rate` on an `AdamW` before each step.
 
 7. **Save and load.** `model.save("model.safetensors")` writes every parameter under its name. To load, build a model of the same shape and call `Classifier.new(builder).load("model.safetensors")`. A missing or extra name raises `Tensomite::Error`, and a different shape raises `ShapeError`. The file is standard safetensors. To resume an optimizer too, write `optimizer.state` with `SafeTensors.write`, and restore with `optimizer.restore(SafeTensors.open(path), steps: n)` (`GUIDE.md`, "Training").
 

@@ -4,7 +4,7 @@ A small pure-Crystal tensor maths runtime with a minimal native seam to BLAS and
 
 Tensomite gives Crystal lazy tensors with automatic gradients, for training models and running them. Its kernels run on the CPU, written in Crystal, through BLAS (Accelerate or OpenBLAS), on Apple GPUs through Metal, or on NVIDIA GPUs through CUDA, and repeat their results exactly from run to run.
 
-It loads GPT-2 and Llama-family models, such as SmolLM2, from Hugging Face's safetensors files (`F32`, `F16` or `BF16`, with `tokenizer.json`) and from GGUF files. Weights can be quantised to `Q8_0`, `Q4_0` or `Q4_1`, with ggml's bytes, and multiplied in those formats on every device; on the CPU, quantised decoding runs on all cores.
+It loads GPT-2 and Llama-family models, such as SmolLM2, from Hugging Face's safetensors files (`F32`, `F16` or `BF16`, with `tokenizer.json`) and from GGUF files, and reads `tiktoken` tokenisers converted by a script. Weights can be quantised to `Q8_0`, `Q4_0` or `Q4_1`, with ggml's bytes, and multiplied in those formats on every device; on the CPU, quantised decoding runs on all cores.
 
 ```crystal
 require "tensomite"
