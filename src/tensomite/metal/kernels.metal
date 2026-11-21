@@ -250,6 +250,55 @@ kernel void gather_f32(device const float* table [[buffer(0)]],
     dst[i] = table[offset_of(vt, id * width + i % width)];
 }
 
+// Output element r is table[r, ids[r]], or 0 where ignoring and ids[r] is ignore.
+kernel void pick_f32(device const float* table [[buffer(0)]],
+                     device const int* ids [[buffer(1)]],
+                     device float* dst [[buffer(2)]],
+                     device atomic_int* errors [[buffer(3)]],
+                     constant View& vt [[buffer(4)]],
+                     constant View& vi [[buffer(5)]],
+                     constant int& columns [[buffer(6)]],
+                     constant int& ignoring [[buffer(7)]],
+                     constant int& ignore [[buffer(8)]],
+                     constant uint& n [[buffer(9)]],
+                     uint r [[thread_position_in_grid]]) {
+    if (r >= n) return;
+    int id = ids[offset_of(vi, r)];
+    if (ignoring && id == ignore) {
+        dst[r] = 0.0f;
+        return;
+    }
+    if (id < 0 || id >= columns) {
+        report(errors, id, columns);
+        dst[r] = 0.0f;
+        return;
+    }
+    dst[r] = table[offset_of(vt, r * columns + id)];
+}
+
+// Output element i, column c of row r, is 0 + src[r] where c is ids[r], and 0
+// elsewhere or where ignoring and ids[r] is ignore. Column 0 reports an id
+// out of range.
+kernel void place_f32(device const float* src [[buffer(0)]],
+                      device const int* ids [[buffer(1)]],
+                      device float* dst [[buffer(2)]],
+                      device atomic_int* errors [[buffer(3)]],
+                      constant View& vs [[buffer(4)]],
+                      constant View& vi [[buffer(5)]],
+                      constant int& columns [[buffer(6)]],
+                      constant int& ignoring [[buffer(7)]],
+                      constant int& ignore [[buffer(8)]],
+                      constant uint& n [[buffer(9)]],
+                      uint i [[thread_position_in_grid]]) {
+    if (i >= n) return;
+    uint r = i / uint(columns), c = i % uint(columns);
+    int id = ids[offset_of(vi, r)];
+    bool skip = ignoring && id == ignore;
+    bool bad = !skip && (id < 0 || id >= columns);
+    if (bad && c == 0) report(errors, id, columns);
+    dst[i] = !bad && !skip && int(c) == id ? 0.0f + src[offset_of(vs, r)] : 0.0f;
+}
+
 // Zeroes dst, one thread per element.
 kernel void fill_zero_f32(device float* dst [[buffer(0)]],
                           constant uint& n [[buffer(1)]],

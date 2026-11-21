@@ -130,6 +130,8 @@ module Tensomite
       in Op::Write        then copy_into(T, node.srcs.last, node.source_view || raise(Error.new("write needs a region")), dst)
       in Op::WriteRows    then write_rows(T, node, dst)
       in Op::Gather       then gather(T, node, dst)
+      in Op::Pick         then pick(T, node, dst)
+      in Op::Place        then place(T, node, dst)
       in Op::MatMul       then matmul(T, node, dst)
       in Op::BlockMatMul  then block_matmul(node, Slice.new(dst.to_unsafe.as(Float32*), dst.size))
       in Op::GreaterEqual then binary(T, node, dst) { |x, y| x >= y ? T.new(1) : T.zero }
@@ -608,6 +610,37 @@ module Tensomite
         end
         pos, stride = table.view.offset_of(id * width), table.view.run_stride
         width.times { |j| dst[i * width + j] = xs[pos + j * stride] }
+      end
+    end
+
+    # Copies each row's element at the column its id selects, or 0 for an
+    # ignored id.
+    private def pick(type : T.class, node : Node, dst : Slice(T)) : Nil forall T
+      table, ids = node.srcs
+      columns = table.shape[1]
+      xs = elements(T, table)
+      idx = elements(Int32, ids)
+      dst.size.times do |row|
+        id = idx[ids.view.offset_of(row)]
+        next dst[row] = T.zero if id == node.ignore
+        raise ExecutionError.new("index #{id} out of range for #{columns} columns") unless 0 <= id < columns
+        dst[row] = xs[table.view.offset_of(row * columns + id)]
+      end
+    end
+
+    # Zeroes the output, then writes each row's value, plus 0 as a `ScatterAdd`
+    # adds it, at the column its id selects, skipping ignored ids.
+    private def place(type : T.class, node : Node, dst : Slice(T)) : Nil forall T
+      values, ids = node.srcs
+      rows, columns = node.shape
+      xs = elements(T, values)
+      idx = elements(Int32, ids)
+      dst.fill(T.zero)
+      rows.times do |row|
+        id = idx[ids.view.offset_of(row)]
+        next if id == node.ignore
+        raise ExecutionError.new("index #{id} out of range for #{columns} columns") unless 0 <= id < columns
+        dst[row * columns + id] = T.zero + xs[values.view.offset_of(row)]
       end
     end
 

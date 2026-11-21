@@ -116,11 +116,11 @@ models/, data/              downloaded weights and datasets (git-ignored)
 
 Model specs compare tensomite against Hugging Face `transformers` and PyTorch on the same files. The fixtures are generated once by `scripts/make_fixtures.py` and committed, so specs and CI need no Python.
 
-Fixture     |Contents                                                                                       |Needs                        
-------------|-----------------------------------------------------------------------------------------------|-----------------------------
-`tiny_gpt2/`|a small trained byte-level BPE vocabulary, a random 2-layer GPT-2 (160 KB), and `expected.json`|PyPI packages only           
-`gpt2/`     |`expected.json` only; the weights are downloaded, not committed                                |GPT-2 small from Hugging Face
-`tiktoken/` |a small tiktoken BPE with the GPT-4-style split pattern, converted to `tokenizer.json`, and the ids tiktoken gives|`tiktoken` and `tokenizers`
+Fixture     |Contents                                                                                                          |Needs                        
+------------|------------------------------------------------------------------------------------------------------------------|-----------------------------
+`tiny_gpt2/`|a small trained byte-level BPE vocabulary, a random 2-layer GPT-2 (160 KB), and `expected.json`                   |PyPI packages only           
+`gpt2/`     |`expected.json` only; the weights are downloaded, not committed                                                   |GPT-2 small from Hugging Face
+`tiktoken/` |a small tiktoken BPE with the GPT-4-style split pattern, converted to `tokenizer.json`, and the ids tiktoken gives|`tiktoken` and `tokenizers`  
 
 `expected.json` holds a Unicode tokeniser corpus and its ids, a prompt and its ids, reference logits, and the greedy continuation. The tiny tokeniser's ids are checked against both Hugging Face's Rust tokeniser and transformers' Python port of GPT-2's original one before they are written.
 
@@ -243,6 +243,8 @@ crystal build --cross-compile --target aarch64-apple-darwin spec/gpu_spec.cr spe
 type-checks and generates code for the Metal path without linking it, so mistakes in Crystal surface before a Mac is involved. The MSL in `metal/kernels.metal` is compiled by the driver only when a `Metal` device is created, so it is checked only on a Mac: `crystal spec spec/metal_spec.cr spec/gpu_spec.cr`. A compile error is raised as `DeviceError`, with the compiler's message.
 
 **Kernels on Linux.** MSL is close enough to C++ that a kernel can be run on the CPU before it reaches a GPU: compile its source with `g++ -std=c++20` behind a few defines (`kernel`, `device` and `constant` empty, `threadgroup` as `static`), run each threadgroup's threads as `std::thread`s, and make `threadgroup_barrier` a `std::barrier`. That checks indexing and order of arithmetic, though not MSL's own rules, such as matching widths of position attributes. `scripts/emulate_metal/run.sh` does this for the matmul kernels, checking every tiled variant and the tiled two passes against split-K bit for bit, and `scripts/emulate_metal/blocks.sh` for the block-format kernels, checking them against the host's bits. They are references, not part of CI, and the pattern carries over to other kernels.
+
+**A new MSL kernel** must also be named in one of `Metal`'s kernel lists, such as `OTHER` in `metal.cr`, which build its pipelines when the device starts. A name left out raises `KeyError` at its first dispatch; the cross-compile cannot catch it, and macOS CI does.
 
 CI runs the specs on macOS too. A hosted runner may have no usable GPU, in which case the Metal specs are pending rather than failing.
 

@@ -62,7 +62,7 @@ module Tensomite
       Op::Exp => "exp_f32", Op::Log => "log_f32", Op::Tanh => "tanh_f32", Op::Sqrt => "sqrt_f32",
       Op::Copy => "copy_f32",
     }
-    private OTHER    = %w[copy_into_f32 write_rows_f32 sum_f32 max_f32 sum_short_f32 max_short_f32 gather_f32 fill_zero_f32 scatter_add_f32 scatter_add_column_f32 unview_f32 matmul_f32 matmul_split_f32 matmul_tiled_chunks_64x64_f32 matmul_chunk_sums_f32 matmul_tiled_32x32_f32 matmul_tiled_64x64_f32 matmul_tiled_32x64_f32 dropout_f32 softmax_f32 softmax_scaled_f32 softmax_grad_f32 log_softmax_grad_f32 log_softmax_f32 layernorm_f32 layernorm_grad_f32 rmsnorm_f32 rope_f32 attention_f32 attention_ragged_f32 gather_blocks_f32 quantize_rows_q8_f32 block_matmul_f32 block_matmul_lanes_f32 block_matmul_loads_f32 block_matmul_stream_f32 block_matmul_stream_activations_f32]
+    private OTHER    = %w[copy_into_f32 write_rows_f32 sum_f32 max_f32 sum_short_f32 max_short_f32 gather_f32 pick_f32 place_f32 fill_zero_f32 scatter_add_f32 scatter_add_column_f32 unview_f32 matmul_f32 matmul_split_f32 matmul_tiled_chunks_64x64_f32 matmul_chunk_sums_f32 matmul_tiled_32x32_f32 matmul_tiled_64x64_f32 matmul_tiled_32x64_f32 dropout_f32 softmax_f32 softmax_scaled_f32 softmax_grad_f32 log_softmax_grad_f32 log_softmax_f32 layernorm_f32 layernorm_grad_f32 rmsnorm_f32 rope_f32 attention_f32 attention_ragged_f32 gather_blocks_f32 quantize_rows_q8_f32 block_matmul_f32 block_matmul_lanes_f32 block_matmul_loads_f32 block_matmul_stream_f32 block_matmul_stream_activations_f32]
     private OPTIONAL = %w[matmul_atomic_f32 block_matmul_unordered_f32]
     private COLS     = 32
     # SIMD groups in each threadgroup of a quantised matmul on lanes.
@@ -380,7 +380,7 @@ module Tensomite
       when Op::Sum, Op::Max                                                                                                then encode_reduce(node, output)
       when Op::Cat                                                                                                         then encode_cat(node, output)
       when Op::Write, Op::WriteRows                                                                                        then encode_write(node, output)
-      when Op::Gather, Op::ScatterAdd                                                                                      then encode_rows(node, output)
+      when Op::Gather, Op::ScatterAdd, Op::Pick, Op::Place                                                                 then encode_rows(node, output)
       when Op::Unview                                                                                                      then return encode_unview(node, output)
       when Op::MatMul                                                                                                      then encode_matmul(node, output)
       when Op::Kernel, Op::Dropout, Op::Rope                                                                               then encode_pointwise(node, output)
@@ -602,7 +602,9 @@ module Tensomite
     # Gather, one thread per output element, and ScatterAdd, one thread per output
     # element to zero it and then one per column, or for one column one per id.
     # Both report an id out of range through the error buffer (see `#flush`).
+    # Pick and Place go to `#encode_pick`.
     private def encode_rows(node : Node, output : MetalBuffer) : Nil
+      return encode_pick(node, output) if node.op.in?(Op::Pick, Op::Place)
       rows_src, ids = node.srcs
       rows, width = node.op == Op::Gather ? rows_src.shape : node.shape
       buffers = [mtl(rows_src), mtl(ids), output.mtl, errors.mtl]
@@ -614,6 +616,17 @@ module Tensomite
         name, threads = width == 1 ? {"scatter_add_column_f32", ids.size} : {"scatter_add_f32", width}
         dispatch(name, threads, buffers, constants << u32(ids.size))
       end
+    end
+
+    # Pick, one thread per row, and Place, one thread per output element. Both
+    # report an id out of range through the error buffer (see `#flush`).
+    private def encode_pick(node : Node, output : MetalBuffer) : Nil
+      src, ids = node.srcs
+      columns = node.op == Op::Pick ? src.shape[1] : node.shape[1]
+      ignore = node.ignore
+      name = node.op == Op::Pick ? "pick_f32" : "place_f32"
+      dispatch(name, node.size, [mtl(src), mtl(ids), output.mtl, errors.mtl],
+        [view_args(src.view), view_args(ids.view), i32(columns), i32(ignore ? 1 : 0), i32(ignore || 0), u32(node.size)])
     end
 
     # Unview: one thread per output position, summing what the view reads from it.

@@ -6,6 +6,17 @@ private def random(device : Device, shape : Array(Int32), seed : Int32, lo = -1f
   Tensor.from(Array(Float32).new(shape.product(1)) { rng.rand(lo...hi) }, shape, device)
 end
 
+# Returns the number of ops *device* has run on the host instead of its own kernels.
+private def host_ops(device : Device) : Int32
+  {% if flag?(:darwin) && flag?(:aarch64) %}
+    return device.host_ops if device.is_a?(Metal)
+  {% end %}
+  {% if flag?(:cuda) %}
+    return device.host_ops if device.is_a?(CUDA)
+  {% end %}
+  0
+end
+
 # Ops whose GPU results must equal the CPU's bit for bit: IEEE arithmetic and
 # comparisons are exact whatever the device, and these GPU kernels add in the
 # host's order. A sum is exact only over one chunk (16 elements) or less. Inputs cover dense, transposed,
@@ -30,6 +41,8 @@ EXACT = {
   "max of a long column"                  => ->(d : Device) { random(d, [700, 3], 1).max(0) },
   "cat"                                   => ->(d : Device) { Tensor.cat([random(d, [2, 3], 1), random(d, [4, 3], 2)], 0) },
   "cat of views"                          => ->(d : Device) { Tensor.cat([random(d, [3, 2], 1).transpose, random(d, [2], 2).reshape([2, 1]).expand([2, 3])], 1) },
+  "pick"                                  => ->(d : Device) { random(d, [5, 7], 1).transpose.pick(Tensor.from([4, 0, 2, 2, -1, 3, 1], [7], d), ignore: -1) },
+  "place"                                 => ->(d : Device) { random(d, [6], 1).place(Tensor.from([2, -1, 0, 2, 4, 1], [6], d), 5, ignore: -1) },
   "gather"                                => ->(d : Device) { random(d, [5, 4], 1).gather(Tensor.from([4, 0, 2, 2], [4], d)) },
   "gather 2-D ids"                        => ->(d : Device) { random(d, [6, 3], 1).transpose.contiguous.transpose.gather(Tensor.from([5, 1, 0, 5], [2, 2], d)) },
   "write of a view"                       => ->(d : Device) { random(d, [4, 6], 1).write(random(d, [3, 4], 2).transpose, 1, 2) },
@@ -79,20 +92,25 @@ SPLIT = {
 # Ops whose GPU results may differ in the last bits: division and transcendental
 # functions, whose rounding is the GPU maths library's (Decision K, level 3).
 CLOSE = {
-  "div"                      => ->(d : Device) { random(d, [5, 7], 1) / random(d, [5, 7], 2, 0.5f32, 2f32) },
-  "exp"                      => ->(d : Device) { random(d, [5, 7], 1, -4f32, 4f32).exp },
-  "log"                      => ->(d : Device) { random(d, [7, 5], 1, 0.01f32, 10f32).transpose.log },
-  "tanh"                     => ->(d : Device) { random(d, [5, 7], 1, -3f32, 3f32).tanh },
-  "sqrt"                     => ->(d : Device) { random(d, [5, 7], 1, 0f32, 10f32).sqrt },
-  "softmax"                  => ->(d : Device) { random(d, [4, 9], 1, -5f32, 5f32).softmax },
-  "layernorm"                => ->(d : Device) { random(d, [4, 8], 1).layernorm(random(d, [8], 2), random(d, [8], 3)) },
-  "gelu"                     => ->(d : Device) { random(d, [4, 8], 1, -3f32, 3f32).gelu },
-  "sigmoid"                  => ->(d : Device) { random(d, [4, 8], 1, -6f32, 6f32).sigmoid },
-  "rsqrt"                    => ->(d : Device) { random(d, [4, 8], 1, 0.1f32, 10f32).rsqrt },
-  "square and relu"          => ->(d : Device) { random(d, [4, 8], 1).square + random(d, [4, 8], 2).relu },
-  "log_softmax"              => ->(d : Device) { random(d, [4, 9], 1, -5f32, 5f32).log_softmax },
-  "long rows"                => ->(d : Device) { random(d, [3, 700], 1, -5f32, 5f32).softmax },
-  "long layernorm"           => ->(d : Device) { random(d, [3, 768], 1).layernorm(random(d, [768], 2), random(d, [768], 3)) },
+  "div"                                           => ->(d : Device) { random(d, [5, 7], 1) / random(d, [5, 7], 2, 0.5f32, 2f32) },
+  "exp"                                           => ->(d : Device) { random(d, [5, 7], 1, -4f32, 4f32).exp },
+  "log"                                           => ->(d : Device) { random(d, [7, 5], 1, 0.01f32, 10f32).transpose.log },
+  "tanh"                                          => ->(d : Device) { random(d, [5, 7], 1, -3f32, 3f32).tanh },
+  "sqrt"                                          => ->(d : Device) { random(d, [5, 7], 1, 0f32, 10f32).sqrt },
+  "softmax"                                       => ->(d : Device) { random(d, [4, 9], 1, -5f32, 5f32).softmax },
+  "layernorm"                                     => ->(d : Device) { random(d, [4, 8], 1).layernorm(random(d, [8], 2), random(d, [8], 3)) },
+  "gelu"                                          => ->(d : Device) { random(d, [4, 8], 1, -3f32, 3f32).gelu },
+  "sigmoid"                                       => ->(d : Device) { random(d, [4, 8], 1, -6f32, 6f32).sigmoid },
+  "rsqrt"                                         => ->(d : Device) { random(d, [4, 8], 1, 0.1f32, 10f32).rsqrt },
+  "square and relu"                               => ->(d : Device) { random(d, [4, 8], 1).square + random(d, [4, 8], 2).relu },
+  "log_softmax"                                   => ->(d : Device) { random(d, [4, 9], 1, -5f32, 5f32).log_softmax },
+  "long rows"                                     => ->(d : Device) { random(d, [3, 700], 1, -5f32, 5f32).softmax },
+  "long layernorm"                                => ->(d : Device) { random(d, [3, 768], 1).layernorm(random(d, [768], 2), random(d, [768], 3)) },
+  "cross_entropy ignoring rows, and its gradient" => ->(d : Device) {
+    logits = random(d, [64, 10], 1)
+    loss = logits.cross_entropy(Tensor.from(Array.new(64) { |i| i % 5 == 0 ? -1 : (i * 3) % 10 }, [64], d), ignore_index: -1)
+    Tensor.cat([loss.reshape([1]), Tensomite.grad(loss, [logits]).first.reshape([640])], 0)
+  },
   "cross_entropy's gradient" => ->(d : Device) {
     logits = random(d, [64, 10], 1)
     Tensomite.grad(logits.cross_entropy(Tensor.from(Array.new(64) { |i| (i * 7) % 10 }, [64], d)), [logits]).first
@@ -187,6 +205,19 @@ describe "GPU devices against the CPU" do
         expected = losses.call(CPU.default)
         expected.last.should be < expected.first
         losses.call(gpu).zip(expected) { |a, e| a.should be_close(e, 1e-5 * Math.max(1f32, e.abs)) }
+      end
+
+      it "picks cross_entropy's targets on the device, with no op on the host" do
+        logits = random(gpu, [32, 50], 3)
+        targets = Tensor.from(Array.new(32) { |i| i % 4 == 0 ? -1 : (i * 7) % 50 }, [32], gpu)
+        before = host_ops(gpu)
+        Tensomite.grad(logits.cross_entropy(targets, ignore_index: -1), [logits]).first.realize
+        host_ops(gpu).should eq before
+      end
+
+      it "raises for a target out of range when realised" do
+        logits = random(gpu, [2, 3], 3)
+        expect_raises(ExecutionError, /index 3 out of range/) { logits.pick(Tensor.from([0, 3], [2], gpu)).realize }
       end
 
       it "raises for an id out of range when realised" do

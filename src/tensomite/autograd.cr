@@ -129,6 +129,8 @@ module Tensomite
       in Op::Gather
         rows, width = a.shape
         [g.reshape([b.size, width]).scatter_add_rows(b.reshape([b.size]), rows), nil] of Tensor?
+      in Op::Pick  then [g.place(b, a.shape[1], node.ignore), nil] of Tensor?
+      in Op::Place then [g.pick(b, node.ignore), nil] of Tensor?
       in Op::MatMul
         grads = [g.matmul(srcs[1].transpose), a.transpose.matmul(g)] of Tensor?
         # The bias's gradient sums g over every row, as an `Add` of the bias
