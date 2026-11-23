@@ -49,6 +49,39 @@ private class Tied < Tensomite::Module
   end
 end
 
+private class Keyed < Tensomite::Module
+  @embeds : Hash(String, Embedding)
+  @either : Linear | Embedding
+  @maybe : Array(Linear?)
+
+  def initialize(keys = ["1", "3"])
+    @embeds = keys.to_h { |key| {key, Embedding.new(4, 2)} }
+    @either = Linear.new(2, 2)
+    @maybe = [nil, Linear.new(2, 1)] of Linear?
+  end
+
+  def forward(ids : Tensor) : Tensor
+    @embeds["1"].call(ids) + @embeds["3"].call(ids)
+  end
+end
+
+# Returns the compiler's output for a module holding *declaration*'s parts, and whether it compiled.
+private def compile_module(declaration : String) : {Bool, String}
+  path = File.join(Dir.current, "zz_module_spec_#{Process.pid}.cr")
+  File.write(path, <<-CRYSTAL)
+    require "./src/tensomite"
+    class Held < Tensomite::Module
+      #{declaration}
+    end
+    Held.new.params
+    CRYSTAL
+  output = IO::Memory.new
+  status = Process.run("crystal", ["build", "--no-codegen", path], output: output, error: output)
+  {status.success?, output.to_s}
+ensure
+  File.delete?(path) if path
+end
+
 describe Tensomite::Module do
   it "names parameters after instance variables, nested" do
     TwoLayers.new(Random.new(1)).named_params.keys.should eq ["first.weight", "first.bias", "second.weight"]
@@ -56,6 +89,33 @@ describe Tensomite::Module do
 
   it "names the members of arrays by position, and skips nil parts" do
     Stack.new(2).named_params.keys.should eq ["blocks.0.norm.weight", "blocks.0.norm.bias", "blocks.1.norm.weight", "blocks.1.norm.bias"]
+  end
+
+  it "names the members of a hash by key, in insertion order, and collects unions of modules" do
+    Keyed.new.named_params.keys.should eq ["embeds.1.weight", "embeds.3.weight", "either.weight", "either.bias", "maybe.1.weight", "maybe.1.bias"]
+  end
+
+  it "trains, saves and loads the members of a hash" do
+    model = Keyed.new
+    before = model.named_params["embeds.3.weight"].value.to_a(Float32)
+    ids = Tensor.from([0, 3], [2])
+    AdamW.new(model.params, lr: 0.1).step(model.call(ids).cross_entropy(Tensor.from([1, 0], [2])))
+    model.named_params["embeds.3.weight"].value.to_a(Float32).should_not eq before
+    path = File.tempname("tensomite", ".safetensors")
+    model.save(path)
+    Keyed.new.load(path).named_params["embeds.3.weight"].value.to_a(Float32).should eq model.named_params["embeds.3.weight"].value.to_a(Float32)
+  end
+
+  it "refuses a hash key with a '.'" do
+    expect_raises(Error, /key "a\.b"/) { Keyed.new(["1", "3", "a.b"]).params }
+  end
+
+  it "fails to compile a module holding parts it cannot find" do
+    compiled, output = compile_module("@grid = [[Tensomite::Linear.new(2, 2)]]")
+    compiled.should be_false
+    output.should contain "@grid (Array(Array(Tensomite::Linear))) holds parameters or modules"
+    compile_module("@pair = {Tensomite::Linear.new(2, 2), Tensomite::Linear.new(2, 2)}")[0].should be_false
+    compile_module("@sizes = {\"a\" => [1, 2]}")[0].should be_true
   end
 
   it "lists a parameter reached twice once, under its first name" do

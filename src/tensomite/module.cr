@@ -327,20 +327,55 @@ module Tensomite
     end
 
     # Yields each parameter and child module with its name in this module: the
-    # instance variable's name, and `name.i` for the members of an array.
+    # instance variable's name, `name.i` for the members of an `Array`, and
+    # `name.key` for those of a `Hash`, in insertion order. `nil` members are
+    # skipped.
+    #
+    # An instance variable that holds parameters or modules in any other way,
+    # such as an `Array` of `Array`s or a `Tuple`, fails to compile, so that no
+    # part is silently left out of `params`. A `Hash` key whose string holds a
+    # `.` raises `Error`, since it would make names ambiguous.
     def each_child(& : String, Parameter | Module ->) : Nil
       {% for ivar in @type.instance_vars %}
         {% types = ivar.type.union? ? ivar.type.union_types.reject { |type| type == Nil } : [ivar.type] %}
-        {% if types.size == 1 %}
-          {% type = types[0] %}
-          {% if type <= ::Tensomite::Parameter || type <= ::Tensomite::Module %}
-            if part = @{{ ivar.id }}
-              yield {{ ivar.name.stringify }}, part
-            end
-          {% elsif type.name(generic_args: false) == "Array" && (type.type_vars[0] <= ::Tensomite::Parameter || type.type_vars[0] <= ::Tensomite::Module) %}
-            if parts = @{{ ivar.id }}
-              parts.each_with_index { |part, i| yield "{{ ivar.name }}.#{i}", part }
-            end
+        {% generic = types.size == 1 && !types[0].type_vars.empty? ? types[0] : nil %}
+        {% kind = generic ? generic.name(generic_args: false) : nil %}
+        {% last = generic ? generic.type_vars.last : nil %}
+        {% elements = last.is_a?(TypeNode) ? (last.union? ? last.union_types.reject { |type| type == Nil } : [last]) : [] of TypeNode %}
+        {% if types.all? { |type| type <= ::Tensomite::Parameter || type <= ::Tensomite::Module } %}
+          if part = @{{ ivar.id }}
+            yield {{ ivar.name.stringify }}, part
+          end
+        {% elsif (kind == "Array" || kind == "Hash") && !elements.empty? && elements.all? { |type| type <= ::Tensomite::Parameter || type <= ::Tensomite::Module } %}
+          if parts = @{{ ivar.id }}
+            {% if kind == "Array" %}
+              parts.each_with_index do |part, i|
+                yield "{{ ivar.name }}.#{i}", part if part
+              end
+            {% else %}
+              parts.each do |key, part|
+                name = key.to_s
+                raise Error.new("{{ @type }}: key #{name.inspect} of @{{ ivar.name }} holds a '.', which names cannot") if name.includes?('.')
+                yield "{{ ivar.name }}.#{name}", part if part
+              end
+            {% end %}
+          end
+        {% else %}
+          {% nested = [] of TypeNode %}
+          {% for type in types %}
+            {% for arg in type.type_vars %}
+              {% if arg.is_a?(TypeNode) %}
+                {% nested = nested + (arg.union? ? arg.union_types : [arg]) %}
+                {% for inner in arg.type_vars %}
+                  {% if inner.is_a?(TypeNode) %}
+                    {% nested = nested + (inner.union? ? inner.union_types : [inner]) %}
+                  {% end %}
+                {% end %}
+              {% end %}
+            {% end %}
+          {% end %}
+          {% if (types + nested).any? { |type| type <= ::Tensomite::Parameter || type <= ::Tensomite::Module } %}
+            {% raise "#{@type}: @#{ivar.name} (#{ivar.type}) holds parameters or modules that Tensomite::Module cannot find; hold them as a Parameter or Module, or an Array or Hash of them" %}
           {% end %}
         {% end %}
       {% end %}

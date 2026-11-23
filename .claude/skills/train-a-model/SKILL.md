@@ -52,7 +52,7 @@ Tensomite is a Crystal tensor library with lazy tensors, automatic gradients, op
    model = Classifier.new(Builder.new(rng: Random.new(1)))
    ```
 
-   The builder makes `linear`, `embedding`, `layernorm`, `rmsnorm`, `attention`, `swiglu` and `grouped_attention`; `Sequential.build(build) { ... }` chains layers. Repeated parts go in an `Array` whose type is declared (`@blocks : Array(Block)`). Run the model with `model.call(x)`, which runs `forward`. `examples/shakespeare.cr` is a complete transformer written this way.
+   The builder makes `linear`, `embedding`, `layernorm`, `rmsnorm`, `attention`, `swiglu` and `grouped_attention`; `Sequential.build(build) { ... }` chains layers. Repeated parts go in an `Array` or a `Hash` whose type is declared (`@blocks : Array(Block)`, `@embeds : Hash(String, Embedding)`, named `embeds.<key>`). Run the model with `model.call(x)`, which runs `forward`. `examples/shakespeare.cr` is a complete transformer written this way.
 
 5. **Make batches as tensors.** Data is flat and row-major. Floats are `Float32` (dtype `F32`); class and token ids are `Int32` (`I32`):
 
