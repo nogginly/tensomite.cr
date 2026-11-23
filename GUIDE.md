@@ -256,7 +256,7 @@ model.call(Tensor.zeros([3, 2])).shape   # => [3, 1]
 model.named_params.keys                  # => ["hidden.weight", "hidden.bias", "output.weight", "output.bias"]
 ```
 
-- **Parts are found at compile time.** Any instance variable holding a `Parameter`, a `Module`, an `Array` of either, or a nilable one, is part of the model, named after the variable. Members of an array are named by position: `blocks.0.norm.weight`.
+- **Parts are found at compile time.** Any instance variable holding a `Parameter` or a `Module` (or a union of them, or a nilable one), or an `Array` or `Hash` of them, is part of the model, named after the variable. Members of an array are named by position, `blocks.0.norm.weight`, and members of a hash by key, in insertion order, `value_embeds.1.weight`, as PyTorch's `ModuleDict` names them. An instance variable that holds parts any other way, such as an `Array` of `Array`s, fails to compile with a message naming it, so no part is ever left out of `params` unnoticed.
 - **`forward` defines; `call` runs.** `call` runs `forward` with the same arguments, inside a scope named after the module's place in its parent, so diagrams show one box per part. `forward` can take any arguments.
 - **A `Parameter` is a slot** holding a tensor (`param.value`), with a name and a flag for weight decay. Tensors never change; training replaces the tensor in each slot.
 - **Weights are drawn from `Tensomite.rng`,** a generator seeded with 0, so the same program builds the same model on every run. Each built-in module also takes `rng:` and `device:` arguments, which a `Builder` (below) fills in.
