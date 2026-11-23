@@ -306,6 +306,7 @@ Recorded in full, with their reasoning and measurements, in [`DECISIONS.md`](DEC
 - [EB](DECISIONS.md#decision-eb): the compile time of an app (decided).
 - [EC](DECISIONS.md#decision-ec): M13 met with its library part; the port in its own repository (decided).
 - [ED](DECISIONS.md#decision-ed): parts held in a `Hash`, and no part left out silently (decided).
+- [EE](DECISIONS.md#decision-ee): tensors over 2 GiB (decided).
 
 ## Risks
 
