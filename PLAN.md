@@ -307,6 +307,8 @@ Recorded in full, with their reasoning and measurements, in [`DECISIONS.md`](DEC
 - [EC](DECISIONS.md#decision-ec): M13 met with its library part; the port in its own repository (decided).
 - [ED](DECISIONS.md#decision-ed): parts held in a `Hash`, and no part left out silently (decided).
 - [EE](DECISIONS.md#decision-ee): tensors over 2 GiB (decided).
+- [EF](DECISIONS.md#decision-ef): element counts past 2³¹, deferred (decided).
+- [EG](DECISIONS.md#decision-eg): a broadcast's gradient in chunks on the GPUs (decided).
 
 ## Risks
 

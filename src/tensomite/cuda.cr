@@ -644,14 +644,22 @@ module Tensomite
         columns, ignore ? 1 : 0, ignore || 0, node.size.to_u32)
     end
 
-    # Unview: one thread per output position, summing what the view reads from it.
+    # Unview: one thread per output position, summing what the view reads from it,
+    # or, when each position gathers more than `REDUCE_CHUNK` elements, one block
+    # per position, folding them in chunks as `Sum` does.
     # Returns false for a view whose positions are not each read by a regular grid
     # of indices; see `#inverse_args`.
     private def launch_unview(kernels : Kernels, node : Node, output : CUDABuffer) : Bool
       view = node.source_view || raise Error.new("unview needs a source view")
       return false unless view.ndim <= MAX_DIMS && (inverse = inverse_args(view))
       src = node.srcs.first
-      run(kernels["unview_f32"], node.size, pointer(src), output.pointer, view_args(src.view), view_args(view), inverse, node.size.to_u32)
+      count = View.repeats(view)
+      if count > REDUCE_CHUNK
+        context.launch(kernels["unview_chunks_f32"], node.size, Math.min((count + REDUCE_CHUNK - 1) // REDUCE_CHUNK, REDUCE_THREADS),
+          pointer(src), output.pointer, view_args(src.view), view_args(view), inverse, count.to_u32) if node.size > 0
+      else
+        run(kernels["unview_f32"], node.size, pointer(src), output.pointer, view_args(src.view), view_args(view), inverse, node.size.to_u32)
+      end
       true
     end
 

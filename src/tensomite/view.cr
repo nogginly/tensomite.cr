@@ -83,6 +83,12 @@ module Tensomite
       views.first.shape.last? || 1
     end
 
+    # Returns how many logical elements of *view* read each position it reads:
+    # the product of the sizes of its dimensions with stride 0.
+    def self.repeats(view : View) : Int32
+      (0...view.ndim).product(1) { |dim| view.strides[dim] == 0 ? view.shape[dim] : 1 }
+    end
+
     # Returns the step between the positions of consecutive elements of a run.
     def run_stride : Int32
       strides.last? || 0

@@ -62,7 +62,7 @@ module Tensomite
       Op::Exp => "exp_f32", Op::Log => "log_f32", Op::Tanh => "tanh_f32", Op::Sqrt => "sqrt_f32",
       Op::Copy => "copy_f32",
     }
-    private OTHER    = %w[copy_into_f32 write_rows_f32 sum_f32 max_f32 sum_short_f32 max_short_f32 gather_f32 pick_f32 place_f32 fill_zero_f32 scatter_add_f32 scatter_add_column_f32 unview_f32 matmul_f32 matmul_split_f32 matmul_tiled_chunks_64x64_f32 matmul_chunk_sums_f32 matmul_tiled_32x32_f32 matmul_tiled_64x64_f32 matmul_tiled_32x64_f32 dropout_f32 softmax_f32 softmax_scaled_f32 softmax_grad_f32 log_softmax_grad_f32 log_softmax_f32 layernorm_f32 layernorm_grad_f32 rmsnorm_f32 rope_f32 attention_f32 attention_ragged_f32 gather_blocks_f32 quantize_rows_q8_f32 block_matmul_f32 block_matmul_lanes_f32 block_matmul_loads_f32 block_matmul_stream_f32 block_matmul_stream_activations_f32]
+    private OTHER    = %w[copy_into_f32 write_rows_f32 sum_f32 max_f32 sum_short_f32 max_short_f32 gather_f32 pick_f32 place_f32 fill_zero_f32 scatter_add_f32 scatter_add_column_f32 unview_f32 unview_chunks_f32 matmul_f32 matmul_split_f32 matmul_tiled_chunks_64x64_f32 matmul_chunk_sums_f32 matmul_tiled_32x32_f32 matmul_tiled_64x64_f32 matmul_tiled_32x64_f32 dropout_f32 softmax_f32 softmax_scaled_f32 softmax_grad_f32 log_softmax_grad_f32 log_softmax_f32 layernorm_f32 layernorm_grad_f32 rmsnorm_f32 rope_f32 attention_f32 attention_ragged_f32 gather_blocks_f32 quantize_rows_q8_f32 block_matmul_f32 block_matmul_lanes_f32 block_matmul_loads_f32 block_matmul_stream_f32 block_matmul_stream_activations_f32]
     private OPTIONAL = %w[matmul_atomic_f32 block_matmul_unordered_f32]
     private COLS     = 32
     # SIMD groups in each threadgroup of a quantised matmul on lanes.
@@ -630,14 +630,22 @@ module Tensomite
         [view_args(src.view), view_args(ids.view), i32(columns), i32(ignore ? 1 : 0), i32(ignore || 0), u32(node.size)])
     end
 
-    # Unview: one thread per output position, summing what the view reads from it.
+    # Unview: one thread per output position, summing what the view reads from it,
+    # or, when each position gathers more than `REDUCE_CHUNK` elements, one
+    # threadgroup per position, folding them in chunks as `Sum` does.
     # Returns false for a view whose positions are not each read by a regular grid
     # of indices; see `#inverse_args`.
     private def encode_unview(node : Node, output : MetalBuffer) : Bool
       view = node.source_view || raise Error.new("unview needs a source view")
       return false unless view.ndim <= MAX_DIMS && (inverse = inverse_args(view))
       src = node.srcs.first
-      dispatch("unview_f32", node.size, [mtl(src), output.mtl], [view_args(src.view), view_args(view), inverse, u32(node.size)])
+      count = View.repeats(view)
+      if count > REDUCE_CHUNK
+        threads = Math.min((count + REDUCE_CHUNK - 1) // REDUCE_CHUNK, REDUCE_THREADS)
+        dispatch_groups("unview_chunks_f32", {node.size, 1}, {threads, 1}, [mtl(src), output.mtl], [view_args(src.view), view_args(view), inverse, u32(count)])
+      else
+        dispatch("unview_f32", node.size, [mtl(src), output.mtl], [view_args(src.view), view_args(view), inverse, u32(node.size)])
+      end
       true
     end
 

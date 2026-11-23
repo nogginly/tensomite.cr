@@ -1,8 +1,10 @@
 # Times ops whose cost depends on how kernels compute element offsets: dense,
 # transposed and broadcast reads, reductions along and across rows, the
-# gradient of a broadcast (an `Unview`) and a matmul, each well under 2³¹
-# elements. A baseline for widening sizes to 64 bits (G-01, Decision EE):
-# run it before and after, on the same machine and device.
+# gradients of a broadcast row and of a broadcast scalar (an `Unview` that
+# gathers 4,096 elements into each output, and every element into one), and a
+# matmul, each well under 2³¹ elements. A baseline for kernel changes (G-01,
+# Decision EE; Decision EG): run it before and after, on the same machine and
+# device.
 #
 #     crystal run --release bench/indexing.cr                 # CPU
 #     crystal run --release bench/indexing.cr -- blas
@@ -68,6 +70,7 @@ end
 a = random(device, [SIDE, SIDE], 1)
 b = random(device, [SIDE, SIDE], 2)
 row = random(device, [SIDE], 3)
+scalar = random(device, [1], 6)
 m = random(device, [matmul_side, matmul_side], 4)
 n = random(device, [matmul_side, matmul_side], 5)
 matrix = SIDE.to_i64 * SIDE * 4
@@ -79,6 +82,7 @@ cases = [
   {"sum along rows", matrix, -> { a.sum(1) }},
   {"sum along columns (strided)", matrix, -> { a.sum(0) }},
   {"gradient of a broadcast (Unview)", matrix * 3, -> { Tensomite.grad((a * row).sum, [row]).first }},
+  {"gradient of a broadcast scalar (Unview)", matrix * 3, -> { Tensomite.grad((a * scalar).sum, [scalar]).first }},
   {"matmul #{matmul_side}³", 0_i64, -> { m.matmul(n) }},
 ] of {String, Int64, Proc(Tensor)}
 

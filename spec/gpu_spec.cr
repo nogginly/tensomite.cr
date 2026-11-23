@@ -115,8 +115,12 @@ CLOSE = {
     logits = random(d, [64, 10], 1)
     Tensomite.grad(logits.cross_entropy(Tensor.from(Array.new(64) { |i| (i * 7) % 10 }, [64], d)), [logits]).first
   },
-  "kernel with exp, log and sqrt" => ->(d : Device) { Kernels::SPEC_MIXED.call(random(d, [4, 5], 1), random(d, [5, 4], 2).transpose) },
-  "gradient"                      => ->(d : Device) {
+  "kernel with exp, log and sqrt"            => ->(d : Device) { Kernels::SPEC_MIXED.call(random(d, [4, 5], 1), random(d, [5, 4], 2).transpose) },
+  "gradient of a row broadcast over 12 rows" => ->(d : Device) {
+    row = random(d, [7], 2)
+    Tensomite.grad((random(d, [12, 7], 1) * row).sum, [row]).first
+  },
+  "gradient" => ->(d : Device) {
     w = random(d, [4, 3], 1)
     Tensomite.grad((random(d, [2, 4], 2).matmul(w).tanh * 3).sum, [w]).first
   },
@@ -218,6 +222,24 @@ describe "GPU devices against the CPU" do
       it "raises for a target out of range when realised" do
         logits = random(gpu, [2, 3], 3)
         expect_raises(ExecutionError, /index 3 out of range/) { logits.pick(Tensor.from([0, 3], [2], gpu)).realize }
+      end
+
+      it "sums an Unview of more than 16 repeats with the bits of its own Sum, within 1e-5 of the host" do
+        x, row = random(gpu, [512, 40], 1), random(gpu, [40], 2)
+        dx = Tensomite.grad((x * row).sum, [row]).first
+        scalar = random(gpu, [1], 3)
+        ds = Tensomite.grad((x * scalar.expand([512, 40])).sum, [scalar]).first
+        dx.to_a(Float32).should eq x.sum(0).to_a(Float32)
+        ds.to_a(Float32).should eq x.sum.reshape([1]).to_a(Float32)
+        host = x.to(CPU.default).sum(0).to_a(Float32)
+        dx.to_a(Float32).zip(host) { |a, e| a.should be_close(e, 1e-5 * Math.max(1f32, e.abs)) }
+      end
+
+      it "sums a sliced scalar broadcast over a large tensor, as a per-layer scalar's gradient" do
+        lambdas, x = random(gpu, [8], 4), random(gpu, [256, 64], 5)
+        grads = Tensomite.grad((x * lambdas.slice(0, 3, 4)).sum, [lambdas]).first.to_a(Float32)
+        grads[3].should eq x.sum.to_a(Float32).first
+        (grads[0, 3] + grads[4, 4]).should eq Array.new(7, 0f32)
       end
 
       it "raises for an id out of range when realised" do

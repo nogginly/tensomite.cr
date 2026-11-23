@@ -377,6 +377,35 @@ struct Inverse {
 
 #define UNVIEW_AHEAD 32
 
+// Returns the logical element whose repeated indices are all zero, among those
+// view vv reads from output position p, or -1 when it reads none: step 1 of
+// unview_f32.
+static int unview_base(constant View& vv, constant Inverse& inv, uint p) {
+    int rem = int(p) - vv.offset;
+    bool hit = rem >= 0;
+    int flat = 0;
+    for (int k = 0; k < inv.nstrided && hit; k++) {
+        int at = rem / inv.stride[k];
+        rem -= at * inv.stride[k];
+        hit = at < inv.size[k];
+        flat += at * inv.step[k];
+    }
+    return hit && rem == 0 ? flat : -1;
+}
+
+// Returns how far repeated element f lies from the first in logical order: f
+// taken apart over the repeated dimensions, last fastest, times their
+// row-major strides.
+static int repeated_offset(constant Inverse& inv, uint f) {
+    int offset = 0;
+    for (int k = inv.nrepeated - 1; k >= 0; k--) {
+        uint size = inv.repeated_size[k];
+        offset += int(f % size) * inv.repeated_step[k];
+        f /= size;
+    }
+    return offset;
+}
+
 // Output position p is the sum of the source elements that view vv reads from
 // p, in logical order, as the host's index-order accumulation adds them.
 //
@@ -394,17 +423,9 @@ kernel void unview_f32(device const float* src [[buffer(0)]],
                        constant uint& n [[buffer(5)]],
                        uint p [[thread_position_in_grid]]) {
     if (p >= n) return;
-    int rem = int(p) - vv.offset;
-    bool hit = rem >= 0;
-    int flat = 0;
-    for (int k = 0; k < inv.nstrided && hit; k++) {
-        int at = rem / inv.stride[k];
-        rem -= at * inv.stride[k];
-        hit = at < inv.size[k];
-        flat += at * inv.step[k];
-    }
+    int flat = unview_base(vv, inv, p);
     float acc = 0.0f;
-    if (hit && rem == 0) {
+    if (flat >= 0) {
         if (inv.nrepeated == 0) {
             acc = src[offset_of(vs, flat)];
         } else if (inv.nrepeated == 1 && vs.dense) {
@@ -441,6 +462,46 @@ kernel void unview_f32(device const float* src [[buffer(0)]],
         }
     }
     dst[p] = acc;
+}
+
+// Unview when each position gathers `count` elements, more than REDUCE_CHUNK:
+// one threadgroup per output position, which folds them as sum_f32 folds a run,
+// so the result has the bits of a Sum of the same elements. Each thread folds
+// whole chunks of REDUCE_CHUNK in logical order, and the first thread folds the
+// chunk results in chunk order.
+kernel void unview_chunks_f32(device const float* src [[buffer(0)]],
+                              device float* dst [[buffer(1)]],
+                              constant View& vs [[buffer(2)]],
+                              constant View& vv [[buffer(3)]],
+                              constant Inverse& inv [[buffer(4)]],
+                              constant uint& count [[buffer(5)]],
+                              uint p [[threadgroup_position_in_grid]],
+                              uint t [[thread_position_in_threadgroup]],
+                              uint threads [[threads_per_threadgroup]]) {
+    threadgroup float partial[REDUCE_THREADS];
+    int flat = unview_base(vv, inv, p);
+    if (flat < 0) {
+        if (t == 0) dst[p] = 0.0f;
+        return;
+    }
+    uint chunks = (count + REDUCE_CHUNK - 1) / REDUCE_CHUNK;
+    float total = 0.0f;
+    for (uint first = 0; first < chunks; first += threads) {
+        uint c = first + t;
+        float acc = 0.0f;
+        if (c < chunks) {
+            uint stop = min(count, (c + 1) * REDUCE_CHUNK);
+            for (uint f = c * REDUCE_CHUNK; f < stop; f++) acc = acc + src[offset_of(vs, flat + repeated_offset(inv, f))];
+        }
+        partial[t] = acc;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (t == 0) {
+            uint n = min(threads, chunks - first);
+            for (uint k = 0; k < n; k++) total = total + partial[k];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (t == 0) dst[p] = total;
 }
 
 // Output element i of a batched matrix product, [..., m, k] by [..., k, n], as a
