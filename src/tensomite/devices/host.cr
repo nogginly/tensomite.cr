@@ -1,35 +1,35 @@
 module Tensomite
   # A buffer held in host memory by a `HostDevice`.
   class HostBuffer < Buffer
-    getter bytes : Bytes
+    getter memory : Memory
     @owner : MappedFile? = nil
 
-    def initialize(device : Device, bytesize : Int32)
+    def initialize(device : Device, bytesize : Int)
       super
-      @bytes = Bytes.new(bytesize)
+      @memory = Memory.allocate(bytesize)
     end
 
     # Wraps part of a file mapping without copying; the buffer keeps *owner* alive.
-    def initialize(device : Device, @bytes : Bytes, @owner : MappedFile)
-      super(device, @bytes.size)
+    def initialize(device : Device, @memory : Memory, @owner : MappedFile)
+      super(device, @memory.size)
     end
 
-    # Wraps *bytes*, memory allocated for *device* or taken from its pool, or the
+    # Wraps *memory*, allocated for *device* or taken from its pool, or the
     # host-visible memory of a subclass's buffer, such as a GPU buffer.
-    def initialize(device : Device, @bytes : Bytes)
-      super(device, @bytes.size)
+    def initialize(device : Device, @memory : Memory)
+      super(device, @memory.size)
     end
 
     # For a subclass that holds its data elsewhere, such as in GPU memory, and
-    # makes a host copy only when one is needed: *bytes* may be empty.
-    def initialize(device : Device, bytesize : Int32, @bytes : Bytes)
+    # makes a host copy only when one is needed: *memory* may be empty.
+    def initialize(device : Device, bytesize : Int, @memory : Memory)
       super(device, bytesize)
     end
 
     # Gives the memory back to the device's pool, unless it belongs to a file mapping.
     protected def give_back : Nil
       return if @owner
-      device.as?(HostDevice).try(&.recycle(@bytes))
+      device.as?(HostDevice).try(&.recycle(@memory))
     end
   end
 
@@ -40,25 +40,25 @@ module Tensomite
   # host-visible through `#map`.
   abstract class HostDevice < Device
     # Freed buffers kept for reuse; see `BufferPool`. Holds up to 1 GiB by default.
-    getter pool = BufferPool(Bytes).new(1_i64 << 30)
+    getter pool = BufferPool(Memory).new(1_i64 << 30)
 
     # Returns a buffer from the pool when one of *bytesize* is free, otherwise a
     # new one. Its contents are undefined: kernels write every element.
-    def alloc(bytesize : Int32) : Buffer
-      HostBuffer.new(self, pool.take(bytesize) || Bytes.new(bytesize))
+    def alloc(bytesize : Int) : Buffer
+      HostBuffer.new(self, pool.take(bytesize.to_i64) || Memory.allocate(bytesize))
     end
 
     # Takes back the memory of a collected buffer.
-    protected def recycle(bytes : Bytes) : Nil
-      pool.give(bytes, bytes.size)
+    protected def recycle(memory : Memory) : Nil
+      pool.give(memory, memory.size)
     end
 
-    def upload(buffer : Buffer, data : Bytes) : Nil
-      data.copy_to(own(buffer).bytes)
+    def upload(buffer : Buffer, data : Memory) : Nil
+      data.copy_to(own(buffer).memory)
     end
 
-    def download(buffer : Buffer, data : Bytes) : Nil
-      own(buffer).bytes.copy_to(data)
+    def download(buffer : Buffer, data : Memory) : Nil
+      own(buffer).memory[0, data.size].copy_to(data)
     end
 
     # The time each op takes, in milliseconds, and how many ran, by op name,
@@ -99,7 +99,7 @@ module Tensomite
 
     # Returns a buffer over *bytes* without copying; see `HostBuffer`.
     def adopt(bytes : Bytes, owner : MappedFile) : Buffer
-      HostBuffer.new(self, bytes, owner)
+      HostBuffer.new(self, Memory.new(bytes), owner)
     end
 
     # Returns *buffer* as a `HostBuffer` of this device; raises `DeviceError` otherwise.
@@ -654,7 +654,7 @@ module Tensomite
         raise ExecutionError.new("index #{id} out of range for #{rows} rows") unless 0 <= id < rows
         id + table.view.offset // width
       end
-      Quant.gather(table.dtype, own(table.node.buffer!).bytes, width, chosen, dst)
+      Quant.gather(table.dtype, own(table.node.buffer!).memory.bytes, width, chosen, dst)
     end
 
     # Computes `x · wᵀ` for a block-format weight (see `Quant.matmul`), then adds
@@ -664,7 +664,7 @@ module Tensomite
       n, k = w.shape
       rows = x.size // k
       values = activations(node, x)
-      weights = own(w.node.buffer!).bytes
+      weights = own(w.node.buffer!).memory.bytes
       start = w.dtype.bytes_for(w.view.offset)
       Quant.matmul(w.dtype, values, weights[start, w.dtype.bytes_for(w.size)], rows, n, k, dst)
       add_bias(Float32, node, dst)
@@ -750,7 +750,7 @@ module Tensomite
     end
 
     private def elements(type : T.class, buffer : Buffer) : Slice(T) forall T
-      own(buffer).bytes.unsafe_slice_of(T)
+      own(buffer).memory.unsafe_slice_of(T)
     end
   end
 end

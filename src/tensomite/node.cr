@@ -225,7 +225,7 @@ module Tensomite
     end
 
     # Returns the number of bytes produced.
-    def bytesize : Int32
+    def bytesize : Index
       dtype.bytes_for(size)
     end
 

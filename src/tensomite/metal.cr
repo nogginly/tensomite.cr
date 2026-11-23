@@ -19,8 +19,8 @@ module Tensomite
     # The `MTLBuffer`, owned by this buffer.
     getter mtl : Void*
 
-    def initialize(device : Device, @mtl : Void*, bytesize : Int32)
-      super(device, Bytes.new(ObjC.send(Pointer(UInt8), @mtl, "contents"), bytesize))
+    def initialize(device : Device, @mtl : Void*, bytesize : Int)
+      super(device, Memory.new(ObjC.send(Pointer(UInt8), @mtl, "contents"), bytesize))
     end
 
     # Gives the `MTLBuffer` back to its device, which pools or releases it.
@@ -274,7 +274,7 @@ module Tensomite
     property commit_every = 64
     # Where kernels report an index out of range: a count, the first bad id, and
     # the number of rows it was checked against.
-    private getter(errors : MetalBuffer) { new_buffer(12).tap(&.bytes.fill(0)) }
+    private getter(errors : MetalBuffer) { new_buffer(12).tap(&.memory.fill(0)) }
 
     def initialize
       @device = LibMetal.MTLCreateSystemDefaultDevice
@@ -287,7 +287,8 @@ module Tensomite
       compile
     end
 
-    def alloc(bytesize : Int32) : Buffer
+    def alloc(bytesize : Int) : Buffer
+      bytesize = bytesize.to_i64
       start = Time.instant
       recycle_retired if idle?
       pooled = buffer_pool.take(bytesize)
@@ -301,7 +302,7 @@ module Tensomite
     end
 
     # Returns a new buffer of *bytesize* bytes, not from the pool.
-    private def new_buffer(bytesize : Int32) : MetalBuffer
+    private def new_buffer(bytesize : Int) : MetalBuffer
       mtl = ObjC.send(Pointer(Void), @device, "newBufferWithLength:options:", Math.max(bytesize, 4).to_u64, STORAGE_SHARED)
       raise DeviceError.new("cannot allocate #{bytesize} bytes") if mtl.null?
       MetalBuffer.new(self, mtl, bytesize)
@@ -312,7 +313,7 @@ module Tensomite
     # work is pending, since the GPU may still be reading it. When the list is
     # busy or full (see `RetiredList`) it is released instead; command buffers
     # keep the buffers they use alive, so releasing is always safe.
-    protected def retire(mtl : Void*, bytesize : Int32) : Nil
+    protected def retire(mtl : Void*, bytesize : Index) : Nil
       return if @retired.push(mtl, bytesize)
       ObjC.release(mtl)
       @profile.try { |profile| profile.frees += 1 }
@@ -322,19 +323,19 @@ module Tensomite
       @command_buffer.null? && @in_flight.empty?
     end
 
-    def upload(buffer : Buffer, data : Bytes) : Nil
+    def upload(buffer : Buffer, data : Memory) : Nil
       flush
       super
     end
 
-    def download(buffer : Buffer, data : Bytes) : Nil
+    def download(buffer : Buffer, data : Memory) : Nil
       flush
       super
     end
 
-    def map(buffer : Buffer) : Bytes?
+    def map(buffer : Buffer) : Memory?
       flush
-      own(buffer).bytes
+      own(buffer).memory
     end
 
     # Copies *bytes* into a new Metal buffer; a file mapping cannot be handed to the GPU.
@@ -565,7 +566,7 @@ module Tensomite
     end
 
     # Returns a buffer of at least *bytesize* bytes for partial results.
-    private def scratch(bytesize : Int32) : MetalBuffer
+    private def scratch(bytesize : Int) : MetalBuffer
       current = @scratch
       return current if current && current.bytesize >= bytesize
       @scratch = new_buffer(Math.max(bytesize, 4))
@@ -1009,7 +1010,7 @@ module Tensomite
       in_flight.each { |command_buffer| ObjC.release(command_buffer) }
       recycle_retired
       raise ExecutionError.new("Metal command buffer failed: #{message}") if message
-      if (reports = @errors.try(&.bytes.unsafe_slice_of(Int32))) && reports[0] != 0
+      if (reports = @errors.try(&.memory.unsafe_slice_of(Int32))) && reports[0] != 0
         id, rows = reports[1], reports[2]
         reports.fill(0)
         raise ExecutionError.new("index #{id} out of range for #{rows} rows")

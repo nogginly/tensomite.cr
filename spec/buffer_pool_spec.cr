@@ -26,7 +26,7 @@ describe RetiredList do
     list.push(7, 4).should be_true
     list.push(8, 8).should be_true
     list.push(9, 12).should be_false
-    drained = [] of {Int32, Int32}
+    drained = [] of {Int32, Index}
     list.drain { |memory, bytesize| drained << {memory, bytesize} }
     drained.should eq [{7, 4}, {8, 8}]
   end
