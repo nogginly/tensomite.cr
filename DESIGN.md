@@ -964,6 +964,20 @@ Linux container|`-O3`, `finetune`      |22.8 s|3.1 s|3.7 s        |the same: 9.5
 
 In a `--release` build LLVM takes nearly all the time (38 of 40 s in the container, where even hello world takes 11.5 s), and no change reuses anything, since the program is one module. `-O2` in one module is no faster to build (37 s) and is slower to run (4.2 s), so the split into modules, not the optimisation level, is what trades build time for host speed.
 
+**Indexing (Decision EE).** `bench/indexing.cr DEVICE` times ops whose cost depends on how kernels compute offsets, on 4096 × 4096 `F32` matrices (67 MB each), as medians of 20 runs, in milliseconds. The baseline for 64-bit sizes (G-01, #157), taken before any change:
+
+Case                              |M5 Pro `Metal`|M5 Pro `BLAS`|GB10 `CUDA`|GB10 `BLAS`|Container `BLAS`|Container `CPU`
+----------------------------------|--------------|-------------|-----------|-----------|----------------|---------------
+add, dense                        |2.716         |1.583        |1.218      |4.604      |14.795          |14.334         
+add, one side transposed          |2.149         |49.047       |1.572      |40.264     |243.076         |238.747        
+add, a broadcast row              |1.713         |1.137        |0.944      |2.860      |11.863          |11.696         
+sum along rows                    |0.479         |9.242        |0.525      |8.990      |35.102          |35.469         
+sum along columns (strided)       |1.196         |47.855       |0.642      |41.031     |162.714         |150.350        
+gradient of a broadcast (`Unview`)|1.931         |7.847        |1.245      |10.264     |33.432          |37.029         
+matmul 2048³ (512³ on `CPU`)      |7.490         |10.232       |3.068      |23.128     |43.811          |220.209        
+
+The GPUs read strided views at nearly dense speed; the host reads a transposed operand 9 to 31 times slower than a dense one, because each element's offset is computed from its flat index. With the same build, `bench/gpt2_digest.cr` prints `ccf26fbe…` for `CPU` on both machines, `aa253ef0…` for `Metal`, `b5f9bdca…` for `CUDA`, and `496e6937…` and `3d3a9869…` for `BLAS` on the M5 Pro and the GB10: the digests 64-bit sizes must keep. `bench/gpt2.cr`'s auto modes decode at 229.6 tokens/s on `Metal` and 308.9 on `CUDA`, and prefill at 6,512 and 13,093.
+
 ## Current limits
 
 - **Metal matmuls with few output blocks are slower than Accelerate.** A prefill's products with 768 output columns run at about 950 GFLOP/s against Accelerate's 1.5–1.8 TFLOP/s, though prefill as a whole is faster on Metal: 3,684 tokens/s against 2,419 (see "Performance baselines").
