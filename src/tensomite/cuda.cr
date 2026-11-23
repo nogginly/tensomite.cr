@@ -21,19 +21,19 @@ module Tensomite
   class CUDABuffer < HostBuffer
     # The device memory.
     getter pointer : LibCUDA::DevicePtr
-    @copy : Bytes? = nil
+    @copy : Memory? = nil
     @copy_valid = false
     # :nodoc:
     property? writing = false
 
-    def initialize(device : CUDA, @pointer : LibCUDA::DevicePtr, bytesize : Int32)
-      super(device, bytesize, Bytes.empty)
+    def initialize(device : CUDA, @pointer : LibCUDA::DevicePtr, bytesize : Int)
+      super(device, bytesize, Memory.empty)
     end
 
     # Returns the host copy, current: downloaded when the device memory has
     # changed since, except while a host kernel writes this buffer.
-    def bytes : Bytes
-      copy = @copy ||= cuda.host_bytes(bytesize)
+    def memory : Memory
+      copy = @copy ||= cuda.host_memory(bytesize)
       unless @copy_valid || writing?
         cuda.context.download(pointer, copy) unless bytesize == 0
         @copy_valid = true
@@ -42,7 +42,7 @@ module Tensomite
     end
 
     # Returns the host copy if it is current, otherwise `nil`.
-    def current_copy : Bytes?
+    def current_copy : Memory?
       @copy if @copy_valid
     end
 
@@ -336,7 +336,8 @@ module Tensomite
 
     # Returns a buffer of *bytesize* bytes of device memory, from the pool when
     # one is free.
-    def alloc(bytesize : Int32) : Buffer
+    def alloc(bytesize : Int) : Buffer
+      bytesize = bytesize.to_i64
       start = Time.instant
       recycle_retired
       pooled = buffer_pool.take(bytesize)
@@ -352,12 +353,12 @@ module Tensomite
       CUDABuffer.new(self, pointer, bytesize)
     end
 
-    def map(buffer : Buffer) : Bytes?
+    def map(buffer : Buffer) : Memory?
       cuda(buffer)
       nil
     end
 
-    def upload(buffer : Buffer, data : Bytes) : Nil
+    def upload(buffer : Buffer, data : Memory) : Nil
       target = cuda(buffer)
       @uploads += 1
       start = Time.instant
@@ -369,7 +370,7 @@ module Tensomite
       target.device_written
     end
 
-    def download(buffer : Buffer, data : Bytes) : Nil
+    def download(buffer : Buffer, data : Memory) : Nil
       source = cuda(buffer)
       @downloads += 1
       start = Time.instant
@@ -402,7 +403,7 @@ module Tensomite
       start = Time.instant
       # A write keeps the rest of its target, so the host copy must be current
       # before the host kernel writes into it.
-      target.bytes if node.op.try(&.in_place?)
+      target.memory if node.op.try(&.in_place?)
       target.writing = true
       begin
         super
@@ -428,15 +429,15 @@ module Tensomite
     end
 
     # :nodoc:
-    def host_bytes(bytesize : Int32) : Bytes
-      pool.take(bytesize) || Bytes.new(bytesize)
+    def host_memory(bytesize : Index) : Memory
+      pool.take(bytesize) || Memory.allocate(bytesize)
     end
 
     # Takes back the device memory of a collected buffer. Finalizers run on any
     # thread and must never wait, so when the list is busy or full (see
     # `RetiredList`) the memory is freed at once instead, which needs this
     # context current on that thread.
-    protected def retire(pointer : LibCUDA::DevicePtr, bytesize : Int32) : Nil
+    protected def retire(pointer : LibCUDA::DevicePtr, bytesize : Index) : Nil
       return if @retired.push(pointer, bytesize)
       context.free_from_any_thread(pointer)
       @device_bytes.sub(Math.max(bytesize, 4).to_i64)
@@ -788,7 +789,7 @@ module Tensomite
     # Returns device memory of at least *bytesize* bytes for a kernel's partial
     # results, kept between launches: kernels run one after another, so the next
     # launch may reuse it.
-    private def scratch(bytesize : Int32) : LibCUDA::DevicePtr
+    private def scratch(bytesize : Int) : LibCUDA::DevicePtr
       current = @scratch
       if current.nil? || current.bytesize < bytesize
         current = alloc(Math.max(bytesize, 4)).as(CUDABuffer)
@@ -1143,13 +1144,13 @@ module Tensomite
       end
 
       # Copies *bytes* from the host to device memory at *pointer*.
-      def upload(pointer : LibCUDA::DevicePtr, bytes : Bytes) : Nil
+      def upload(pointer : LibCUDA::DevicePtr, bytes : Bytes | Memory) : Nil
         bind
         CUDA.check LibCUDA.cuMemcpyHtoD_v2(pointer, bytes.to_unsafe, bytes.size), "cuMemcpyHtoD"
       end
 
       # Copies device memory at *pointer* into *bytes*, after launched kernels finish.
-      def download(pointer : LibCUDA::DevicePtr, bytes : Bytes) : Nil
+      def download(pointer : LibCUDA::DevicePtr, bytes : Bytes | Memory) : Nil
         bind
         CUDA.check LibCUDA.cuMemcpyDtoH_v2(bytes.to_unsafe, pointer, bytes.size), "cuMemcpyDtoH"
       end

@@ -5,8 +5,8 @@ module Tensomite
     # Returns the shared CPU device.
     class_getter default : CPU { CPU.new }
 
-    def map(buffer : Buffer) : Bytes?
-      own(buffer).bytes
+    def map(buffer : Buffer) : Memory?
+      own(buffer).memory
     end
   end
 end

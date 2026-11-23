@@ -19,7 +19,8 @@ module Tensomite
     #
     # Raises `ShapeError` for a block format and a count that is not a whole
     # number of blocks.
-    def bytes_for(count : Int32) : Int32
+    def bytes_for(count : Int) : Index
+      count = count.to_i64
       case self
       in F32, I32 then count * 4
       in Q8_0, Q4_0, Q4_1

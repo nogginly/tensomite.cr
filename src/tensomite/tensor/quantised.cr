@@ -76,9 +76,8 @@ module Tensomite
 
     # Returns a copy of the bytes of the rows this block-format tensor views.
     protected def block_bytes : Bytes
-      bytes = realize.host_bytes
-      start = dtype.bytes_for(view.offset)
-      bytes[start, dtype.bytes_for(size)].dup
+      memory = realize.host_memory
+      memory[dtype.bytes_for(view.offset), dtype.bytes_for(size)].bytes.dup
     end
   end
 end

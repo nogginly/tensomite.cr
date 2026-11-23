@@ -14,17 +14,17 @@ module Tensomite
     # Returns the number of downloads since creation.
     getter downloads = 0
 
-    def map(buffer : Buffer) : Bytes?
+    def map(buffer : Buffer) : Memory?
       own(buffer)
       nil
     end
 
-    def upload(buffer : Buffer, data : Bytes) : Nil
+    def upload(buffer : Buffer, data : Memory) : Nil
       @uploads += 1
       super
     end
 
-    def download(buffer : Buffer, data : Bytes) : Nil
+    def download(buffer : Buffer, data : Memory) : Nil
       @downloads += 1
       super
     end

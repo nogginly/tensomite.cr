@@ -36,7 +36,7 @@ module Tensomite
       end
       dtype = DType.of(T)
       buffer = device.alloc(dtype.bytes_for(data.size))
-      device.upload(buffer, Slice.new(data.to_unsafe, data.size).to_unsafe_bytes)
+      device.upload(buffer, Memory.new(data.to_unsafe.as(UInt8*), buffer.bytesize))
       new(Node.new(buffer, shape, dtype, device), View.contiguous(shape))
     end
 
@@ -173,10 +173,10 @@ module Tensomite
       unless DType.of(T) == dtype
         raise DTypeError.new("cannot read #{dtype} tensor as #{T}")
       end
-      # Allocates the result first: once `host_bytes` is taken, nothing may
+      # Allocates the result first: once `host_memory` is taken, nothing may
       # allocate, or a collection could recycle the memory while it is read.
       result = Array(T).new(size, T.zero)
-      xs = realize.host_bytes.unsafe_slice_of(T)
+      xs = realize.host_memory.unsafe_slice_of(T)
       return result if size == 0
       if view.dense?
         xs[view.offset, size].copy_to(result.to_unsafe, size)
@@ -202,7 +202,7 @@ module Tensomite
       return Tensor.from_blocks(block_bytes, shape, dtype, device) if dtype.block?
       src = contiguous.realize
       buffer = device.alloc(dtype.bytes_for(src.size))
-      device.upload(buffer, src.host_bytes[0, buffer.bytesize])
+      device.upload(buffer, src.host_memory[0, buffer.bytesize])
       Tensor.new(Node.new(buffer, shape, dtype, device), View.contiguous(shape))
     end
 
@@ -210,10 +210,10 @@ module Tensomite
       new(node, View.contiguous(node.shape))
     end
 
-    # Returns the realised node's bytes in host memory, mapped when the device allows it.
-    protected def host_bytes : Bytes
+    # Returns the realised node's memory on the host, mapped when the device allows it.
+    protected def host_memory : Memory
       buffer = node.buffer!
-      device.map(buffer) || Bytes.new(buffer.bytesize).tap { |host| device.download(buffer, host) }
+      device.map(buffer) || Memory.allocate(buffer.bytesize).tap { |host| device.download(buffer, host) }
     end
 
     # Returns the gradient of the node this tensor views, from *grad* of this

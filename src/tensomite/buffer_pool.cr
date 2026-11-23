@@ -16,7 +16,7 @@ module Tensomite
     # Bytes held now.
     getter held = 0_i64
 
-    @free = {} of Int32 => Array(T)
+    @free = {} of Index => Array(T)
     @lock = Atomic(Bool).new(false)
     @hits = Atomic(Int64).new(0)
     @misses = Atomic(Int64).new(0)
@@ -35,7 +35,7 @@ module Tensomite
     end
 
     # Returns memory of exactly *bytesize* bytes, or `nil` when none is free.
-    def take(bytesize : Int32) : T?
+    def take(bytesize : Index) : T?
       memory = nil
       if lock
         begin
@@ -52,7 +52,7 @@ module Tensomite
 
     # Keeps *memory* of *bytesize* bytes and returns true, or returns false when
     # the pool is busy or would exceed its limit.
-    def give(memory : T, bytesize : Int32) : Bool
+    def give(memory : T, bytesize : Index) : Bool
       return false if bytesize == 0 || !lock
       begin
         return false if @held + bytesize > limit
@@ -85,12 +85,12 @@ module Tensomite
   # frees the memory itself. `#drain` swaps the buffers and yields what the full
   # one holds.
   class RetiredList(T)
-    @filling : Slice({T, Int32})
-    @draining : Slice({T, Int32})
+    @filling : Slice({T, Index})
+    @draining : Slice({T, Index})
 
     def initialize(capacity : Int32 = 16384)
-      @filling = Slice.new(Pointer({T, Int32}).malloc(capacity), capacity)
-      @draining = Slice.new(Pointer({T, Int32}).malloc(capacity), capacity)
+      @filling = Slice.new(Pointer({T, Index}).malloc(capacity), capacity)
+      @draining = Slice.new(Pointer({T, Index}).malloc(capacity), capacity)
     end
 
     @count = 0
@@ -98,7 +98,7 @@ module Tensomite
 
     # Keeps *memory* of *bytesize* bytes and returns true, or returns false when
     # the list is busy or full.
-    def push(memory : T, bytesize : Int32) : Bool
+    def push(memory : T, bytesize : Index) : Bool
       return false unless @lock.compare_and_set(false, true)[1]
       begin
         return false if @count == @filling.size
@@ -112,7 +112,7 @@ module Tensomite
 
     # Yields the memory pushed since the last drain, with its size. Called from
     # the device's own thread only, and never from a finalizer.
-    def drain(& : T, Int32 ->) : Nil
+    def drain(& : T, Index ->) : Nil
       return if @count == 0
       until @lock.compare_and_set(false, true)[1]
         Thread.yield

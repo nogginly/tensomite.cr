@@ -5,10 +5,11 @@ module Tensomite
   # through `#release`.
   abstract class Buffer
     getter device : Device
-    getter bytesize : Int32
+    getter bytesize : Index
     @released = false
 
-    def initialize(@device, @bytesize)
+    def initialize(@device, bytesize : Int)
+      @bytesize = bytesize.to_i64
     end
 
     # Returns whether `#release` has given the memory back.
@@ -38,16 +39,26 @@ module Tensomite
   # return a host view of a buffer through `#map`, which makes transfers optional.
   abstract class Device
     # Returns a new buffer of *bytesize* bytes, contents undefined.
-    abstract def alloc(bytesize : Int32) : Buffer
+    abstract def alloc(bytesize : Int) : Buffer
 
     # Copies *data* from the host into *buffer*.
-    abstract def upload(buffer : Buffer, data : Bytes) : Nil
+    abstract def upload(buffer : Buffer, data : Memory) : Nil
+
+    # :ditto:
+    def upload(buffer : Buffer, data : Bytes) : Nil
+      upload(buffer, Memory.new(data))
+    end
 
     # Copies *buffer* into host memory *data*.
-    abstract def download(buffer : Buffer, data : Bytes) : Nil
+    abstract def download(buffer : Buffer, data : Memory) : Nil
+
+    # :ditto:
+    def download(buffer : Buffer, data : Bytes) : Nil
+      download(buffer, Memory.new(data))
+    end
 
     # Returns a host view of *buffer*, or `nil` when the device memory is not host-visible.
-    abstract def map(buffer : Buffer) : Bytes?
+    abstract def map(buffer : Buffer) : Memory?
 
     # Computes *node* into *output*, a contiguous buffer of `node.bytesize`, reading its sources' buffers.
     abstract def execute(node : Node, output : Buffer) : Nil

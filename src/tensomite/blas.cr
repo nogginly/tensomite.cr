@@ -28,8 +28,8 @@ module Tensomite
     # Returns the shared BLAS device.
     class_getter default : BLAS { BLAS.new }
 
-    def map(buffer : Buffer) : Bytes?
-      own(buffer).bytes
+    def map(buffer : Buffer) : Memory?
+      own(buffer).memory
     end
 
     def shape_invariant? : Bool
@@ -38,7 +38,7 @@ module Tensomite
 
     def execute(node : Node, output : Buffer) : Nil
       if node.op == Op::MatMul && node.dtype.f32?
-        timed(node) { sgemm(node, own(output).bytes.unsafe_slice_of(Float32)) }
+        timed(node) { sgemm(node, own(output).memory.unsafe_slice_of(Float32)) }
       else
         super
       end
