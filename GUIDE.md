@@ -599,4 +599,4 @@ All of them are subclasses of `Tensomite::Error`.
 - **Two dtypes to compute in:** `F32` and `I32`. `F16` and `BF16` weights widen to `F32` as they load, which doubles their memory; quantised weights stay in their block formats, but only `linear` and `gather` read them, and gradients do not pass through them.
 - **Numbers go on the right** of an operator: `x * 2` works, `2 * x` does not.
 - **One device per operation.** Move tensors with `to` first.
-- **A tensor holds at most about 2 GB,** because element counts are `Int32`.
+- **A tensor holds at most 2³¹ − 1 elements,** 8 GiB in `F32`, because element counts are `Int32`. Safetensors and GGUF files can hold larger files, but not yet a single tensor over 2 GiB.
