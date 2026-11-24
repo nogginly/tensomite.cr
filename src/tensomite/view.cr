@@ -205,4 +205,16 @@ module Tensomite
       norm
     end
   end
+
+  # Returns the shape of a GPU block for an `Unview` of *outputs* positions that
+  # each gather *count* elements in chunks of *chunk*: up to 32 adjacent
+  # positions across, so that their reads coalesce, by as many threads down as
+  # the chunks need, within *threads* in all. The block's shape changes which
+  # thread sums which chunk, never the order of the sums, so it never changes
+  # the bits.
+  def self.unview_block(outputs : Int32, count : Int32, chunk : Int32, threads : Int32) : {Int32, Int32}
+    across = outputs.clamp(1, 32)
+    chunks = (count + chunk - 1) // chunk
+    {across, chunks.clamp(1, threads // across)}
+  end
 end

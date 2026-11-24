@@ -464,44 +464,45 @@ kernel void unview_f32(device const float* src [[buffer(0)]],
     dst[p] = acc;
 }
 
-// Unview when each position gathers `count` elements, more than REDUCE_CHUNK:
-// one threadgroup per output position, which folds them as sum_f32 folds a run,
-// so the result has the bits of a Sum of the same elements. Each thread folds
-// whole chunks of REDUCE_CHUNK in logical order, and the first thread folds the
-// chunk results in chunk order.
+// Unview when each position gathers `count` elements, more than REDUCE_CHUNK,
+// folded as sum_f32 folds a run, so the result has the bits of a Sum of the
+// same elements: each chunk of REDUCE_CHUNK summed alone in logical order, and
+// the chunk results folded in chunk order. A threadgroup is `across` output
+// positions wide, adjacent positions in adjacent threads so that their reads
+// coalesce, by `down` threads tall, each folding whole chunks of its position;
+// the first row folds each round's chunk results in order.
 kernel void unview_chunks_f32(device const float* src [[buffer(0)]],
                               device float* dst [[buffer(1)]],
                               constant View& vs [[buffer(2)]],
                               constant View& vv [[buffer(3)]],
                               constant Inverse& inv [[buffer(4)]],
                               constant uint& count [[buffer(5)]],
-                              uint p [[threadgroup_position_in_grid]],
-                              uint t [[thread_position_in_threadgroup]],
-                              uint threads [[threads_per_threadgroup]]) {
+                              constant uint& n [[buffer(6)]],
+                              uint group [[threadgroup_position_in_grid]],
+                              uint2 t [[thread_position_in_threadgroup]],
+                              uint2 size [[threads_per_threadgroup]]) {
     threadgroup float partial[REDUCE_THREADS];
-    int flat = unview_base(vv, inv, p);
-    if (flat < 0) {
-        if (t == 0) dst[p] = 0.0f;
-        return;
-    }
+    uint across = size.x, down = size.y;
+    uint p = group * across + t.x;
+    int flat = p < n ? unview_base(vv, inv, p) : -1;
     uint chunks = (count + REDUCE_CHUNK - 1) / REDUCE_CHUNK;
     float total = 0.0f;
-    for (uint first = 0; first < chunks; first += threads) {
-        uint c = first + t;
+    for (uint first = 0; first < chunks; first += down) {
+        uint c = first + t.y;
         float acc = 0.0f;
-        if (c < chunks) {
+        if (flat >= 0 && c < chunks) {
             uint stop = min(count, (c + 1) * REDUCE_CHUNK);
             for (uint f = c * REDUCE_CHUNK; f < stop; f++) acc = acc + src[offset_of(vs, flat + repeated_offset(inv, f))];
         }
-        partial[t] = acc;
+        partial[t.y * across + t.x] = acc;
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        if (t == 0) {
-            uint n = min(threads, chunks - first);
-            for (uint k = 0; k < n; k++) total = total + partial[k];
+        if (t.y == 0) {
+            uint rows = min(down, chunks - first);
+            for (uint k = 0; k < rows; k++) total = total + partial[k * across + t.x];
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
-    if (t == 0) dst[p] = total;
+    if (t.y == 0 && p < n) dst[p] = flat >= 0 ? total : 0.0f;
 }
 
 // Output element i of a batched matrix product, [..., m, k] by [..., k, n], as a

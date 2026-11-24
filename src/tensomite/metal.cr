@@ -631,8 +631,9 @@ module Tensomite
     end
 
     # Unview: one thread per output position, summing what the view reads from it,
-    # or, when each position gathers more than `REDUCE_CHUNK` elements, one
-    # threadgroup per position, folding them in chunks as `Sum` does.
+    # or, when each position gathers more than `REDUCE_CHUNK` elements, threadgroups
+    # of adjacent positions by threads folding their chunks as `Sum` does (see
+    # `Tensomite.unview_block`).
     # Returns false for a view whose positions are not each read by a regular grid
     # of indices; see `#inverse_args`.
     private def encode_unview(node : Node, output : MetalBuffer) : Bool
@@ -641,8 +642,9 @@ module Tensomite
       src = node.srcs.first
       count = View.repeats(view)
       if count > REDUCE_CHUNK
-        threads = Math.min((count + REDUCE_CHUNK - 1) // REDUCE_CHUNK, REDUCE_THREADS)
-        dispatch_groups("unview_chunks_f32", {node.size, 1}, {threads, 1}, [mtl(src), output.mtl], [view_args(src.view), view_args(view), inverse, u32(count)])
+        across, down = Tensomite.unview_block(node.size, count, REDUCE_CHUNK, REDUCE_THREADS)
+        dispatch_groups("unview_chunks_f32", {(node.size + across - 1) // across, 1}, {across, down}, [mtl(src), output.mtl],
+          [view_args(src.view), view_args(view), inverse, u32(count), u32(node.size)])
       else
         dispatch("unview_f32", node.size, [mtl(src), output.mtl], [view_args(src.view), view_args(view), inverse, u32(node.size)])
       end

@@ -372,38 +372,37 @@ extern "C" __global__ void unview_f32(const float* src, float* dst, View vs, Vie
     dst[p] = acc;
 }
 
-// Unview when each position gathers `count` elements, more than REDUCE_CHUNK:
-// one block per output position, which folds them as sum_f32 folds a run, so
-// the result has the bits of a Sum of the same elements. Each thread folds
-// whole chunks of REDUCE_CHUNK in logical order, and the first thread folds
-// the chunk results in chunk order.
+// Unview when each position gathers `count` elements, more than REDUCE_CHUNK,
+// folded as sum_f32 folds a run, so the result has the bits of a Sum of the
+// same elements: each chunk of REDUCE_CHUNK summed alone in logical order, and
+// the chunk results folded in chunk order. A block is blockDim.x output
+// positions across, adjacent positions in adjacent threads so that their reads
+// coalesce, by blockDim.y threads down, each folding whole chunks of its
+// position; the first row folds each round's chunk results in order.
 extern "C" __global__ void unview_chunks_f32(const float* src, float* dst, View vs, View vv, Inverse inv,
-                                             unsigned int count) {
+                                             unsigned int count, unsigned int n) {
     __shared__ float partial[REDUCE_THREADS];
-    unsigned int p = blockIdx.x, t = threadIdx.x, threads = blockDim.x;
-    int flat = unview_base(vv, inv, p);
-    if (flat < 0) {
-        if (t == 0) dst[p] = 0.0f;
-        return;
-    }
+    unsigned int x = threadIdx.x, y = threadIdx.y, across = blockDim.x, down = blockDim.y;
+    unsigned int p = blockIdx.x * across + x;
+    int flat = p < n ? unview_base(vv, inv, p) : -1;
     unsigned int chunks = (count + REDUCE_CHUNK - 1) / REDUCE_CHUNK;
     float total = 0.0f;
-    for (unsigned int first = 0; first < chunks; first += threads) {
-        unsigned int c = first + t;
+    for (unsigned int first = 0; first < chunks; first += down) {
+        unsigned int c = first + y;
         float acc = 0.0f;
-        if (c < chunks) {
+        if (flat >= 0 && c < chunks) {
             unsigned int stop = min(count, (c + 1) * REDUCE_CHUNK);
             for (unsigned int f = c * REDUCE_CHUNK; f < stop; f++) acc = acc + src[offset_of(vs, flat + repeated_offset(inv, f))];
         }
-        partial[t] = acc;
+        partial[y * across + x] = acc;
         __syncthreads();
-        if (t == 0) {
-            unsigned int n = min(threads, chunks - first);
-            for (unsigned int k = 0; k < n; k++) total = total + partial[k];
+        if (y == 0) {
+            unsigned int rows = min(down, chunks - first);
+            for (unsigned int k = 0; k < rows; k++) total = total + partial[k * across + x];
         }
         __syncthreads();
     }
-    if (t == 0) dst[p] = total;
+    if (y == 0 && p < n) dst[p] = flat >= 0 ? total : 0.0f;
 }
 
 // Output element i of a batched matrix product, [..., m, k] by [..., k, n], as a
