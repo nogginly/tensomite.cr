@@ -478,12 +478,12 @@ kernel void unview_chunks_f32(device const float* src [[buffer(0)]],
                               constant Inverse& inv [[buffer(4)]],
                               constant uint& count [[buffer(5)]],
                               constant uint& n [[buffer(6)]],
-                              uint group [[threadgroup_position_in_grid]],
+                              uint2 group [[threadgroup_position_in_grid]],
                               uint2 t [[thread_position_in_threadgroup]],
                               uint2 size [[threads_per_threadgroup]]) {
     threadgroup float partial[REDUCE_THREADS];
     uint across = size.x, down = size.y;
-    uint p = group * across + t.x;
+    uint p = group.x * across + t.x;
     int flat = p < n ? unview_base(vv, inv, p) : -1;
     uint chunks = (count + REDUCE_CHUNK - 1) / REDUCE_CHUNK;
     float total = 0.0f;
