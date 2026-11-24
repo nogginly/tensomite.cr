@@ -289,6 +289,41 @@ struct Inverse {
     int repeated_step[MAX_DIMS];
 };
 
+// Returns the logical element whose repeated indices are all zero, among those
+// view vv reads from output position p, or -1 when it reads none: step 1 of
+// unview_f32.
+__device__ int unview_base(const View& vv, const Inverse& inv, unsigned int p) {
+    int rem = int(p) - vv.offset;
+    bool hit = rem >= 0;
+    int flat = 0;
+#pragma unroll
+    for (int k = 0; k < MAX_DIMS; k++) {
+        if (k < inv.nstrided && hit) {
+            int at = rem / inv.stride[k];
+            rem -= at * inv.stride[k];
+            hit = at < inv.size[k];
+            flat += at * inv.step[k];
+        }
+    }
+    return hit && rem == 0 ? flat : -1;
+}
+
+// Returns how far repeated element f lies from the first in logical order: f
+// taken apart over the repeated dimensions, last fastest, times their
+// row-major strides.
+__device__ int repeated_offset(const Inverse& inv, unsigned int f) {
+    int offset = 0;
+#pragma unroll
+    for (int k = MAX_DIMS - 1; k >= 0; k--) {
+        if (k < inv.nrepeated) {
+            unsigned int size = inv.repeated_size[k];
+            offset += int(f % size) * inv.repeated_step[k];
+            f /= size;
+        }
+    }
+    return offset;
+}
+
 // Output position p is the sum of the source elements that view vv reads from
 // p, in logical order, as the host's index-order accumulation adds them.
 //
@@ -304,20 +339,9 @@ struct Inverse {
 extern "C" __global__ void unview_f32(const float* src, float* dst, View vs, View vv, Inverse inv, unsigned int n) {
     unsigned int p = thread_index();
     if (p >= n) return;
-    int rem = int(p) - vv.offset;
-    bool hit = rem >= 0;
-    int flat = 0;
-#pragma unroll
-    for (int k = 0; k < MAX_DIMS; k++) {
-        if (k < inv.nstrided && hit) {
-            int at = rem / inv.stride[k];
-            rem -= at * inv.stride[k];
-            hit = at < inv.size[k];
-            flat += at * inv.step[k];
-        }
-    }
+    int flat = unview_base(vv, inv, p);
     float acc = 0.0f;
-    if (hit && rem == 0) {
+    if (flat >= 0) {
         if (inv.nrepeated == 0) {
             acc = src[offset_of(vs, flat)];
         } else if (inv.nrepeated == 1) {
@@ -346,6 +370,39 @@ extern "C" __global__ void unview_f32(const float* src, float* dst, View vs, Vie
         }
     }
     dst[p] = acc;
+}
+
+// Unview when each position gathers `count` elements, more than REDUCE_CHUNK,
+// folded as sum_f32 folds a run, so the result has the bits of a Sum of the
+// same elements: each chunk of REDUCE_CHUNK summed alone in logical order, and
+// the chunk results folded in chunk order. A block is blockDim.x output
+// positions across, adjacent positions in adjacent threads so that their reads
+// coalesce, by blockDim.y threads down, each folding whole chunks of its
+// position; the first row folds each round's chunk results in order.
+extern "C" __global__ void unview_chunks_f32(const float* src, float* dst, View vs, View vv, Inverse inv,
+                                             unsigned int count, unsigned int n) {
+    __shared__ float partial[REDUCE_THREADS];
+    unsigned int x = threadIdx.x, y = threadIdx.y, across = blockDim.x, down = blockDim.y;
+    unsigned int p = blockIdx.x * across + x;
+    int flat = p < n ? unview_base(vv, inv, p) : -1;
+    unsigned int chunks = (count + REDUCE_CHUNK - 1) / REDUCE_CHUNK;
+    float total = 0.0f;
+    for (unsigned int first = 0; first < chunks; first += down) {
+        unsigned int c = first + y;
+        float acc = 0.0f;
+        if (flat >= 0 && c < chunks) {
+            unsigned int stop = min(count, (c + 1) * REDUCE_CHUNK);
+            for (unsigned int f = c * REDUCE_CHUNK; f < stop; f++) acc = acc + src[offset_of(vs, flat + repeated_offset(inv, f))];
+        }
+        partial[y * across + x] = acc;
+        __syncthreads();
+        if (y == 0) {
+            unsigned int rows = min(down, chunks - first);
+            for (unsigned int k = 0; k < rows; k++) total = total + partial[k * across + x];
+        }
+        __syncthreads();
+    }
+    if (y == 0 && p < n) dst[p] = flat >= 0 ? total : 0.0f;
 }
 
 // Output element i of a batched matrix product, [..., m, k] by [..., k, n], as a

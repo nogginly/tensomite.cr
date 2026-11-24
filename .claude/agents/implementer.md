@@ -50,3 +50,4 @@ Crystal cannot `require` an absolute path: a throwaway script that loads tensomi
 - A worktree has no `bin/ameba` of its own: run the main checkout's (`../../../bin/ameba` from the worktree's root, or its absolute path).
 - Work on the worktree's own branch; the branch the brief names may already be checked out in the main checkout, and the reviewer moves the change onto it.
 - A generated Markdown file must close each code fence on a line of its own: `scripts/check_diagrams.sh` passed pages whose closing fence sat on the diagram's last line, so look at the output too.
+- A Metal kernel's position attributes (`thread_position_in_grid`, `threadgroup_position_in_grid`, `thread_position_in_threadgroup`, `threads_per_threadgroup`) must be all scalars or all vectors of one width; the cross-compile and the C++ shim accept a mix, and only the Metal compiler, on macOS CI, refuses it.

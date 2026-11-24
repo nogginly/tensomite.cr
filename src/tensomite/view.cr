@@ -83,6 +83,12 @@ module Tensomite
       views.first.shape.last? || 1
     end
 
+    # Returns how many logical elements of *view* read each position it reads:
+    # the product of the sizes of its dimensions with stride 0.
+    def self.repeats(view : View) : Int32
+      (0...view.ndim).product(1) { |dim| view.strides[dim] == 0 ? view.shape[dim] : 1 }
+    end
+
     # Returns the step between the positions of consecutive elements of a run.
     def run_stride : Int32
       strides.last? || 0
@@ -198,5 +204,17 @@ module Tensomite
       raise ShapeError.new("axis #{axis} out of range for rank #{ndim}") unless 0 <= norm < ndim
       norm
     end
+  end
+
+  # Returns the shape of a GPU block for an `Unview` of *outputs* positions that
+  # each gather *count* elements in chunks of *chunk*: up to 32 adjacent
+  # positions across, so that their reads coalesce, by as many threads down as
+  # the chunks need, within *threads* in all. The block's shape changes which
+  # thread sums which chunk, never the order of the sums, so it never changes
+  # the bits.
+  def self.unview_block(outputs : Int32, count : Int32, chunk : Int32, threads : Int32) : {Int32, Int32}
+    across = outputs.clamp(1, 32)
+    chunks = (count + chunk - 1) // chunk
+    {across, chunks.clamp(1, threads // across)}
   end
 end
