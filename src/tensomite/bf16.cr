@@ -32,11 +32,13 @@ module Tensomite
     end
 
     # Widens bfloat16 values, as *bytes* in little-endian order, into *values*.
-    def self.widen(bytes : Bytes, values : Slice(Float32)) : Nil
-      raise ArgumentError.new("#{bytes.size} bytes do not hold #{values.size} bfloat16 values") unless bytes.size == 2 * values.size
+    def self.widen(bytes : Bytes | Memory, values : Slice(Float32)) : Nil
+      raise ArgumentError.new("#{bytes.size} bytes do not hold #{values.size} bfloat16 values") unless bytes.size == 2_i64 * values.size
+      data = bytes.to_unsafe
       words = values.to_unsafe.as(UInt32*)
       values.size.times do |i|
-        words[i] = (bytes[2 * i].to_u32 | bytes[2 * i + 1].to_u32 << 8) << 16
+        at = 2_i64 * i
+        words[i] = (data[at].to_u32 | data[at + 1].to_u32 << 8) << 16
       end
     end
   end

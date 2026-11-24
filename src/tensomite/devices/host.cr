@@ -98,8 +98,8 @@ module Tensomite
     end
 
     # Returns a buffer over *bytes* without copying; see `HostBuffer`.
-    def adopt(bytes : Bytes, owner : MappedFile) : Buffer
-      HostBuffer.new(self, Memory.new(bytes), owner)
+    def adopt(memory : Memory, owner : MappedFile) : Buffer
+      HostBuffer.new(self, memory, owner)
     end
 
     # Returns *buffer* as a `HostBuffer` of this device; raises `DeviceError` otherwise.
@@ -654,7 +654,7 @@ module Tensomite
         raise ExecutionError.new("index #{id} out of range for #{rows} rows") unless 0 <= id < rows
         id + table.view.offset // width
       end
-      Quant.gather(table.dtype, own(table.node.buffer!).memory.bytes, width, chosen, dst)
+      Quant.gather(table.dtype, own(table.node.buffer!).memory, width, chosen, dst)
     end
 
     # Computes `x · wᵀ` for a block-format weight (see `Quant.matmul`), then adds
@@ -664,7 +664,7 @@ module Tensomite
       n, k = w.shape
       rows = x.size // k
       values = activations(node, x)
-      weights = own(w.node.buffer!).memory.bytes
+      weights = own(w.node.buffer!).memory
       start = w.dtype.bytes_for(w.view.offset)
       Quant.matmul(w.dtype, values, weights[start, w.dtype.bytes_for(w.size)], rows, n, k, dst)
       add_bias(Float32, node, dst)

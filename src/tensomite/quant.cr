@@ -73,12 +73,19 @@ module Tensomite
   module Quant
     extend self
 
-    # Returns *values*, a whole number of blocks, quantised to *dtype*.
+    # Returns *values*, a whole number of blocks, quantised to *dtype*. Raises
+    # `ArgumentError` for 2 GiB or more of blocks; `#quantize_memory` has no
+    # such limit.
     def quantize(dtype : DType, values : Slice(Float32)) : Bytes
-      bytes = Bytes.new(dtype.bytes_for(values.size))
+      quantize_memory(dtype, values).bytes
+    end
+
+    # Returns *values* quantised as `#quantize` does, in memory that may exceed 2 GiB.
+    def quantize_memory(dtype : DType, values : Slice(Float32)) : Memory
+      bytes = Memory.allocate(dtype.bytes_for(values.size))
       (values.size // DType.block_size).times do |block|
         source = values[block * DType.block_size, DType.block_size]
-        target = bytes[block * dtype.block_bytes, dtype.block_bytes]
+        target = bytes[dtype.block_bytes.to_i64 * block, dtype.block_bytes].bytes
         case dtype
         when .q8_0? then quantize_q8_0(source, target)
         when .q4_0? then quantize_q4_0(source, target)
@@ -90,10 +97,11 @@ module Tensomite
     end
 
     # Writes the values of *bytes*, blocks of *dtype*, into *values*.
-    def dequantize(dtype : DType, bytes : Bytes, values : Slice(Float32)) : Nil
+    def dequantize(dtype : DType, bytes : Bytes | Memory, values : Slice(Float32)) : Nil
+      bytes = Memory.new(bytes) if bytes.is_a?(Bytes)
       raise ArgumentError.new("#{bytes.size} bytes do not hold #{values.size} #{dtype} values") unless bytes.size == dtype.bytes_for(values.size)
       (values.size // DType.block_size).times do |block|
-        source = bytes[block * dtype.block_bytes, dtype.block_bytes]
+        source = bytes[dtype.block_bytes.to_i64 * block, dtype.block_bytes].bytes
         target = values[block * DType.block_size, DType.block_size]
         case dtype
         when .q8_0? then dequantize_q8_0(source, target)
@@ -119,18 +127,19 @@ module Tensomite
     #
     # Each output depends only on its own row and column, so the bits do not
     # change with the number of rows.
-    def matmul_reference(dtype : DType, x : Slice(Float32), w : Bytes, rows : Int32, n : Int32, k : Int32, dst : Slice(Float32)) : Nil
+    def matmul_reference(dtype : DType, x : Slice(Float32), w : Bytes | Memory, rows : Int32, n : Int32, k : Int32, dst : Slice(Float32)) : Nil
+      w = Memory.new(w) if w.is_a?(Bytes)
       blocks = k // DType.block_size
       row_bytes = dtype.bytes_for(k)
       scales = Slice(Float32).new(blocks)
       sums = Slice(Float32).new(blocks)
       qs = Slice(Int8).new(k)
-      raise ArgumentError.new("#{w.size} bytes do not hold #{n} rows of #{k} #{dtype} values") unless w.size == n * row_bytes
+      raise ArgumentError.new("#{w.size} bytes do not hold #{n} rows of #{k} #{dtype} values") unless w.size == row_bytes * n
       raise ArgumentError.new("#{x.size} values are not #{rows} rows of #{k}") unless x.size == rows * k && dst.size == rows * n
       rows.times do |row|
         quantize_activations(x[row * k, k], scales, sums, qs, with_sums: dtype.q4_1?)
         n.times do |col|
-          weight = w[col * row_bytes, row_bytes]
+          weight = w[row_bytes * col, row_bytes].bytes
           dst[row * n + col] = case dtype
                                when .q8_0? then dot_q8_0(weight, scales, qs, blocks)
                                when .q4_0? then dot_q4_0(weight, scales, qs, blocks)
@@ -152,21 +161,22 @@ module Tensomite
     #    where the target has it: nibbles are unpacked less 8, so for `Q4_1`
     #    it is `Σ(q - 8)·y + 8·Σy`, the same integer as the reference's
     #    `Σq·y`. The floating-point expressions after it are the reference's.
-    def matmul(dtype : DType, x : Slice(Float32), w : Bytes, rows : Int32, n : Int32, k : Int32, dst : Slice(Float32)) : Nil
+    def matmul(dtype : DType, x : Slice(Float32), w : Bytes | Memory, rows : Int32, n : Int32, k : Int32, dst : Slice(Float32)) : Nil
+      w = Memory.new(w) if w.is_a?(Bytes)
       blocks = k // DType.block_size
       row_bytes = dtype.bytes_for(k)
       scales = Slice(Float32).new(blocks)
       sums = Slice(Float32).new(blocks)
       totals = Slice(Int32).new(blocks)
       qs = Slice(Int8).new(k)
-      raise ArgumentError.new("#{w.size} bytes do not hold #{n} rows of #{k} #{dtype} values") unless w.size == n * row_bytes
+      raise ArgumentError.new("#{w.size} bytes do not hold #{n} rows of #{k} #{dtype} values") unless w.size == row_bytes * n
       raise ArgumentError.new("#{x.size} values are not #{rows} rows of #{k}") unless x.size == rows * k && dst.size == rows * n
       rows.times do |row|
         fast_quantize(x[row * k, k].to_unsafe, scales, sums, totals, qs, with_sums: dtype.q4_1?)
         out = dst[row * n, n]
-        Quant.in_parallel(n, n * row_bytes) do |first, stop|
+        Quant.in_parallel(n, row_bytes * n) do |first, stop|
           first.step(to: stop - 1, by: 2) do |col|
-            w0 = w.to_unsafe + col * row_bytes
+            w0 = w.to_unsafe + row_bytes * col
             w1 = col + 1 < stop ? w0 + row_bytes : w0
             a, b = case dtype
                    when .q8_0? then fast_q8_0(w0, w1, scales, qs, blocks)
@@ -201,8 +211,8 @@ module Tensomite
     # turn by the calling thread and the pool's, otherwise; returns when all
     # have finished. Each index falls in exactly one span, so the results do
     # not depend on the number of threads.
-    protected def self.in_parallel(count : Int32, bytes : Int32, &block : Int32, Int32 ->) : Nil
-      spans = Math.min(threads * SPANS_PER_THREAD, Math.min(count, bytes // PARALLEL_BYTES))
+    protected def self.in_parallel(count : Int32, bytes : Int, &block : Int32, Int32 ->) : Nil
+      spans = Math.min(threads * SPANS_PER_THREAD, Math.min(count.to_i64, bytes.to_i64 // PARALLEL_BYTES).to_i32)
       return block.call(0, count) if spans <= 1 || threads <= 1
       # Builds the `F16` table on this thread, before the workers read it.
       HALVES.size
@@ -414,10 +424,11 @@ module Tensomite
 
     # Writes rows *ids* of *table*, rows of *width* values in *dtype*, into
     # *dst* as `F32`.
-    def gather(dtype : DType, table : Bytes, width : Int32, ids : Enumerable(Int32), dst : Slice(Float32)) : Nil
+    def gather(dtype : DType, table : Bytes | Memory, width : Int32, ids : Enumerable(Int32), dst : Slice(Float32)) : Nil
+      table = Memory.new(table) if table.is_a?(Bytes)
       row_bytes = dtype.bytes_for(width)
       ids.each_with_index do |id, i|
-        dequantize(dtype, table[id * row_bytes, row_bytes], dst[i * width, width])
+        dequantize(dtype, table[row_bytes * id, row_bytes].bytes, dst[i * width, width])
       end
     end
 

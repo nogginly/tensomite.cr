@@ -387,8 +387,8 @@ module Tensomite
 
     # Copies *bytes* to a new buffer in device memory; a file mapping cannot be
     # shared with the GPU.
-    def adopt(bytes : Bytes, owner : MappedFile) : Buffer
-      alloc(bytes.size).tap { |buffer| upload(buffer, bytes) }
+    def adopt(memory : Memory, owner : MappedFile) : Buffer
+      alloc(memory.size).tap { |buffer| upload(buffer, memory) }
     end
 
     # Queues the CUDA kernel for *node*, or, for an op without one, runs the

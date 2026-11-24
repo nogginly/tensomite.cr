@@ -339,8 +339,8 @@ module Tensomite
     end
 
     # Copies *bytes* into a new Metal buffer; a file mapping cannot be handed to the GPU.
-    def adopt(bytes : Bytes, owner : MappedFile) : Buffer
-      alloc(bytes.size).tap { |buffer| upload(buffer, bytes) }
+    def adopt(memory : Memory, owner : MappedFile) : Buffer
+      alloc(memory.size).tap { |buffer| upload(buffer, memory) }
     end
 
     def sync : Nil
