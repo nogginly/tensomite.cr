@@ -79,9 +79,13 @@ extern "C" __global__ void write_rows_f32(const float* src, const int* slots, fl
 // in chunks of REDUCE_CHUNK at fixed offsets, as the Metal kernels do: each
 // thread of an output's block folds whole chunks in index order, and the first
 // thread folds the chunk results in chunk order. A run of one chunk or less is
-// folded by one thread per output, the same arithmetic as a single chunk.
+// folded by one thread per output, the same arithmetic as a single chunk. A sum
+// of more than SPAN_CHUNKS chunks is cut into spans of SPAN_CHUNKS at fixed
+// offsets, each folded so by a block of its own, and fold_spans_f32 then folds
+// the span results in span order.
 #define REDUCE_THREADS 256
 #define REDUCE_CHUNK 16
+#define SPAN_CHUNKS 256
 #define NORM_THREADS 512
 #define ATTENTION_THREADS 128
 #define ATTENTION_POSITIONS 4096
@@ -120,29 +124,42 @@ extern "C" __global__ void max_short_f32(const float* a, float* dst, View v, uns
     dst[row] = acc;
 }
 
-extern "C" __global__ void sum_f32(const float* a, float* dst, View v, unsigned int run, unsigned int walk) {
+// Block b folds span b % spans of row b / spans into dst[b]: the row's result
+// when spans is 1, otherwise a span result for fold_spans_f32.
+extern "C" __global__ void sum_f32(const float* a, float* dst, View v, unsigned int run, unsigned int walk,
+                                   unsigned int spans) {
     __shared__ float partial[REDUCE_THREADS];
-    unsigned int row = blockIdx.x, t = threadIdx.x, threads = blockDim.x;
+    unsigned int row = blockIdx.x / spans, span = blockIdx.x % spans, t = threadIdx.x, threads = blockDim.x;
     unsigned int base = row * run;
     int start = offset_of(v, base);
     unsigned int chunks = (run + REDUCE_CHUNK - 1) / REDUCE_CHUNK;
+    unsigned int lo = span * SPAN_CHUNKS, hi = min(chunks, lo + SPAN_CHUNKS);
     float total = 0.0f;
-    for (unsigned int first = 0; first < chunks; first += threads) {
+    for (unsigned int first = lo; first < hi; first += threads) {
         unsigned int c = first + t;
         float acc = 0.0f;
-        if (c < chunks) {
+        if (c < hi) {
             unsigned int stop = min(run, (c + 1) * REDUCE_CHUNK);
             for (unsigned int s = c * REDUCE_CHUNK; s < stop; s++) acc = acc + a[run_position(v, start, walk, base, s)];
         }
         partial[t] = acc;
         __syncthreads();
         if (t == 0) {
-            unsigned int n = min(threads, chunks - first);
+            unsigned int n = min(threads, hi - first);
             for (unsigned int k = 0; k < n; k++) total = total + partial[k];
         }
         __syncthreads();
     }
-    if (t == 0) dst[row] = total;
+    if (t == 0) dst[blockIdx.x] = total;
+}
+
+// Folds each row's `spans` span results, in span order, from 0: one thread per row.
+extern "C" __global__ void fold_spans_f32(const float* partial, float* dst, unsigned int spans, unsigned int rows) {
+    unsigned int row = thread_index();
+    if (row >= rows) return;
+    float total = 0.0f;
+    for (unsigned int s = 0; s < spans; s++) total = total + partial[row * spans + s];
+    dst[row] = total;
 }
 
 extern "C" __global__ void max_f32(const float* a, float* dst, View v, unsigned int run, unsigned int walk) {
@@ -374,35 +391,40 @@ extern "C" __global__ void unview_f32(const float* src, float* dst, View vs, Vie
 
 // Unview when each position gathers `count` elements, more than REDUCE_CHUNK,
 // folded as sum_f32 folds a run, so the result has the bits of a Sum of the
-// same elements: each chunk of REDUCE_CHUNK summed alone in logical order, and
-// the chunk results folded in chunk order. A block is blockDim.x output
-// positions across, adjacent positions in adjacent threads so that their reads
-// coalesce, by blockDim.y threads down, each folding whole chunks of its
-// position; the first row folds each round's chunk results in order.
-extern "C" __global__ void unview_chunks_f32(const float* src, float* dst, View vs, View vv, Inverse inv,
-                                             unsigned int count, unsigned int n) {
+// same elements: each chunk of REDUCE_CHUNK summed alone in logical order, the
+// chunk results of each span of SPAN_CHUNKS folded in chunk order, and, with
+// more than one span, the span results folded by fold_spans_f32. Block b holds
+// blockDim.x output positions across, those of group b / spans, adjacent
+// positions in adjacent threads so that their reads coalesce, by blockDim.y
+// threads down, each folding whole chunks of span b % spans of its position;
+// the first row folds each round's chunk results in order, into out[p] with
+// one span and out[p * spans + span] with more.
+extern "C" __global__ void unview_chunks_f32(const float* src, float* out, View vs, View vv, Inverse inv,
+                                             unsigned int count, unsigned int n, unsigned int spans) {
     __shared__ float partial[REDUCE_THREADS];
     unsigned int x = threadIdx.x, y = threadIdx.y, across = blockDim.x, down = blockDim.y;
-    unsigned int p = blockIdx.x * across + x;
+    unsigned int group = blockIdx.x / spans, span = blockIdx.x % spans;
+    unsigned int p = group * across + x;
     int flat = p < n ? unview_base(vv, inv, p) : -1;
     unsigned int chunks = (count + REDUCE_CHUNK - 1) / REDUCE_CHUNK;
+    unsigned int lo = span * SPAN_CHUNKS, hi = min(chunks, lo + SPAN_CHUNKS);
     float total = 0.0f;
-    for (unsigned int first = 0; first < chunks; first += down) {
+    for (unsigned int first = lo; first < hi; first += down) {
         unsigned int c = first + y;
         float acc = 0.0f;
-        if (flat >= 0 && c < chunks) {
+        if (flat >= 0 && c < hi) {
             unsigned int stop = min(count, (c + 1) * REDUCE_CHUNK);
             for (unsigned int f = c * REDUCE_CHUNK; f < stop; f++) acc = acc + src[offset_of(vs, flat + repeated_offset(inv, f))];
         }
         partial[y * across + x] = acc;
         __syncthreads();
         if (y == 0) {
-            unsigned int rows = min(down, chunks - first);
+            unsigned int rows = min(down, hi - first);
             for (unsigned int k = 0; k < rows; k++) total = total + partial[k * across + x];
         }
         __syncthreads();
     }
-    if (y == 0 && p < n) dst[p] = flat >= 0 ? total : 0.0f;
+    if (y == 0 && p < n) out[p * spans + span] = flat >= 0 ? total : 0.0f;
 }
 
 // Output element i of a batched matrix product, [..., m, k] by [..., k, n], as a
@@ -763,30 +785,40 @@ __device__ float row_max(const float* a, const View& v, unsigned int base, unsig
     return *shared;
 }
 
-// Returns the sum, in chunk order, of the partial sums each thread puts in
-// `partial` for the chunks it owns, one pass of `threads` chunks at a time.
-#define ROW_SUM(total, chunk_sum)                                              \
-    {                                                                          \
-        unsigned int chunks = (n + REDUCE_CHUNK - 1) / REDUCE_CHUNK;           \
-        total = 0.0f;                                                          \
-        for (unsigned int first = 0; first < chunks; first += threads) {       \
-            unsigned int c = first + t;                                        \
-            float acc = 0.0f;                                                  \
-            if (c < chunks) {                                                  \
-                unsigned int stop = min(n, (c + 1) * REDUCE_CHUNK);            \
+// Returns the sum of the partial sums each thread puts in `partial` for the
+// chunks it owns, one pass of `threads` chunks at a time, in the order a Sum
+// folds them: the chunks of each span of SPAN_CHUNKS in chunk order, then the
+// span results in span order, so a row op's sums have a Sum's bits.
+#define ROW_SUM(total, chunk_sum)                                                    \
+    {                                                                                \
+        unsigned int chunks = (n + REDUCE_CHUNK - 1) / REDUCE_CHUNK;                 \
+        total = 0.0f;                                                                \
+        float span_total = 0.0f;                                                     \
+        for (unsigned int first = 0; first < chunks; first += threads) {             \
+            unsigned int c = first + t;                                              \
+            float acc = 0.0f;                                                        \
+            if (c < chunks) {                                                        \
+                unsigned int stop = min(n, (c + 1) * REDUCE_CHUNK);                  \
                 for (unsigned int s = c * REDUCE_CHUNK; s < stop; s++) { chunk_sum } \
-            }                                                                  \
-            partial[t] = acc;                                                  \
-            __syncthreads();                                                   \
-            if (t == 0) {                                                      \
-                unsigned int m = min(threads, chunks - first);                 \
-                for (unsigned int k = 0; k < m; k++) total = total + partial[k]; \
-            }                                                                  \
-            __syncthreads();                                                   \
-        }                                                                      \
-        if (t == 0) shared = total;                                            \
-        __syncthreads();                                                       \
-        total = shared;                                                        \
+            }                                                                        \
+            partial[t] = acc;                                                        \
+            __syncthreads();                                                         \
+            if (t == 0) {                                                            \
+                unsigned int m = min(threads, chunks - first);                       \
+                for (unsigned int k = 0; k < m; k++) {                               \
+                    span_total = span_total + partial[k];                            \
+                    unsigned int done = first + k + 1;                               \
+                    if (done % SPAN_CHUNKS == 0 || done == chunks) {                 \
+                        total = total + span_total;                                  \
+                        span_total = 0.0f;                                           \
+                    }                                                                \
+                }                                                                    \
+            }                                                                        \
+            __syncthreads();                                                         \
+        }                                                                            \
+        if (t == 0) shared = total;                                                  \
+        __syncthreads();                                                             \
+        total = shared;                                                              \
     }
 
 // Visits every element of the row, thread t taking elements t, t + threads and

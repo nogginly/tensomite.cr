@@ -235,6 +235,21 @@ describe "GPU devices against the CPU" do
         dx.to_a(Float32).zip(host) { |a, e| a.should be_close(e, 1e-5 * Math.max(1f32, e.abs)) }
       end
 
+      it "sums more than 4,096 elements in spans, keeping the bits when padded with zeros" do
+        x = random(gpu, [10_000], 6)
+        padded = Tensor.cat([x, Tensor.zeros([3_000], device: gpu)], 0)
+        padded.sum.to_a(Float32).should eq x.sum.to_a(Float32)
+        x.sum.to_a(Float32).first.should be_close(x.to(CPU.default).sum.to_a(Float32).first, 1e-3)
+      end
+
+      it "sums a row broadcast over 9,000 rows, three spans, with the bits of its own Sum" do
+        x, row = random(gpu, [9_000, 40], 7), random(gpu, [40], 8)
+        dx = Tensomite.grad((x * row).sum, [row]).first
+        dx.to_a(Float32).should eq x.sum(0).to_a(Float32)
+        host = x.to(CPU.default).sum(0).to_a(Float32)
+        dx.to_a(Float32).zip(host) { |a, e| a.should be_close(e, 1e-3) }
+      end
+
       it "sums a sliced scalar broadcast over a large tensor, as a per-layer scalar's gradient" do
         lambdas, x = random(gpu, [8], 4), random(gpu, [256, 64], 5)
         grads = Tensomite.grad((x * lambdas.slice(0, 3, 4)).sum, [lambdas]).first.to_a(Float32)

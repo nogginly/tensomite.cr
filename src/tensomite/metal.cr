@@ -62,7 +62,7 @@ module Tensomite
       Op::Exp => "exp_f32", Op::Log => "log_f32", Op::Tanh => "tanh_f32", Op::Sqrt => "sqrt_f32",
       Op::Copy => "copy_f32",
     }
-    private OTHER    = %w[copy_into_f32 write_rows_f32 sum_f32 max_f32 sum_short_f32 max_short_f32 gather_f32 pick_f32 place_f32 fill_zero_f32 scatter_add_f32 scatter_add_column_f32 unview_f32 unview_chunks_f32 matmul_f32 matmul_split_f32 matmul_tiled_chunks_64x64_f32 matmul_chunk_sums_f32 matmul_tiled_32x32_f32 matmul_tiled_64x64_f32 matmul_tiled_32x64_f32 dropout_f32 softmax_f32 softmax_scaled_f32 softmax_grad_f32 log_softmax_grad_f32 log_softmax_f32 layernorm_f32 layernorm_grad_f32 rmsnorm_f32 rope_f32 attention_f32 attention_ragged_f32 gather_blocks_f32 quantize_rows_q8_f32 block_matmul_f32 block_matmul_lanes_f32 block_matmul_loads_f32 block_matmul_stream_f32 block_matmul_stream_activations_f32]
+    private OTHER    = %w[copy_into_f32 write_rows_f32 sum_f32 fold_spans_f32 max_f32 sum_short_f32 max_short_f32 gather_f32 pick_f32 place_f32 fill_zero_f32 scatter_add_f32 scatter_add_column_f32 unview_f32 unview_chunks_f32 matmul_f32 matmul_split_f32 matmul_tiled_chunks_64x64_f32 matmul_chunk_sums_f32 matmul_tiled_32x32_f32 matmul_tiled_64x64_f32 matmul_tiled_32x64_f32 dropout_f32 softmax_f32 softmax_scaled_f32 softmax_grad_f32 log_softmax_grad_f32 log_softmax_f32 layernorm_f32 layernorm_grad_f32 rmsnorm_f32 rope_f32 attention_f32 attention_ragged_f32 gather_blocks_f32 quantize_rows_q8_f32 block_matmul_f32 block_matmul_lanes_f32 block_matmul_loads_f32 block_matmul_stream_f32 block_matmul_stream_activations_f32]
     private OPTIONAL = %w[matmul_atomic_f32 block_matmul_unordered_f32]
     private COLS     = 32
     # SIMD groups in each threadgroup of a quantised matmul on lanes.
@@ -72,6 +72,7 @@ module Tensomite
     private SLICES            =    8
     private REDUCE_THREADS    =  256
     private REDUCE_CHUNK      =   16
+    private SPAN_CHUNKS       =  256
     private NORM_THREADS      =  512
     # Threads in each threadgroup of fused attention, one per query row.
     private ATTENTION_THREADS = 128
@@ -421,9 +422,14 @@ module Tensomite
       walk = u32(node.axis || view.dense? || view.constant? ? 1 : 0)
       if chunks <= 1
         dispatch("#{name}_short_f32", node.size, [mtl(src), output.mtl], [view_args(view), u32(run), u32(node.size), walk])
+      elsif node.op == Op::Max
+        dispatch_groups("max_f32", {node.size, 1}, {Math.min(chunks, REDUCE_THREADS), 1}, [mtl(src), output.mtl], [view_args(view), u32(run), walk])
       else
-        threads = Math.min(chunks, REDUCE_THREADS)
-        dispatch_groups("#{name}_f32", {node.size, 1}, {threads, 1}, [mtl(src), output.mtl], [view_args(view), u32(run), walk])
+        spans = (chunks + SPAN_CHUNKS - 1) // SPAN_CHUNKS
+        target = spans > 1 ? scratch(4_i64 * node.size * spans).mtl : output.mtl
+        dispatch_groups("sum_f32", {node.size * spans, 1}, {Math.min(chunks, REDUCE_THREADS), 1}, [mtl(src), target],
+          [view_args(view), u32(run), walk, u32(spans)])
+        fold_spans(target, output, spans, node.size)
       end
     end
 
@@ -630,6 +636,13 @@ module Tensomite
         [view_args(src.view), view_args(ids.view), i32(columns), i32(ignore ? 1 : 0), i32(ignore || 0), u32(node.size)])
     end
 
+    # With more than one span, folds *partial*'s span results into *output*, a
+    # thread per row (see `fold_spans_f32`).
+    private def fold_spans(partial : Void*, output : MetalBuffer, spans : Int32, rows : Int32) : Nil
+      return unless spans > 1
+      dispatch("fold_spans_f32", rows, [partial, output.mtl], [u32(spans), u32(rows)])
+    end
+
     # Unview: one thread per output position, summing what the view reads from it,
     # or, when each position gathers more than `REDUCE_CHUNK` elements, threadgroups
     # of adjacent positions by threads folding their chunks as `Sum` does (see
@@ -642,9 +655,12 @@ module Tensomite
       src = node.srcs.first
       count = View.repeats(view)
       if count > REDUCE_CHUNK
-        across, down = Tensomite.unview_block(node.size, count, REDUCE_CHUNK, REDUCE_THREADS)
-        dispatch_groups("unview_chunks_f32", {(node.size + across - 1) // across, 1}, {across, down}, [mtl(src), output.mtl],
-          [view_args(src.view), view_args(view), inverse, u32(count), u32(node.size)])
+        across, down = Tensomite.unview_block(node.size, count, REDUCE_CHUNK, SPAN_CHUNKS, REDUCE_THREADS)
+        spans = ((count + REDUCE_CHUNK - 1) // REDUCE_CHUNK + SPAN_CHUNKS - 1) // SPAN_CHUNKS
+        target = spans > 1 ? scratch(4_i64 * node.size * spans).mtl : output.mtl
+        dispatch_groups("unview_chunks_f32", {(node.size + across - 1) // across * spans, 1}, {across, down}, [mtl(src), target],
+          [view_args(src.view), view_args(view), inverse, u32(count), u32(node.size), u32(spans)])
+        fold_spans(target, output, spans, node.size)
       else
         dispatch("unview_f32", node.size, [mtl(src), output.mtl], [view_args(src.view), view_args(view), inverse, u32(node.size)])
       end
