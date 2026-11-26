@@ -115,6 +115,7 @@ kernel void write_rows_f32(device const float* src [[buffer(0)]],
 // max_short_f32), which is the same arithmetic as a single chunk.
 #define REDUCE_THREADS 256
 #define REDUCE_CHUNK 16
+#define SPAN_CHUNKS 256
 #define NORM_THREADS 512
 #define ATTENTION_THREADS 128
 #define ATTENTION_POSITIONS 4096
@@ -155,35 +156,54 @@ kernel void max_short_f32(device const float* a [[buffer(0)]],
     dst[row] = acc;
 }
 
+// Threadgroup b folds span b % spans of row b / spans into dst[b]: the row's
+// result when spans is 1, otherwise a span result for fold_spans_f32. A sum of
+// more than SPAN_CHUNKS chunks is cut into spans of SPAN_CHUNKS at fixed
+// offsets, and fold_spans_f32 folds the span results in span order.
 kernel void sum_f32(device const float* a [[buffer(0)]],
                     device float* dst [[buffer(1)]],
                     constant View& v [[buffer(2)]],
                     constant uint& run [[buffer(3)]],
                     constant uint& walk [[buffer(4)]],
-                    uint row [[threadgroup_position_in_grid]],
+                    constant uint& spans [[buffer(5)]],
+                    uint block [[threadgroup_position_in_grid]],
                     uint t [[thread_position_in_threadgroup]],
                     uint threads [[threads_per_threadgroup]]) {
     threadgroup float partial[REDUCE_THREADS];
+    uint row = block / spans, span = block % spans;
     uint base = row * run;
     int start = offset_of(v, base);
     uint chunks = (run + REDUCE_CHUNK - 1) / REDUCE_CHUNK;
+    uint lo = span * SPAN_CHUNKS, hi = min(chunks, lo + SPAN_CHUNKS);
     float total = 0.0f;
-    for (uint first = 0; first < chunks; first += threads) {
+    for (uint first = lo; first < hi; first += threads) {
         uint c = first + t;
         float acc = 0.0f;
-        if (c < chunks) {
+        if (c < hi) {
             uint stop = min(run, (c + 1) * REDUCE_CHUNK);
             for (uint s = c * REDUCE_CHUNK; s < stop; s++) acc = acc + a[run_position(v, start, walk, base, s)];
         }
         partial[t] = acc;
         threadgroup_barrier(mem_flags::mem_threadgroup);
         if (t == 0) {
-            uint n = min(threads, chunks - first);
+            uint n = min(threads, hi - first);
             for (uint k = 0; k < n; k++) total = total + partial[k];
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
-    if (t == 0) dst[row] = total;
+    if (t == 0) dst[block] = total;
+}
+
+// Folds each row's `spans` span results, in span order, from 0: one thread per row.
+kernel void fold_spans_f32(device const float* partial [[buffer(0)]],
+                           device float* dst [[buffer(1)]],
+                           constant uint& spans [[buffer(2)]],
+                           constant uint& rows [[buffer(3)]],
+                           uint row [[thread_position_in_grid]]) {
+    if (row >= rows) return;
+    float total = 0.0f;
+    for (uint s = 0; s < spans; s++) total = total + partial[row * spans + s];
+    dst[row] = total;
 }
 
 kernel void max_f32(device const float* a [[buffer(0)]],
@@ -466,43 +486,49 @@ kernel void unview_f32(device const float* src [[buffer(0)]],
 
 // Unview when each position gathers `count` elements, more than REDUCE_CHUNK,
 // folded as sum_f32 folds a run, so the result has the bits of a Sum of the
-// same elements: each chunk of REDUCE_CHUNK summed alone in logical order, and
-// the chunk results folded in chunk order. A threadgroup is `across` output
-// positions wide, adjacent positions in adjacent threads so that their reads
-// coalesce, by `down` threads tall, each folding whole chunks of its position;
-// the first row folds each round's chunk results in order.
+// same elements: each chunk of REDUCE_CHUNK summed alone in logical order, the
+// chunk results of each span of SPAN_CHUNKS folded in chunk order, and, with
+// more than one span, the span results folded by fold_spans_f32. Threadgroup b
+// holds `across` output positions, those of group b / spans, adjacent positions
+// in adjacent threads so that their reads coalesce, by `down` threads, each
+// folding whole chunks of span b % spans of its position; the first row folds
+// each round's chunk results in order, into out[p] with one span and
+// out[p * spans + span] with more.
 kernel void unview_chunks_f32(device const float* src [[buffer(0)]],
-                              device float* dst [[buffer(1)]],
+                              device float* out [[buffer(1)]],
                               constant View& vs [[buffer(2)]],
                               constant View& vv [[buffer(3)]],
                               constant Inverse& inv [[buffer(4)]],
                               constant uint& count [[buffer(5)]],
                               constant uint& n [[buffer(6)]],
-                              uint2 group [[threadgroup_position_in_grid]],
+                              constant uint& spans [[buffer(7)]],
+                              uint2 block [[threadgroup_position_in_grid]],
                               uint2 t [[thread_position_in_threadgroup]],
                               uint2 size [[threads_per_threadgroup]]) {
     threadgroup float partial[REDUCE_THREADS];
     uint across = size.x, down = size.y;
-    uint p = group.x * across + t.x;
+    uint group = block.x / spans, span = block.x % spans;
+    uint p = group * across + t.x;
     int flat = p < n ? unview_base(vv, inv, p) : -1;
     uint chunks = (count + REDUCE_CHUNK - 1) / REDUCE_CHUNK;
+    uint lo = span * SPAN_CHUNKS, hi = min(chunks, lo + SPAN_CHUNKS);
     float total = 0.0f;
-    for (uint first = 0; first < chunks; first += down) {
+    for (uint first = lo; first < hi; first += down) {
         uint c = first + t.y;
         float acc = 0.0f;
-        if (flat >= 0 && c < chunks) {
+        if (flat >= 0 && c < hi) {
             uint stop = min(count, (c + 1) * REDUCE_CHUNK);
             for (uint f = c * REDUCE_CHUNK; f < stop; f++) acc = acc + src[offset_of(vs, flat + repeated_offset(inv, f))];
         }
         partial[t.y * across + t.x] = acc;
         threadgroup_barrier(mem_flags::mem_threadgroup);
         if (t.y == 0) {
-            uint rows = min(down, chunks - first);
+            uint rows = min(down, hi - first);
             for (uint k = 0; k < rows; k++) total = total + partial[k * across + t.x];
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
-    if (t.y == 0 && p < n) dst[p] = flat >= 0 ? total : 0.0f;
+    if (t.y == 0 && p < n) out[p * spans + span] = flat >= 0 ? total : 0.0f;
 }
 
 // Output element i of a batched matrix product, [..., m, k] by [..., k, n], as a
@@ -1260,30 +1286,40 @@ static float row_max(device const float* a, constant View& v, uint base, uint n,
     return *shared;
 }
 
-// Returns the sum, in chunk order, of the partial sums each thread puts in
-// `partial` for the chunks it owns, one pass of `threads` chunks at a time.
-#define ROW_SUM(total, chunk_sum)                                              \
-    {                                                                          \
-        uint chunks = (n + REDUCE_CHUNK - 1) / REDUCE_CHUNK;                   \
-        total = 0.0f;                                                          \
-        for (uint first = 0; first < chunks; first += threads) {               \
-            uint c = first + t;                                                \
-            float acc = 0.0f;                                                  \
-            if (c < chunks) {                                                  \
-                uint stop = min(n, (c + 1) * REDUCE_CHUNK);                    \
-                for (uint s = c * REDUCE_CHUNK; s < stop; s++) { chunk_sum }   \
-            }                                                                  \
-            partial[t] = acc;                                                  \
-            threadgroup_barrier(mem_flags::mem_threadgroup);                   \
-            if (t == 0) {                                                      \
-                uint m = min(threads, chunks - first);                         \
-                for (uint k = 0; k < m; k++) total = total + partial[k];       \
-            }                                                                  \
-            threadgroup_barrier(mem_flags::mem_threadgroup);                   \
-        }                                                                      \
-        if (t == 0) shared = total;                                           \
-        threadgroup_barrier(mem_flags::mem_threadgroup);                       \
-        total = shared;                                                       \
+// Returns the sum of the partial sums each thread puts in `partial` for the
+// chunks it owns, one pass of `threads` chunks at a time, in the order a Sum
+// folds them: the chunks of each span of SPAN_CHUNKS in chunk order, then the
+// span results in span order, so a row op's sums have a Sum's bits.
+#define ROW_SUM(total, chunk_sum)                                            \
+    {                                                                        \
+        uint chunks = (n + REDUCE_CHUNK - 1) / REDUCE_CHUNK;                 \
+        total = 0.0f;                                                        \
+        float span_total = 0.0f;                                             \
+        for (uint first = 0; first < chunks; first += threads) {             \
+            uint c = first + t;                                              \
+            float acc = 0.0f;                                                \
+            if (c < chunks) {                                                \
+                uint stop = min(n, (c + 1) * REDUCE_CHUNK);                  \
+                for (uint s = c * REDUCE_CHUNK; s < stop; s++) { chunk_sum } \
+            }                                                                \
+            partial[t] = acc;                                                \
+            threadgroup_barrier(mem_flags::mem_threadgroup);                 \
+            if (t == 0) {                                                    \
+                uint m = min(threads, chunks - first);                       \
+                for (uint k = 0; k < m; k++) {                               \
+                    span_total = span_total + partial[k];                    \
+                    uint done = first + k + 1;                               \
+                    if (done % SPAN_CHUNKS == 0 || done == chunks) {         \
+                        total = total + span_total;                          \
+                        span_total = 0.0f;                                   \
+                    }                                                        \
+                }                                                            \
+            }                                                                \
+            threadgroup_barrier(mem_flags::mem_threadgroup);                 \
+        }                                                                    \
+        if (t == 0) shared = total;                                          \
+        threadgroup_barrier(mem_flags::mem_threadgroup);                     \
+        total = shared;                                                      \
     }
 
 // Visits every element of the chunks this thread owns.

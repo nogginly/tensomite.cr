@@ -95,6 +95,7 @@ module Tensomite
     private MAX_DIMS       =   8
     private REDUCE_THREADS = 256
     private REDUCE_CHUNK   =  16
+    private SPAN_CHUNKS    = 256
     private NORM_THREADS   = 512
     # Threads in each block of fused attention, one block per query row.
     private ATTENTION_THREADS = 128
@@ -576,9 +577,15 @@ module Tensomite
       walk = (node.axis || view.dense? || view.constant? ? 1 : 0).to_u32
       if chunks <= 1
         run(kernels["#{name}_short_f32"], node.size, pointer(src), output.pointer, view_args(view), run.to_u32, node.size.to_u32, walk)
-      elsif node.size > 0
-        context.launch(kernels["#{name}_f32"], node.size, Math.min(chunks, REDUCE_THREADS),
-          pointer(src), output.pointer, view_args(view), run.to_u32, walk)
+      elsif node.op == Op::Max
+        context.launch(kernels["max_f32"], node.size, Math.min(chunks, REDUCE_THREADS),
+          pointer(src), output.pointer, view_args(view), run.to_u32, walk) if node.size > 0
+      else
+        spans = (chunks + SPAN_CHUNKS - 1) // SPAN_CHUNKS
+        target = spans > 1 ? scratch(4_i64 * node.size * spans) : output.pointer
+        context.launch(kernels["sum_f32"], node.size * spans, Math.min(chunks, REDUCE_THREADS),
+          pointer(src), target, view_args(view), run.to_u32, walk, spans.to_u32) if node.size > 0
+        fold_spans(kernels, target, output, spans, node.size)
       end
     end
 
@@ -644,6 +651,13 @@ module Tensomite
         columns, ignore ? 1 : 0, ignore || 0, node.size.to_u32)
     end
 
+    # With more than one span, folds *partial*'s span results into *output*, a
+    # thread per row (see `fold_spans_f32`).
+    private def fold_spans(kernels : Kernels, partial : LibCUDA::DevicePtr, output : CUDABuffer, spans : Int32, rows : Int32) : Nil
+      return unless spans > 1
+      run(kernels["fold_spans_f32"], rows, partial, output.pointer, spans.to_u32, rows.to_u32)
+    end
+
     # Unview: one thread per output position, summing what the view reads from it,
     # or, when each position gathers more than `REDUCE_CHUNK` elements, blocks of
     # adjacent positions by threads folding their chunks as `Sum` does (see
@@ -656,9 +670,12 @@ module Tensomite
       src = node.srcs.first
       count = View.repeats(view)
       if count > REDUCE_CHUNK
-        across, down = Tensomite.unview_block(node.size, count, REDUCE_CHUNK, REDUCE_THREADS)
-        context.launch(kernels["unview_chunks_f32"], {(node.size + across - 1) // across, 1, 1}, {across, down},
-          pointer(src), output.pointer, view_args(src.view), view_args(view), inverse, count.to_u32, node.size.to_u32) if node.size > 0
+        across, down = Tensomite.unview_block(node.size, count, REDUCE_CHUNK, SPAN_CHUNKS, REDUCE_THREADS)
+        spans = ((count + REDUCE_CHUNK - 1) // REDUCE_CHUNK + SPAN_CHUNKS - 1) // SPAN_CHUNKS
+        target = spans > 1 ? scratch(4_i64 * node.size * spans) : output.pointer
+        context.launch(kernels["unview_chunks_f32"], {(node.size + across - 1) // across * spans, 1, 1}, {across, down},
+          pointer(src), target, view_args(src.view), view_args(view), inverse, count.to_u32, node.size.to_u32, spans.to_u32) if node.size > 0
+        fold_spans(kernels, target, output, spans, node.size)
       else
         run(kernels["unview_f32"], node.size, pointer(src), output.pointer, view_args(src.view), view_args(view), inverse, node.size.to_u32)
       end
