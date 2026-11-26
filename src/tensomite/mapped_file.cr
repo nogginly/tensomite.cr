@@ -26,6 +26,14 @@ module Tensomite
       Bytes.new(pointer + offset, length, read_only: true)
     end
 
+    # Returns the *length* bytes at *offset*, without copying, however many.
+    def memory(offset : Int64, length : Int64) : Memory
+      unless 0 <= offset && 0 <= length && offset + length <= size
+        raise Error.new("#{path}: bytes #{offset}...#{offset + length} lie outside #{size}")
+      end
+      Memory.new(pointer + offset, length)
+    end
+
     def finalize
       LibC.munmap(@pointer.as(Void*), @size)
     end

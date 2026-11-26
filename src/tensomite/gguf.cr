@@ -111,18 +111,16 @@ module Tensomite
     # block format; raises `KeyError` if absent.
     def [](name : String, device : Device = CPU.default) : Tensor
       entry = entries[name]
+      count = entry.shape.product(1_i64)
+      raise Error.new("#{name}: #{count} elements is over the limit of #{Int32::MAX} for one tensor") if count > Int32::MAX
+      bytes = @mapping.memory(entry.offset, entry.bytesize)
       if entry.kind.quantised?
-        raise Error.new("#{name}: #{entry.bytesize} bytes is over the 2 GiB limit for one tensor") if entry.bytesize > Int32::MAX
-        bytes = @mapping.bytes(entry.offset, entry.bytesize.to_i32)
         buffer = device.is_a?(HostDevice) ? device.adopt(bytes, @mapping) : device.alloc(bytes.size).tap { |buf| device.upload(buf, bytes) }
         return Tensor.new(Node.new(buffer, entry.shape, entry.kind.dtype, device), View.contiguous(entry.shape))
       end
-      count = entry.shape.product(1_i64)
-      raise Error.new("#{name}: #{count * 4} bytes is over the 2 GiB limit for one tensor") if count * 4 > Int32::MAX
-      bytes = @mapping.bytes(entry.offset, entry.bytesize.to_i32)
       buffer =
         if entry.kind.f32?
-          if device.is_a?(HostDevice) && bytes.to_unsafe.address % 4 == 0
+          if device.is_a?(HostDevice) && bytes.pointer.address % 4 == 0
             device.adopt(bytes, @mapping)
           else
             device.alloc(bytes.size).tap { |buf| device.upload(buf, bytes) }
@@ -130,7 +128,7 @@ module Tensomite
         else
           values = Slice(Float32).new(count.to_i32)
           entry.kind.f16? ? F16.widen(bytes, values) : BF16.widen(bytes, values)
-          device.alloc(values.bytesize).tap { |buf| device.upload(buf, values.to_unsafe_bytes) }
+          device.alloc(4_i64 * count).tap { |buf| device.upload(buf, Memory.new(values.to_unsafe.as(UInt8*), 4_i64 * count)) }
         end
       Tensor.new(Node.new(buffer, entry.shape, DType::F32, device), View.contiguous(entry.shape))
     end
@@ -138,7 +136,7 @@ module Tensomite
     # Returns the raw bytes of tensor *name*, without copying.
     def bytes(name : String) : Bytes
       entry = entries[name]
-      @mapping.bytes(entry.offset, entry.bytesize.to_i32)
+      @mapping.memory(entry.offset, entry.bytesize).bytes
     end
 
     # Writes *tensors*, by name and in order, and *metadata* to a GGUF file
@@ -180,7 +178,7 @@ module Tensomite
           end
           writer.pad(ALIGNMENT)
           tensors.each_value do |tensor|
-            writer.raw(tensor.bytes)
+            writer.raw(tensor.memory)
             writer.pad(ALIGNMENT)
           end
         end
@@ -233,9 +231,9 @@ module Tensomite
         payload(key, value)
       end
 
-      def raw(bytes : Bytes) : Nil
-        @io.write(bytes)
-        @position += bytes.size
+      def raw(memory : Memory) : Nil
+        memory.write_to(@io)
+        @position += memory.size
       end
 
       # Writes zero bytes up to the next multiple of *alignment*.

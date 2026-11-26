@@ -72,6 +72,17 @@ module Tensomite
       pointer.copy_to(target.pointer, size)
     end
 
+    # Writes the run to *io*, in pieces small enough for `Bytes`.
+    def write_to(io : IO) : Nil
+      piece = 1_i64 << 30
+      start = 0_i64
+      while start < size
+        count = Math.min(piece, size - start)
+        io.write(Bytes.new(pointer + start, count.to_i32))
+        start += count
+      end
+    end
+
     # Sets every byte to *value*.
     def fill(value : UInt8) : self
       Intrinsics.memset(pointer.as(Void*), value, size.to_u64, false) unless empty?

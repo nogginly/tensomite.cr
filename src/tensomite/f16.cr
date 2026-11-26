@@ -57,10 +57,12 @@ module Tensomite
     end
 
     # Widens halves, as *bytes* in little-endian order, into *values*.
-    def self.widen(bytes : Bytes, values : Slice(Float32)) : Nil
-      raise ArgumentError.new("#{bytes.size} bytes do not hold #{values.size} halves") unless bytes.size == 2 * values.size
+    def self.widen(bytes : Bytes | Memory, values : Slice(Float32)) : Nil
+      raise ArgumentError.new("#{bytes.size} bytes do not hold #{values.size} halves") unless bytes.size == 2_i64 * values.size
+      data = bytes.to_unsafe
       values.size.times do |i|
-        values[i] = from_bits(bytes[2 * i].to_u16 | bytes[2 * i + 1].to_u16 << 8).to_f32
+        at = 2_i64 * i
+        values[i] = from_bits(data[at].to_u16 | data[at + 1].to_u16 << 8).to_f32
       end
     end
   end
