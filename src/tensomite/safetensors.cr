@@ -94,7 +94,7 @@ module Tensomite
         File.open(temp, "w") do |file|
           file.write_bytes(header.bytesize.to_u64, IO::ByteFormat::LittleEndian)
           file << header
-          tensors.each_value { |tensor| file.write(contents(tensor)) }
+          tensors.each_value { |tensor| contents(tensor).write_to(file) }
         end
         File.rename(temp, path)
       ensure
@@ -103,13 +103,9 @@ module Tensomite
     end
 
     # Returns *tensor*'s values in row-major order, as bytes.
-    private def self.contents(tensor : Tensor) : Bytes
-      case tensor.dtype
-      in .f32? then tensor.to_a(Float32).to_unsafe.to_slice(tensor.size).to_unsafe_bytes
-      in .i32? then tensor.to_a(Int32).to_unsafe.to_slice(tensor.size).to_unsafe_bytes
-      in .q8_0?, .q4_0?, .q4_1?
-        raise DTypeError.new("safetensors has no #{tensor.dtype}; save the model as F32")
-      end
+    private def self.contents(tensor : Tensor) : Memory
+      raise DTypeError.new("safetensors has no #{tensor.dtype}; save the model as F32") if tensor.dtype.block?
+      tensor.memory
     end
 
     # Returns the names of all tensors, in file order.
@@ -125,15 +121,15 @@ module Tensomite
     def [](name : String, device : Device = CPU.default) : Tensor
       entry = entries[name]
       length = entry.stop - entry.start
-      loaded = entry.widened? ? entry.shape.product(1_i64) * 4 : length
-      raise Error.new("#{name}: #{loaded} bytes is over the 2 GiB limit for one tensor") if loaded > Int32::MAX
-      bytes = @mapping.bytes(@data_start + entry.start, length.to_i32)
+      count = entry.shape.product(1_i64)
+      raise Error.new("#{name}: #{count} elements is over the limit of #{Int32::MAX} for one tensor") if count > Int32::MAX
+      bytes = @mapping.memory(@data_start + entry.start, length)
       buffer =
         if entry.widened?
-          values = Slice(Float32).new(entry.shape.product(1))
+          values = Slice(Float32).new(count.to_i32)
           entry.stored == "F16" ? F16.widen(bytes, values) : BF16.widen(bytes, values)
-          device.alloc(values.bytesize).tap { |buf| device.upload(buf, values.to_unsafe_bytes) }
-        elsif device.is_a?(HostDevice) && bytes.to_unsafe.address % 4 == 0
+          device.alloc(4_i64 * count).tap { |buf| device.upload(buf, Memory.new(values.to_unsafe.as(UInt8*), 4_i64 * count)) }
+        elsif device.is_a?(HostDevice) && bytes.pointer.address % 4 == 0
           device.adopt(bytes, @mapping)
         else
           device.alloc(bytes.size).tap { |buf| device.upload(buf, bytes) }

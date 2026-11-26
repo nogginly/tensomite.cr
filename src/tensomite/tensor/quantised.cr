@@ -15,7 +15,7 @@ module Tensomite
         raise ShapeError.new("quantize needs rows of whole blocks of #{DType.block_size}, not #{shape}")
       end
       values = to_a(Float32)
-      Tensor.from_blocks(Quant.quantize(dtype, Slice.new(values.to_unsafe, values.size)), shape, dtype, device)
+      Tensor.from_blocks(Quant.quantize_memory(dtype, Slice.new(values.to_unsafe, values.size)), shape, dtype, device)
     end
 
     # Returns this block-format tensor's values as a new realised `F32` leaf on
@@ -34,10 +34,10 @@ module Tensomite
       rows, width = shape[0], shape[1..].product(1)
       row_bytes = dtype.bytes_for(width)
       source = block_bytes
-      bytes = Bytes.new(order.size * row_bytes)
+      bytes = Memory.allocate(row_bytes * order.size)
       order.each_with_index do |row, i|
         raise IndexError.new("row #{row} of #{rows}") unless 0 <= row < rows
-        source[row * row_bytes, row_bytes].copy_to(bytes[i * row_bytes, row_bytes])
+        source[row_bytes * row, row_bytes].copy_to(bytes[row_bytes * i, row_bytes])
       end
       Tensor.from_blocks(bytes, [order.size] + shape[1..], dtype, device)
     end
@@ -49,14 +49,20 @@ module Tensomite
       unless tensors.all? { |tensor| tensor.dtype == first.dtype && tensor.ndim == 2 && tensor.shape[1] == first.shape[1] }
         raise ShapeError.new("cat_rows needs 2-D tensors of one dtype and width")
       end
-      bytes = IO::Memory.new
-      tensors.each { |tensor| bytes.write(tensor.block_bytes) }
-      from_blocks(bytes.to_slice, [tensors.sum(&.shape[0]), first.shape[1]], first.dtype, first.device)
+      parts = tensors.map(&.block_bytes)
+      bytes = Memory.allocate(parts.sum(&.size))
+      start = 0_i64
+      parts.each do |part|
+        part.copy_to(bytes[start, part.size])
+        start += part.size
+      end
+      from_blocks(bytes, [tensors.sum(&.shape[0]), first.shape[1]], first.dtype, first.device)
     end
 
     # Returns a realised leaf of *dtype*, a block format, holding *bytes*, its
     # blocks row by row.
-    def self.from_blocks(bytes : Bytes, shape : Array(Int32), dtype : DType, device : Device = CPU.default) : Tensor
+    def self.from_blocks(bytes : Bytes | Memory, shape : Array(Int32), dtype : DType, device : Device = CPU.default) : Tensor
+      bytes = Memory.new(bytes) if bytes.is_a?(Bytes)
       unless bytes.size == dtype.bytes_for(shape.product(1))
         raise ShapeError.new("#{bytes.size} bytes do not hold #{dtype} #{shape}")
       end
@@ -67,17 +73,25 @@ module Tensomite
 
     # Returns this tensor's data in row-major order as a copy of its bytes:
     # each element's for `F32` and `I32`, and each block's for a block format,
-    # as `Tensor.from_blocks` takes them.
+    # as `Tensor.from_blocks` takes them. Raises `ArgumentError` for 2 GiB or
+    # more; `#memory` has no such limit.
     def bytes : Bytes
+      memory.bytes
+    end
+
+    # Returns a copy of this tensor's data in row-major order, as `#bytes` does,
+    # in memory that may exceed 2 GiB.
+    def memory : Memory
       return block_bytes if dtype.block?
-      return to_a(Float32).to_unsafe.to_slice(size).to_unsafe_bytes.dup if dtype.f32?
-      to_a(Int32).to_unsafe.to_slice(size).to_unsafe_bytes.dup
+      dense = contiguous.realize
+      source = dense.host_memory[dtype.bytes_for(dense.view.offset), dtype.bytes_for(size)]
+      Memory.allocate(source.size).tap { |copy| source.copy_to(copy) }
     end
 
     # Returns a copy of the bytes of the rows this block-format tensor views.
-    protected def block_bytes : Bytes
-      memory = realize.host_memory
-      memory[dtype.bytes_for(view.offset), dtype.bytes_for(size)].bytes.dup
+    protected def block_bytes : Memory
+      source = realize.host_memory[dtype.bytes_for(view.offset), dtype.bytes_for(size)]
+      Memory.allocate(source.size).tap { |copy| source.copy_to(copy) }
     end
   end
 end
