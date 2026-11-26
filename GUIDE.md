@@ -390,6 +390,15 @@ Tensor.from([1f32], [1]).to(sim).device.class             # => Tensomite::SimDis
 
 Use each device's shared instance, such as `BLAS.default`, `Metal.default` or `CUDA.default`, rather than creating new ones. `realize` waits for the device to finish, which on a GPU leaves it idle while the host prepares the next piece of work; `Tensor.realize([a, b, c])` computes several tensors and waits once, as an optimizer's `step` does for the loss, its state and every update. Building with CUDA needs the NVIDIA driver and NVRTC, NVIDIA's runtime compiler; see "Working on the CUDA device" in `DEVELOPMENT.md`. Results repeat exactly from run to run on every device. Different devices may differ in the last bits of a result, because they add numbers in different orders.
 
+**Memory in use.** Every device counts the bytes its live buffers hold, and the most they have held, as PyTorch's `memory_allocated` and `max_memory_allocated` do. Memory a device keeps in its pool for reuse is not counted, nor are tensors mapped from a file. The peak includes intermediates that live only inside one `realize`.
+
+```crystal
+device.reset_peak
+optimizer.step(loss)
+device.peak_live_bytes / 2**20   # the step's high-water mark, in MiB
+device.live_bytes                # what is held now
+```
+
 ## Fused kernels
 
 Each operation is a separate pass over memory. `Tensomite.kernel` compiles a whole elementwise expression into one kernel, for the CPU and the GPU, with its gradients worked out at compile time:

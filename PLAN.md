@@ -310,6 +310,7 @@ Recorded in full, with their reasoning and measurements, in [`DECISIONS.md`](DEC
 - [EF](DECISIONS.md#decision-ef): element counts past 2³¹, deferred (decided).
 - [EG](DECISIONS.md#decision-eg): a broadcast's gradient in chunks on the GPUs (decided).
 - [EH](DECISIONS.md#decision-eh): long sums in spans on the GPUs (decided).
+- [EI](DECISIONS.md#decision-ei): a device memory high-water mark (decided).
 
 ## Risks
 
