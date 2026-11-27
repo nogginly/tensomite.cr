@@ -9,9 +9,10 @@ module Tensomite
       @memory = Memory.allocate(bytesize)
     end
 
-    # Wraps part of a file mapping without copying; the buffer keeps *owner* alive.
+    # Wraps part of a file mapping without copying; the buffer keeps *owner*
+    # alive, and does not count in `Device#live_bytes`.
     def initialize(device : Device, @memory : Memory, @owner : MappedFile)
-      super(device, @memory.size)
+      super(device, @memory.size, counted: false)
     end
 
     # Wraps *memory*, allocated for *device* or taken from its pool, or the
